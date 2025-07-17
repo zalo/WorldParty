@@ -41,7 +41,7 @@ export default class Main {
         /** @type {PartySocket} - The connection object */
         this.conn = new PartySocket({
             // @ts-expect-error This should be typed as a global string
-            host: window.location.host.includes("github.io") ? "https://worldparty.zalo.partykit.dev" : "http://127.0.0.1:1999",//PARTYKIT_HOST,
+            host: window.location.host.includes("github.io") ? "https://worldparty.zalo.partykit.dev" : "http://127.0.0.1:1999",
             room: this.curRoom,
         });
 
