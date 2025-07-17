@@ -5,6 +5,7 @@ import { TransformControls } from '../node_modules/three/examples/jsm/controls/T
 import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
 const { MeshoptDecoder } = await import( '../node_modules/three/examples/jsm/libs/meshopt_decoder.module.js' );
 import { PlayerController } from './PlayerController.js';
+import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
 
 /** The fundamental set up and animation structures for Simulation */
 export default class Main {
@@ -26,7 +27,7 @@ export default class Main {
 
         // Configure Settings
         this.simulationParams = {
-            firstPerson: false,
+            firstPerson: true,
 
             displayCollider: false,
             displayBVH: false,
@@ -36,9 +37,7 @@ export default class Main {
             physicsSteps: 5,
 
             //reset: this.player.reset.bind(this),
-        };
-
-        this.loadColliderEnvironment();
+        };        
 
         this.gui = new GUI();
         this.gui.add( this.simulationParams, 'firstPerson' ).onChange( v => {
@@ -76,35 +75,68 @@ export default class Main {
         this.visualizer = new THREE.Line3();
         this.controls = this.world.controls;
 
-        // Create a plane to render the raytraced shader material
-        this.planeGeometry = new THREE.BoxGeometry( 1.0, 1.0, 1.0 );
-        this.mesh = new THREE.Mesh( this.planeGeometry, this.raytracedShaderMaterial );
-        this.world.scene.add( this.mesh );
+        this.evaluator = new Evaluator();
 
-        // character
+        // Create a plane to render the raytraced shader material
+        this.planeGeometry = new THREE.BoxGeometry( 100.0, 100.0, 100.0 );
+        this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
+        this.mesh = new Brush( this.planeGeometry, this.defaultMaterial );
+        this.mesh.receiveShadow = true;
+        this.mesh.position.set( 0, - 50.0, 0 );
+        this.mesh.updateMatrixWorld( true );
+
+        // Create the player controller
         this.player = new PlayerController(this.controls, this.world.camera, this.simulationParams);
         this.world.scene.add( this.player );
         this.player.reset();
+
+        this.brush2 = new Brush( new THREE.BoxGeometry(), this.defaultMaterial );
+        this.brush2.position.y = -0.5;
+        this.brush2.updateMatrixWorld();
+        this.world.scene.add( this.brush2 );
+
+        this.world.scene.add( this.mesh );
+
+        //this.loadColliderEnvironment();
+        this.updateEnvironment( this.mesh );
+
+        window.addEventListener('keydown', (e) => {
+            switch (e.code) {
+                case 'KeyE':
+                    this.world.scene.remove(this.mesh);
+                    this.mesh = this.evaluator.evaluate( this.mesh, this.brush2, ADDITION );
+                    this.updateEnvironment( this.mesh );
+                    this.world.scene.add( this.mesh );
+                    break;
+            }
+        });
     }
 
     loadColliderEnvironment() {
         let loader = new GLTFLoader();
         loader.setMeshoptDecoder( MeshoptDecoder );
-        loader.load( '../assets/small_scene2.glb', res => {
-                let gltfScene = res.scene;
-                gltfScene.scale.setScalar( .01 );
-
-                new THREE.Box3().setFromObject( gltfScene ).getCenter( gltfScene.position ).negate();
-                gltfScene.updateMatrixWorld( true );
-
-                this.environment = gltfScene;
-
-                this.collider = this.player.bakeCollisionGeometry( this.environment );
-                this.visualizer = this.collider.helper;
-                this.world.scene.add( this.visualizer );
-                this.world.scene.add( this.collider );
+        loader.load( '../assets/small_scene2.glb', gltf => {
+                gltf.scene.scale.setScalar( .01 );
+                new THREE.Box3().setFromObject( gltf.scene ).getCenter( gltf.scene.position ).negate();
+                gltf.scene.position.x -= 15.75;
+                gltf.scene.position.y -= -3;
+                gltf.scene.position.z -= 30;
+                gltf.scene.updateMatrixWorld( true );
+                this.updateEnvironment( gltf.scene );
                 this.world.scene.add( this.environment );
             } );
+    }
+
+    updateEnvironment( environment ) {
+        if(this.collider) {
+            this.world.scene.remove( this.collider );
+            this.world.scene.remove( this.visualizer );
+        }
+        this.environment = environment;
+        this.collider = this.player.bakeCollisionGeometry( this.environment );
+        this.visualizer = this.collider.helper;
+        this.world.scene.add( this.visualizer );
+        this.world.scene.add( this.collider );
     }
 
     /** Update the simulation */
@@ -118,6 +150,14 @@ export default class Main {
         }
     
         this.world.controls.update();
+
+        // Cast a ray against the environment collider and place the brush2 there
+        this.hitPoint = this.player.raycastAgainstCollider(this.player.position, new THREE.Vector3().copy(this.player.position).sub(this.world.camera.position).normalize());
+        if (this.hitPoint) {
+            this.brush2.position.copy(this.hitPoint);
+            this.brush2.updateMatrixWorld();
+        }
+
         this.world.renderer.render(this.world.scene, this.world.camera);
         this.world.stats.update();
     }

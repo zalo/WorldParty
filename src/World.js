@@ -18,7 +18,7 @@ export default class World {
         this.scene.background = new THREE.Color( 0x000000 );
 
         this.camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.01, 1000 );
-        this.camera.position.set( -1.0, 1, 1 );
+        this.camera.position.set( -5.0, 5, 0 );
         this.camera.layers.enableAll();
         this.scene.add(this.camera);
 
@@ -46,7 +46,6 @@ export default class World {
         this.dirLight.shadow.mapSize.height = 1024;
         this.scene.add( this.dirLight );
         
-
         this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444 );
         this.hemiLight.position.set( 0, 20, 0 );
         this.scene.add( this.hemiLight );
@@ -61,7 +60,7 @@ export default class World {
         //this.ground.receiveShadow = true;
         //this.scene.add( this.ground );
         
-        this.helper = new THREE.GridHelper( 2, 20 );
+        this.helper = new THREE.GridHelper( 100, 20 );
         this.helper.material.opacity = 1.0;
         this.helper.material.transparent = true;
         this.helper.position.set(0, 0.005, 0);

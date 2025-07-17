@@ -56,15 +56,14 @@ export class PlayerController extends THREE.Group {
             segment: new THREE.Line3(new THREE.Vector3(), new THREE.Vector3(0, - 1.0, 0.0))
         };
         this.playerMesh.castShadow = true;
-        this.playerMesh.receiveShadow = true;
+        //this.playerMesh.receiveShadow = true;
         this.playerMesh.material.shadowSide = 2;
         this.add(this.playerMesh);
-
     }
 
     reset() {
         this.playerVelocity.set(0, 0, 0);
-        this.position.set(15.75, - 3, 30);
+        this.position.set(0,2.0,0);
         this.camera.position.sub(this.controls.target);
         this.controls.target.copy(this.position);
         this.camera.position.add(this.position);
@@ -201,6 +200,9 @@ export class PlayerController extends THREE.Group {
         this.collider.material.opacity = 0.5;
         this.collider.material.transparent = true;
         this.collider.visible = this.simulationParams.displayCollider;
+        /** @type {MeshBVH} */
+        this.collider.boundsTree = mergedGeometry.boundsTree;
+        this.collider.updateMatrixWorld(true);
 
         // create a helper to visualize the BVH
         let helper = new MeshBVHHelper(this.collider, mergedGeometry.boundsTree,  this.simulationParams.visualizeDepth);
@@ -210,5 +212,27 @@ export class PlayerController extends THREE.Group {
         this.collider.helper.visible = this.simulationParams.displayBVH;
 
         return this.collider;
+    }
+
+    raycastAgainstCollider(origin, direction) {
+        if (!this.collider || !this.collider.geometry.boundsTree) return;
+        /** @type {MeshBVH} */
+        let bvh = this.collider.boundsTree;
+
+        this.tempSegment.start.copy(origin);
+        this.tempSegment.end.copy(origin).addScaledVector(direction, 1000.0);
+        this.tempMat.copy(this.collider.matrixWorld).invert();
+        this.tempSegment.start.applyMatrix4(this.tempMat);
+        this.tempSegment.end.applyMatrix4(this.tempMat);
+
+        let ray = new THREE.Ray(this.tempSegment.start, this.tempSegment.end.clone().sub(this.tempSegment.start).normalize());
+        let outputs = bvh.raycast(ray);
+        if(outputs && outputs.length > 0) {
+            // get the closest intersection
+            let closest = outputs[0];
+            this.tempVector.copy(closest.point).applyMatrix4(this.collider.matrixWorld);
+            return this.tempVector;
+        }
+        return null;
     }
 }
