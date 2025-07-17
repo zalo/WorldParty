@@ -1,11 +1,18 @@
 {
 	"scripts": {
+		"dev": "partykit dev --live",
+		"deploy": "partykit deploy",
 		"build": "esbuild ./src/main.js --bundle --minify --sourcemap --format=esm --outdir=./build"
 	},
 	"dependencies": {
 		"esbuild": "^0.25.6",
+		"partysocket": "^1.1.4",
 		"three": "^0.178.0",
 		"three-bvh-csg": "^0.0.17",
 		"three-mesh-bvh": "^0.9.1"
+	},
+	"devDependencies": {
+		"partykit": "^0.0.115",
+		"typescript": "^5.8.3"
 	}
 }

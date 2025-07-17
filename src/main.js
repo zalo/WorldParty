@@ -1,3 +1,6 @@
+/* eslint-env browser */
+/* global PARTYKIT_HOST */
+
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { GUI } from '../node_modules/three/examples/jsm/libs/lil-gui.module.min.js';
 import World from './World.js';
@@ -7,6 +10,9 @@ const { MeshoptDecoder } = await import( '../node_modules/three/examples/jsm/lib
 import { PlayerController } from './PlayerController.js';
 import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
 import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from '../node_modules/three-mesh-bvh/build/index.module.js';
+import PartySocket from "../node_modules/partysocket/dist/index.mjs";
+import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
+
 
 /** The fundamental set up and animation structures for Simulation */
 export default class Main {
@@ -23,6 +29,28 @@ export default class Main {
     }
 
     async deferredConstructor() {
+        this.queryParams = new URLSearchParams(window.location.search || window.location.hash.substr(1));
+        if(this.queryParams.has("room")){
+            this.curRoom = this.queryParams.get('room') || "global";
+        }else{
+            this.curRoom = "global";
+            this.queryParams.set("room", this.curRoom);
+            window.history.replaceState({}, "", `${window.location.pathname}?${this.queryParams.toString()}`);
+        }
+
+        /** @type {PartySocket} - The connection object */
+        this.conn = new PartySocket({
+            // @ts-expect-error This should be typed as a global string
+            host: window.location.host.includes("github.io") ? "https://worldparty.zalo.partykit.dev" : "http://127.0.0.1:1999",//PARTYKIT_HOST,
+            room: this.curRoom,
+        });
+
+        /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
+        this.players = {};
+
+        //this.conn.addEventListener("open"   , this.start           .bind(this));
+        this.conn.addEventListener("message", this.updateFromServer.bind(this));
+
         // Construct the render world
         this.world = new World(this);
 
@@ -123,8 +151,7 @@ export default class Main {
 
         this.world.scene.add( this.mesh );
 
-        //this.loadColliderEnvironment();
-        this.updateEnvironment( this.mesh );
+        this.player.chunks = this.chunks;
 
         this.ePressed = false;
         this.qPressed = false;
@@ -139,34 +166,53 @@ export default class Main {
             }
         });
         this.frameNum = 0;
+        this.lastUpdate = 0;
     }
 
-    loadColliderEnvironment() {
-        let loader = new GLTFLoader();
-        loader.setMeshoptDecoder( MeshoptDecoder );
-        loader.load( '../assets/small_scene2.glb', gltf => {
-                gltf.scene.scale.setScalar( .01 );
-                new THREE.Box3().setFromObject( gltf.scene ).getCenter( gltf.scene.position ).negate();
-                gltf.scene.position.x -= 15.75;
-                gltf.scene.position.y -= -3;
-                gltf.scene.position.z -= 30;
-                gltf.scene.updateMatrixWorld( true );
-                this.updateEnvironment( gltf.scene );
-                this.world.scene.add( this.environment );
-            } );
-    }
+    /** @param {MessageEvent} event - The message event */
+    updateFromServer(event) {
+        /** @type {string} */
+        let dataString = event.data;
+        if (dataString.startsWith("{")) {
+            let data = JSON.parse(dataString);
+            if (data.type.includes("update")) {
+                if(data.type === "fullupdate"){
+                    // Enumerate through the cards and the players, marking all dirty
+                    for (let   card in this.  cards) { this.  cards[  card].dirty = true; }
+                    for (let player in this.players) { this.players[player].dirty = true; }
+                }
 
-    updateEnvironment( environment ) {
-        //if(this.collider) {
-        //    this.world.scene.remove( this.collider );
-        //    this.world.scene.remove( this.visualizer );
-        //}
-        //this.environment = environment;
-        //this.collider = this.player.bakeCollisionGeometry( this.environment );
-        //this.visualizer = this.collider.helper;
-        //this.world.scene.add( this.visualizer );
-        //this.world.scene.add( this.collider );
-        this.player.chunks = this.chunks;
+                // Enumerate through the players, updating as necessary (and marking clean)
+                for (let player in data.players) {
+                    if (this.players[player] === undefined) {
+                        // Create the player on the client since it doesn't exist
+                        this.players[player] = data.players[player];
+                        // Create a new player object, which is a capsule
+                        this.players[player].mesh = new THREE.Mesh(
+                            new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
+                            new THREE.MeshStandardMaterial()
+                        );
+                        this.world.scene.add(this.players[player].mesh);
+                    } else {
+                        Object.assign(this.players[player], data.players[player]);
+                    }
+                    this.players[player].dirty = false;
+                }
+
+                // Enumerate through the players, removing any that are still dirty
+                if(data.type === "fullupdate"){
+                    for (let player in this.players) {
+                        if (this.players[player].dirty) {
+                            console.log(`Player ${this.players[player].name} has disconnected!`);
+                            this.world.scene.remove(this.players[player].mesh);
+                            delete this.players[player];
+                        }
+                    }
+                }
+            }
+        } else {
+            console.log(`Received -> ${dataString}`);
+        }
     }
 
     /** Update the simulation */
@@ -181,14 +227,29 @@ export default class Main {
     
         this.world.controls.update();
 
+        if(this.lastUpdate + 1000/30 < timeMS) {
+            this.lastUpdate = timeMS;
+            this.conn.send(JSON.stringify({
+                type: "player",
+                position: {
+                    x: this.player.position.x,
+                    y: this.player.position.y - 0.5,
+                    z: this.player.position.z
+                }
+            }));
+        }
+
+        for (let player in this.players) {
+            this.players[player].mesh.position.lerp(new THREE.Vector3(this.players[player].position.x, this.players[player].position.y, this.players[player].position.z), 0.1);
+            //this.players[player].mesh.updateMatrixWorld();
+        }
+
         // Cast a ray against the environment collider and place the brush2 there
         this.brush2.position.copy(new THREE.Vector3().copy(this.player.position).sub(this.world.camera.position).normalize().multiplyScalar(6).add(this.player.position));
         this.brush2.lookAt(this.world.camera.position);
         this.brush2.updateMatrixWorld();
 
         if ( this.ePressed || this.qPressed ) {
-            let dirty = false;
-
             let box1 = new THREE.Box3();
             box1.setFromObject(this.brush2);
 
@@ -206,7 +267,6 @@ export default class Main {
                     this.chunks[i].prepareGeometry();
                     this.chunks[i].bbox = bbox;
                     this.mesh.add(this.chunks[i]);
-                    dirty = true;
                 }
             }
             this.ePressed = false;
