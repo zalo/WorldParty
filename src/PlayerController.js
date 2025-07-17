@@ -63,7 +63,7 @@ export class PlayerController extends THREE.Group {
 
     reset() {
         this.playerVelocity.set(0, 0, 0);
-        this.position.set(0,2.0,0);
+        this.position.set(0,3.0,0);
         this.camera.position.sub(this.controls.target);
         this.controls.target.copy(this.position);
         this.camera.position.add(this.position);
@@ -71,15 +71,15 @@ export class PlayerController extends THREE.Group {
     }
 
     updatePlayer(delta) {
-        if (!this.collider) return;
-        if (!this.collider.matrixWorld){ this.collider.updateMatrixWorld(); }
+        if (!this.chunks) return;
+        //if (!this.chunks[0].matrixWorld){ this.chunks[0].updateMatrixWorld(); }
 
         if ( this.simulationParams.firstPerson ) {
-            this.controls.maxPolarAngle = Math.PI;
+            //this.controls.maxPolarAngle = Math.PI;
             this.controls.minDistance = 1e-4;
             this.controls.maxDistance = 1e-4;
         } else {
-            this.controls.maxPolarAngle = Math.PI / 2;
+            //this.controls.maxPolarAngle = Math.PI / 2;
             this.controls.minDistance = 1;
             this.controls.maxDistance = 20;
         }
@@ -89,6 +89,7 @@ export class PlayerController extends THREE.Group {
         } else {
             this.playerVelocity.y += delta * this.simulationParams.gravity;
         }
+        //this.playerVelocity.y = 0.0;
 
         this.position.addScaledVector(this.playerVelocity, delta);
 
@@ -118,46 +119,70 @@ export class PlayerController extends THREE.Group {
 
         // adjust player position based on collisions
         const capsuleInfo = this.capsuleInfo;
-        this.tempBox.makeEmpty();
-        this.tempMat.copy(this.collider.matrixWorld).invert();
         this.tempSegment.copy(capsuleInfo.segment);
+        this.tempSegment.start.applyMatrix4(this.matrixWorld);
+        this.tempSegment.end  .applyMatrix4(this.matrixWorld);    
 
-        // get the position of the capsule in the local space of the collider
-        this.tempSegment.start.applyMatrix4(this.matrixWorld).applyMatrix4(this.tempMat);
-        this.tempSegment.end.applyMatrix4(this.matrixWorld).applyMatrix4(this.tempMat);
+        let globalBox = new THREE.Box3().makeEmpty();
 
         // get the axis aligned bounding box of the capsule
-        this.tempBox.expandByPoint(this.tempSegment.start);
-        this.tempBox.expandByPoint(this.tempSegment.end);
+        globalBox.expandByPoint(this.tempSegment.start);
+        globalBox.expandByPoint(this.tempSegment.end);
+        globalBox.min.addScalar(- capsuleInfo.radius);
+        globalBox.max.addScalar(capsuleInfo.radius);
 
-        this.tempBox.min.addScalar(- capsuleInfo.radius);
-        this.tempBox.max.addScalar(capsuleInfo.radius);
-
-        /** @type {MeshBVH} */
-        let bvh = this.collider.geometry.boundsTree;
-        bvh.shapecast({
-            intersectsBounds: box => box.intersectsBox(this.tempBox),
-            intersectsTriangle: tri => {
-                // check if the triangle is intersecting the capsule and adjust the capsule position if it is.
-                const triPoint = this.tempVector;
-                const capsulePoint = this.tempVector2;
-
-                const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
-                if (distance < capsuleInfo.radius) {
-                    const depth = capsuleInfo.radius - distance;
-                    const direction = capsulePoint.sub(triPoint).normalize();
-
-                    this.tempSegment.start.addScaledVector(direction, depth);
-                    this.tempSegment.end.addScaledVector(direction, depth);
-                }
+        for( let i = 0; i < this.chunks.length; i++ ) {
+            if (this.chunks[i].matrixWorld.dirty) {
+                this.chunks[i].updateMatrixWorld();
             }
-        });
+            if(!this.chunks[i].geometry.boundsTree) { continue; }
+            if(!globalBox.intersectsBox(this.chunks[i].bbox)) {
+                continue; // skip chunks that are not intersecting the capsule
+            }
+
+            this.tempBox.makeEmpty();
+            this.tempMat.copy(this.chunks[i].matrixWorld).invert();
+
+            // get the position of the capsule in the local space of the collider
+            this.tempSegment.start.applyMatrix4(this.tempMat);
+            this.tempSegment.end  .applyMatrix4(this.tempMat);
+
+            // get the axis aligned bounding box of the capsule
+            this.tempBox.expandByPoint(this.tempSegment.start);
+            this.tempBox.expandByPoint(this.tempSegment.end);
+
+            this.tempBox.min.addScalar(- capsuleInfo.radius);
+            this.tempBox.max.addScalar(capsuleInfo.radius);
+
+            /** @type {MeshBVH} */
+            let bvh = this.chunks[i].geometry.boundsTree;
+            bvh.shapecast({
+                intersectsBounds: box => box.intersectsBox(this.tempBox),
+                intersectsTriangle: tri => {
+                    // check if the triangle is intersecting the capsule and adjust the capsule position if it is.
+                    const triPoint = this.tempVector;
+                    const capsulePoint = this.tempVector2;
+
+                    const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
+                    if (distance < capsuleInfo.radius) {
+                        const depth = capsuleInfo.radius - distance;
+                        const direction = capsulePoint.sub(triPoint).normalize();
+
+                        this.tempSegment.start.addScaledVector(direction, depth);
+                        this.tempSegment.end.addScaledVector(direction, depth);
+                    }
+                }
+            });
+
+            this.tempSegment.start.applyMatrix4(this.chunks[i].matrixWorld);
+            this.tempSegment.end.applyMatrix4(this.chunks[i].matrixWorld);
+        }
 
         // get the adjusted position of the capsule collider in world space after checking
         // triangle collisions and moving it. capsuleInfo.segment.start is assumed to be
         // the origin of the player model.
         let newPosition = this.tempVector;
-        newPosition.copy(this.tempSegment.start).applyMatrix4(this.collider.matrixWorld);
+        newPosition.copy(this.tempSegment.start);
 
         // check how much the collider was moved
         let deltaVector = this.tempVector2;
@@ -171,6 +196,7 @@ export class PlayerController extends THREE.Group {
 
         // adjust the player model
         this.position.add(deltaVector);
+
 
         if (!this.playerIsOnGround) {
             deltaVector.normalize();
@@ -190,49 +216,4 @@ export class PlayerController extends THREE.Group {
         }
     }
 
-    bakeCollisionGeometry(environment) {
-        let staticGenerator = new StaticGeometryGenerator( environment );
-        staticGenerator.attributes = [ 'position' ];
-        let mergedGeometry = staticGenerator.generate();
-        mergedGeometry.boundsTree = new MeshBVH( mergedGeometry );
-        this.collider = new THREE.Mesh( mergedGeometry );
-        this.collider.material.wireframe = true;
-        this.collider.material.opacity = 0.5;
-        this.collider.material.transparent = true;
-        this.collider.visible = this.simulationParams.displayCollider;
-        /** @type {MeshBVH} */
-        this.collider.boundsTree = mergedGeometry.boundsTree;
-        this.collider.updateMatrixWorld(true);
-
-        // create a helper to visualize the BVH
-        let helper = new MeshBVHHelper(this.collider, mergedGeometry.boundsTree,  this.simulationParams.visualizeDepth);
-        helper.update();
-        this.collider.add(helper);
-        this.collider.helper = helper;
-        this.collider.helper.visible = this.simulationParams.displayBVH;
-
-        return this.collider;
-    }
-
-    raycastAgainstCollider(origin, direction) {
-        if (!this.collider || !this.collider.geometry.boundsTree) return;
-        /** @type {MeshBVH} */
-        let bvh = this.collider.boundsTree;
-
-        this.tempSegment.start.copy(origin);
-        this.tempSegment.end.copy(origin).addScaledVector(direction, 1000.0);
-        this.tempMat.copy(this.collider.matrixWorld).invert();
-        this.tempSegment.start.applyMatrix4(this.tempMat);
-        this.tempSegment.end.applyMatrix4(this.tempMat);
-
-        let ray = new THREE.Ray(this.tempSegment.start, this.tempSegment.end.clone().sub(this.tempSegment.start).normalize());
-        let outputs = bvh.raycast(ray);
-        if(outputs && outputs.length > 0) {
-            // get the closest intersection
-            let closest = outputs[0];
-            this.tempVector.copy(closest.point).applyMatrix4(this.collider.matrixWorld);
-            return this.tempVector;
-        }
-        return null;
-    }
 }

@@ -28,7 +28,7 @@ export default class Main {
 
         // Configure Settings
         this.simulationParams = {
-            firstPerson: true,
+            firstPerson: false,
 
             displayCollider: false,
             displayBVH: false,
@@ -82,32 +82,41 @@ export default class Main {
 
         // Create a plane to render the raytraced shader material
         this.chunkGeometry = new THREE.BoxGeometry( 10.0, 10.0, 10.0 );
+        this.emptyGeometry = new THREE.BoxGeometry( 0.1, 0.1, 0.1 );
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
         //this.mesh = new Brush( this.chunkGeometry, this.defaultMaterial );
+        this.bigChunk = new Brush( new THREE.BoxGeometry( 100.0, 100.0, 100.0 ), this.defaultMaterial );
+        this.littleChunk = new Brush( new THREE.BoxGeometry( 10.0, 10.0, 10.0 ), this.defaultMaterial );
+        this.wholeChunk = this.evaluator.evaluate( this.bigChunk, this.littleChunk, SUBTRACTION );
+        //this.wholeChunk = new Brush( this.chunkGeometry, this.defaultMaterial );
         this.chunks = [];
         this.mesh = new THREE.Group();
         for( let x = 0; x < 10; x++ ) {
-            for( let z = 0; z < 10; z++ ) {
-                let chunk = new Brush( this.chunkGeometry, this.defaultMaterial );
-                chunk.position.set( x * 10.0 - 45.0, - 5.0, z * 10.0 - 45.0 );
-                //chunk.boundsTree = this.chunkBVH;
-                chunk.updateMatrixWorld( true );
-                //chunk.geometry.computeBoundingBox();
-                chunk.bbox = bbox.clone().applyMatrix4( chunk.matrixWorld );
-                this.mesh.add( chunk );
-                this.chunks.push( chunk );
+            for( let y = 0; y < 10; y++ ) {
+                for( let z = 0; z < 10; z++ ) {
+                    let chunk = new Brush( y < 5 ? this.chunkGeometry : this.emptyGeometry, this.defaultMaterial );
+                    chunk.position.set( x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0 );
+                    //chunk.boundsTree = this.chunkBVH;
+                    chunk.updateMatrixWorld( true );
+                    //chunk.geometry.computeBoundingBox();
+                    chunk.bbox = bbox.clone().applyMatrix4( chunk.matrixWorld );
+                    chunk.prepareGeometry();
+                    this.mesh.add( chunk );
+                    this.chunks.push( chunk );
+                }
             }
         }
         this.mesh.receiveShadow = true;
         this.mesh.updateMatrixWorld( true );
+        this.mesh.chunks = this.chunks;
 
         // Create the player controller
         this.player = new PlayerController(this.controls, this.world.camera, this.simulationParams);
         this.world.scene.add( this.player );
         this.player.reset();
 
-        this.brush2 = new Brush( new THREE.BoxGeometry(), this.defaultMaterial );
+        this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2), this.defaultMaterial );
         this.brush2.position.y = -0.5;
         this.brush2.updateMatrixWorld();
         this.world.scene.add( this.brush2 );
@@ -118,10 +127,14 @@ export default class Main {
         this.updateEnvironment( this.mesh );
 
         this.ePressed = false;
+        this.qPressed = false;
         window.addEventListener('keydown', (e) => {
             switch (e.code) {
                 case 'KeyE':
                     this.ePressed = true;
+                    break;
+                case 'KeyQ':
+                    this.qPressed = true;
                     break;
             }
         });
@@ -144,15 +157,16 @@ export default class Main {
     }
 
     updateEnvironment( environment ) {
-        if(this.collider) {
-            this.world.scene.remove( this.collider );
-            this.world.scene.remove( this.visualizer );
-        }
-        this.environment = environment;
-        this.collider = this.player.bakeCollisionGeometry( this.environment );
-        this.visualizer = this.collider.helper;
-        this.world.scene.add( this.visualizer );
-        this.world.scene.add( this.collider );
+        //if(this.collider) {
+        //    this.world.scene.remove( this.collider );
+        //    this.world.scene.remove( this.visualizer );
+        //}
+        //this.environment = environment;
+        //this.collider = this.player.bakeCollisionGeometry( this.environment );
+        //this.visualizer = this.collider.helper;
+        //this.world.scene.add( this.visualizer );
+        //this.world.scene.add( this.collider );
+        this.player.chunks = this.chunks;
     }
 
     /** Update the simulation */
@@ -168,30 +182,35 @@ export default class Main {
         this.world.controls.update();
 
         // Cast a ray against the environment collider and place the brush2 there
-        this.brush2.position.copy(new THREE.Vector3().copy(this.player.position).sub(this.world.camera.position).normalize().multiplyScalar(3).add(this.player.position));
+        this.brush2.position.copy(new THREE.Vector3().copy(this.player.position).sub(this.world.camera.position).normalize().multiplyScalar(6).add(this.player.position));
+        this.brush2.lookAt(this.world.camera.position);
         this.brush2.updateMatrixWorld();
 
-        if ( this.ePressed || this.frameNum === 0) { //true){//
-            this.ePressed = false;
+        if ( this.ePressed || this.qPressed ) {
             let dirty = false;
-            //this.world.scene.remove(this.mesh);
-            //this.mesh = this.evaluator.evaluate( this.chunks, this.brush2, SUBTRACTION);
 
             let box1 = new THREE.Box3();
             box1.setFromObject(this.brush2);
 
             for(let i = 0; i < this.chunks.length; i++) {
-                if (box1.intersectsBox(this.chunks[i].bbox) || this.frameNum === 0) {
-                    this.environment.remove(this.chunks[i]);
-                    this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.brush2, SUBTRACTION);
+                if (box1.intersectsBox(this.chunks[i].bbox)) {
+                    this.mesh.remove(this.chunks[i]);
+                    let bbox = this.chunks[i].bbox;
+                    this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.brush2, this.ePressed ? ADDITION : SUBTRACTION);
+                    // This part prevents additive chunks from leaking into neighboring chunks
+                    // Really slow for some reason???
+                    //bbox.getCenter(this.wholeChunk.position);
+                    //this.wholeChunk.updateMatrixWorld( true);
+                    //this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.wholeChunk, SUBTRACTION);
                     this.chunks[i].updateMatrixWorld();
-                    this.chunks[i].geometry.computeBoundingBox();
-                    this.chunks[i].bbox = this.chunks[i].geometry.boundingBox.clone().applyMatrix4( this.chunks[i].matrixWorld );
-                    this.environment.add(this.chunks[i]);
+                    this.chunks[i].prepareGeometry();
+                    this.chunks[i].bbox = bbox;
+                    this.mesh.add(this.chunks[i]);
                     dirty = true;
                 }
             }
-            if(dirty){this.updateEnvironment( this.mesh );}
+            this.ePressed = false;
+            this.qPressed = false;
         }
 
         this.world.renderer.render(this.world.scene, this.world.camera);
