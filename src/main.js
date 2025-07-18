@@ -12,6 +12,7 @@ import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_m
 import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from '../node_modules/three-mesh-bvh/build/index.module.js';
 import PartySocket from "../node_modules/partysocket/dist/index.mjs";
 import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
+const { gzipSync, gunzipSync }  = await import( '../node_modules/three/examples/jsm/libs/fflate.module.js' );
 
 
 /** The fundamental set up and animation structures for Simulation */
@@ -109,8 +110,6 @@ export default class Main {
         this.evaluator = new Evaluator();
 
         // Create a plane to render the raytraced shader material
-        this.chunkGeometry = new THREE.BoxGeometry( 10.0, 10.0, 10.0 );
-        this.emptyGeometry = new THREE.BoxGeometry( 0.1, 0.1, 0.1 );
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
         //this.mesh = new Brush( this.chunkGeometry, this.defaultMaterial );
@@ -123,12 +122,20 @@ export default class Main {
         for( let x = 0; x < 10; x++ ) {
             for( let y = 0; y < 10; y++ ) {
                 for( let z = 0; z < 10; z++ ) {
-                    let chunk = new Brush( y < 5 ? this.chunkGeometry : this.emptyGeometry, this.defaultMaterial );
-                    chunk.position.set( x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0 );
-                    //chunk.boundsTree = this.chunkBVH;
+                    let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ) : new THREE.BoxGeometry( 0.1, 0.1, 0.1 );
+                    // Offset the vertices in the chunk geometry by the chunk position
+                    let vertices = geometry.attributes.position.array;
+                    for (let i = 0; i < vertices.length; i += 3) {
+                        vertices[i    ] += x * 10.0 - 45.0;
+                        vertices[i + 1] += y * 10.0 - 45.0;
+                        vertices[i + 2] += z * 10.0 - 45.0;
+                    }
+                    geometry.attributes.position.needsUpdate = true;
+                    let chunk = new Brush( geometry, this.defaultMaterial );
                     chunk.updateMatrixWorld( true );
-                    //chunk.geometry.computeBoundingBox();
-                    chunk.bbox = bbox.clone().applyMatrix4( chunk.matrixWorld );
+                    chunk.bbox = bbox.clone().translate(
+                        new THREE.Vector3( x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0 )
+                    );
                     chunk.prepareGeometry();
                     this.mesh.add( chunk );
                     this.chunks.push( chunk );
@@ -192,11 +199,18 @@ export default class Main {
                             new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
                             new THREE.MeshStandardMaterial()
                         );
+                        this.players[player].mesh.visible = player !== this.conn.id;
                         this.world.scene.add(this.players[player].mesh);
                     } else {
                         Object.assign(this.players[player], data.players[player]);
                     }
                     this.players[player].dirty = false;
+                }
+
+                // Enumerate through the players, updating as necessary (and marking clean)
+                for (let chunkIndex in data.chunks) {
+                    //console.log(chunkIndex, data.chunks[chunkIndex].data.normalize("NFC"), typeof(data.chunks[chunkIndex].data.normalize("NFC")));
+                    this.base64FillChunkIndex(chunkIndex, ''+data.chunks[chunkIndex].data.normalize("NFC"));
                 }
 
                 // Enumerate through the players, removing any that are still dirty
@@ -263,6 +277,17 @@ export default class Main {
                     //bbox.getCenter(this.wholeChunk.position);
                     //this.wholeChunk.updateMatrixWorld( true);
                     //this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.wholeChunk, SUBTRACTION);
+
+                    let compressedChunk = this.chunkIndexToBase64(i);
+
+                    this.conn.send(JSON.stringify({
+                        type: "chunk",
+                        index: i,
+                        data: compressedChunk
+                    }));
+
+                    this.base64FillChunkIndex(i, compressedChunk);
+
                     this.chunks[i].updateMatrixWorld();
                     this.chunks[i].prepareGeometry();
                     this.chunks[i].bbox = bbox;
@@ -276,6 +301,43 @@ export default class Main {
         this.world.renderer.render(this.world.scene, this.world.camera);
         this.world.stats.update();
         this.frameNum++;
+    }
+
+    b64encode(input) { 
+        return btoa(encodeURIComponent(input)); 
+    }
+    b64decode(input) { 
+        return decodeURIComponent(atob(input));
+    }
+
+    chunkIndexToBase64(chunkIndex) {
+        let compressedPositions = gzipSync(new Uint8Array(this.chunks[chunkIndex].geometry.attributes.position.array.buffer));
+        let toReturn = this.b64encode(String.fromCharCode.apply(null, compressedPositions));
+        return toReturn.normalize("NFC");
+    }
+
+    base64FillChunkIndex(chunkIndex, base64String) {
+        let binaryString = this.b64decode(base64String.normalize("NFC"));
+        let unbase64CompressedPositions = new Uint8Array(binaryString.length);
+        for (let b = 0; b < binaryString.length; b++) {
+            unbase64CompressedPositions[b] = binaryString.charCodeAt(b);
+        }
+        let decompressedPositions = new Float32Array(gunzipSync(unbase64CompressedPositions).buffer);
+        let newGeometry = this.chunks[chunkIndex].geometry.clone();
+        newGeometry.setAttribute('position', new THREE.BufferAttribute(decompressedPositions, 3));
+        newGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length / 3 * 2), 2));
+        newGeometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length), 3));
+        newGeometry.index = null;
+        newGeometry.attributes.position.needsUpdate = true;
+        newGeometry.attributes.uv.needsUpdate = true;
+        newGeometry.attributes.normal.needsUpdate = true;
+        newGeometry.needsUpdate = true; 
+        newGeometry.computeBoundingBox();
+        newGeometry.computeBoundingSphere();
+        newGeometry.computeVertexNormals();
+        newGeometry.boundsTree = null;
+        this.chunks[chunkIndex].geometry = newGeometry;
+        this.chunks[chunkIndex].prepareGeometry();
     }
 
     // Log Errors as <div>s over the main viewport

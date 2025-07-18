@@ -18,6 +18,8 @@ class PartyServer {
 
     /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
     this.players = {};
+    /** @type {Record<number, { index:number, data: string }>} */
+    this.chunks = {};
     this.globalPlayerCount = 0;
 
     /** @type {Record<string, boolean>} */
@@ -29,22 +31,30 @@ class PartyServer {
     this.interval = setInterval(() => {
       if(!this.hasNewInfoToSend) return;
 
-      if(this.updateCounter % 30 === 0){
-      // Send full update: Inefficient, but simple and robust
-      this.room.broadcast(JSON.stringify({
-        type: "fullupdate",
-        players: this.players
-      }));
+      if(this.updateCounter % 300 === 0){
+        // Send full update: Inefficient, but simple and robust
+        this.room.broadcast(JSON.stringify({
+          type: "fullupdate",
+          players: this.players,
+          chunks: this.chunks
+        }));
       } else {
         // Accumulate partial updates from the objects that need updating
-        /** @type {{type:string, players:Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>|{}}} */
-        let partialUpdate = { type: "partialupdate", players: {} };
+        /** @type {{type:string, players:Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>, chunks:Record<number, { index:number, data: string }>}}} */
+        let partialUpdate = { type: "partialupdate", players: {}, chunks: {} };
         for(let player in this.players){
           if(this.needsUpdate[player]){
             partialUpdate.players[player] = this.players[player];
             this.needsUpdate[player] = false;
           }
         }
+        for(let chunkIndex in this.chunks){
+          if(this.needsUpdate[""+chunkIndex]){
+            partialUpdate.chunks[chunkIndex] = this.chunks[chunkIndex];
+            this.needsUpdate[""+chunkIndex] = false;
+          }
+        }
+
         // Send the partial update
         this.room.broadcast(JSON.stringify(partialUpdate));
       }
@@ -79,7 +89,7 @@ class PartyServer {
     this.room.broadcast(JSON.stringify({
       type: "fullupdate",
       players: this.players,
-      //cards: this.cards,
+      chunks: this.chunks
     }));
   }
 
@@ -96,6 +106,13 @@ class PartyServer {
         this.players[sender.id].position.y = data.position.y;
         this.players[sender.id].position.z = data.position.z;
         this.needsUpdate[sender.id] = true;
+      }else if(data.type === "chunk"){
+        if(!this.chunks[data.index]){
+          this.chunks[data.index] = { index: data.index, data: data.data };
+        }else{
+            this.chunks[data.index].data = data.data;
+        }
+        this.needsUpdate[""+data.index] = true;
       } else if(data.type === "name"){
         this.players[sender.id].name = data.name;
         this.needsUpdate[sender.id] = true;
@@ -136,7 +153,7 @@ class PartyServer {
     this.room.broadcast(JSON.stringify({
       type: "fullupdate",
       players: this.players,
-      //cards: this.cards,
+      chunks: this.chunks
     }));
   }
 
