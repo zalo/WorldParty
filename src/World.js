@@ -77,15 +77,15 @@ export default class World {
         window.addEventListener('orientationchange', this._onWindowResize.bind(this), false);
         this._onWindowResize();
 
-        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.target.set(0, 0, 0);
-        this.controls.panSpeed = 2;
-        this.controls.zoomSpeed = 1;
-        this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.10;
-        this.controls.screenSpacePanning = true;
-        this.controls.update();
-        this.controls.addEventListener('change', () => this.viewDirty = true);
+        //this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        //this.controls.target.set(0, 0, 0);
+        //this.controls.panSpeed = 2;
+        //this.controls.zoomSpeed = 1;
+        //this.controls.enableDamping = true;
+        //this.controls.dampingFactor = 0.10;
+        //this.controls.screenSpacePanning = true;
+        //this.controls.update();
+        //this.controls.addEventListener('change', () => this.viewDirty = true);
 
         // raycaster
         this.raycaster = new THREE.Raycaster();
