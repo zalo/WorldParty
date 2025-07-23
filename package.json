@@ -6,6 +6,7 @@
 	},
 	"dependencies": {
 		"esbuild": "^0.25.6",
+		"manifold-3d": "^3.2.0",
 		"partysocket": "^1.1.4",
 		"three": "^0.178.0",
 		"three-bvh-csg": "^0.0.17",

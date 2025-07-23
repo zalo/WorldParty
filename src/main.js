@@ -264,7 +264,7 @@ export default class Main {
             for(let i = 0; i < this.chunks.length; i++) {
                 if (box1.intersectsBox(this.chunks[i].bbox)) {
                     this.conn.send(JSON.stringify({
-                        type: "csgoperation",
+                        type: "manifoldcsgoperation",
                         index: i,
                         originalChunk: this.brushToBase64(this.chunks[i]),
                         brush: this.brushToBase64(this.brush2),
