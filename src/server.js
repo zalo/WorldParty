@@ -129,8 +129,15 @@ class PartyServer {
         let brush         = this.base64ToBrush(data.brush);
         scene.add(originalChunk);
         scene.add(brush);
-        brush.position  .set(data.brushPosition.x, data.brushPosition.y, data.brushPosition.z);
-        brush.quaternion.set(data.brushQuaternion.x, data.brushQuaternion.y, data.brushQuaternion.z, data.brushQuaternion.w);
+        brush.position  .set(
+          data.brushPosition.x + ((Math.random()-0.5)*0.0001),
+          data.brushPosition.y + ((Math.random()-0.5)*0.0001),
+          data.brushPosition.z + ((Math.random()-0.5)*0.0001));
+        brush.quaternion.set(
+          data.brushQuaternion.x + ((Math.random()-0.5)*0.0001), 
+          data.brushQuaternion.y + ((Math.random()-0.5)*0.0001), 
+          data.brushQuaternion.z + ((Math.random()-0.5)*0.0001), 
+          data.brushQuaternion.w + ((Math.random()-0.5)*0.0001));
         brush.scale     .set(data.brushScale.x, data.brushScale.y, data.brushScale.z);
         brush.updateMatrixWorld(true);
         this.chunks[data.index].data = this.brushToBase64(new Evaluator().evaluate( originalChunk, brush, parseInt(data.operation)));
