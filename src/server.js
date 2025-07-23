@@ -12,7 +12,8 @@ import { mergeVertices, toCreasedNormals } from '../node_modules/three/examples/
 import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
 import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js';
 
-import Module from '../assets/manifold-3d/manifold.js';
+import { M } from '../assets/manifold-3d/manifold.js';
+import manMod from '../assets/manifold-3d/manifold.wasm';
 /** @typedef {import("../assets/manifold-3d/manifold.js").CrossSection} CrossSection */
 /** @typedef {import("../assets/manifold-3d/manifold.js").Manifold} Manifold */
 /** @typedef {import("../assets/manifold-3d/manifold.js").ManifoldToplevel} ManifoldToplevel */
@@ -30,7 +31,7 @@ class PartyServer {
 
     /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
     this.players = {};
-    /** @type {Record<number, { index:number, data: string }>} */
+    /** @type {Record<number, { index:number, data: string, manifold: Manifold | null}>} */
     this.chunks = {};
     this.globalPlayerCount = 0;
 
@@ -75,29 +76,19 @@ class PartyServer {
       this.hasNewInfoToSend = false;
     }, 1000/30);
 
-    this.deferredInit();
+    this.initializeManifold();
   }
 
-  async deferredInit() {
-    //console.log(ENVIRONMENT_IS_NODE ? "Running in Node.js environment." : "Not running in Node.js environment.");
-    //console.log(ENVIRONMENT_IS_WORKER ? "Running in Web Worker environment." : "Not running in Web Worker environment.");
-    //console.log(ENVIRONMENT_IS_WEB ? "Running in Web environment." : "Not running in Web environment.");
-    console.log("Loading manifold module...");
-
-    let manifoldPromise = Module();
-    console.log(manifoldPromise);
-
-    this.manifoldCheckInterval = setInterval(() => {
-      console.log("Checking if Manifold module is initialized...", manifoldPromise);
-      //if (manifoldPromise) {
-      //  clearInterval(this.manifoldCheckInterval);
-      //  this.manifold = Module;
-      //  console.log("Manifold module loaded:", this.manifold);
-      //  this.manifold.setup();
-      //  console.log("Manifold module setup complete.");
-      //}
-    }, 1000);
-
+  async initializeManifold() {
+    /** @type {ManifoldToplevel} */
+    this.manifold = await M({
+      instantiateWasm: (imports, callback) => {
+        const instance = new WebAssembly.Instance(manMod, imports);
+        callback(instance);
+        return instance.exports;
+      }
+    });
+    this.manifold.setup();
   }
 
   /**
@@ -144,7 +135,7 @@ class PartyServer {
         this.needsUpdate[sender.id] = true;
       } else if(data.type === "chunk"){
         if(!this.chunks[data.index]){
-          this.chunks[data.index] = { index: data.index, data: data.data };
+          this.chunks[data.index] = { index: data.index, data: data.data, manifold: null };
         } else {
           this.chunks[data.index].data = data.data;
         }
@@ -152,7 +143,7 @@ class PartyServer {
       } else if(data.type === "csgoperation") {
         if(!this.chunks[data.index]){
           if(!data.originalChunk){ console.error("Received csgoperation without originalChunk for fresh index: " + data.index); return; }
-          this.chunks[data.index] = { index: data.index, data: data.originalChunk };
+          this.chunks[data.index] = { index: data.index, data: data.originalChunk, manifold: null };
         }
 
         // Create a new Brush from the original chunk data and the incoming brush data
@@ -175,13 +166,13 @@ class PartyServer {
         this.chunks[data.index].data = this.brushToBase64(new Evaluator().evaluate( originalChunk, brush, parseInt(data.operation)));
         this.needsUpdate[""+data.index] = true;
       } else if(data.type === "manifoldcsgoperation") {
-        if(!this.chunks[data.index]){
+        if(!this.chunks[data.index] || !this.chunks[data.index].manifold){
           if(!data.originalChunk){ console.error("Received csgoperation without originalChunk for fresh index: " + data.index); return; }
-          this.chunks[data.index] = { index: data.index, data: data.originalChunk };
+          this.chunks[data.index] = { index: data.index, data: data.originalChunk, manifold: this.base64ToManifold(data.originalChunk) };
         }
 
         // Create a new Brush from the original chunk data and the incoming brush data
-        let manifoldA = this.base64ToManifold(this.chunks[data.index].data);
+        let manifoldA = this.chunks[data.index].manifold;
         let manifoldB = this.base64ToManifold(data.brush, 
           new THREE.Vector3(data.brushPosition.x, data.brushPosition.y, data.brushPosition.z),
           new THREE.Quaternion(data.brushQuaternion.x, data.brushQuaternion.y, data.brushQuaternion.z, data.brushQuaternion.w),
@@ -199,10 +190,23 @@ class PartyServer {
           console.error("Unknown manifold operation: " + operation);
         }
 
+        // Intersect the result with a cube the size of the original chunk to prevent overlaps between chunks
+        let z = data.index % 10;
+        let y = Math.floor(data.index / 10) % 10;
+        let x = Math.floor(data.index / 100);
+        let cubeManifold = this.manifold.Manifold.cube([10, 10, 10], true).translate(
+          x * 10.0 - 45.0,
+          y * 10.0 - 45.0,
+          z * 10.0 - 45.0
+        );
+        resultManifold = resultManifold.intersect(cubeManifold);
+        cubeManifold.delete();
+
         manifoldA.delete();
         manifoldB.delete();
         this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
-        resultManifold.delete();
+        //resultManifold.delete();
+        this.chunks[data.index].manifold = resultManifold;
         this.needsUpdate[""+data.index] = true;
       } else if(data.type === "name"){
         this.players[sender.id].name = data.name;
@@ -289,13 +293,10 @@ class PartyServer {
         vertProperties: vertProperties,
         triVerts: triVerts
     };
-    console.log("Creating manifold with mesh options:", meshOptions);
 
     let mesh = new this.manifold.Mesh(meshOptions);
-    console.log("Created mesh:", mesh);
     let outputManifold = new this.manifold.Manifold(mesh);
-    console.log("Created manifold:", outputManifold);
-    outputManifold.simplify(0.0001);
+    outputManifold.simplify(0.1);
     return outputManifold;
   }
 

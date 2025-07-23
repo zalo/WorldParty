@@ -1,16 +1,1893 @@
-
-var Module = (() => {
-  var _scriptName = import.meta.url;
-  
-  return (
-async function(moduleArg = {}) {
-  var moduleRtn;
-
-var Module=moduleArg;var readyPromiseResolve,readyPromiseReject;var readyPromise=new Promise((resolve,reject)=>{readyPromiseResolve=resolve;readyPromiseReject=reject});var ENVIRONMENT_IS_WEB=typeof window=="object";var ENVIRONMENT_IS_WORKER=typeof importScripts=="function";var ENVIRONMENT_IS_NODE=typeof process=="object"&&typeof process.versions=="object"&&typeof process.versions.node=="string";if(ENVIRONMENT_IS_NODE){const{createRequire:createRequire}=await import("module");var require=createRequire(import.meta.url)}var _ManifoldInitialized=false;Module.setup=function(){if(_ManifoldInitialized)return;_ManifoldInitialized=true;Module.initTBB();function toVec(vec,list,f=(x=>x)){if(list){for(let x of list){vec.push_back(f(x))}}return vec}function fromVec(vec,f=(x=>x)){const result=[];const size=vec.size();for(let i=0;i<size;i++)result.push(f(vec.get(i)));return result}function vec2polygons(vec,f=(x=>x)){const result=[];const nPoly=vec.size();for(let i=0;i<nPoly;i++){const v=vec.get(i);const nPts=v.size();const poly=[];for(let j=0;j<nPts;j++){poly.push(f(v.get(j)))}result.push(poly)}return result}function polygons2vec(polygons){if(polygons[0].length<3){polygons=[polygons]}return toVec(new Module.Vector2_vec2,polygons,poly=>toVec(new Module.Vector_vec2,poly,p=>{if(p instanceof Array)return{x:p[0],y:p[1]};return p}))}function disposePolygons(polygonsVec){for(let i=0;i<polygonsVec.size();i++)polygonsVec.get(i).delete();polygonsVec.delete()}function vararg2vec2(vec){if(vec[0]instanceof Array)return{x:vec[0][0],y:vec[0][1]};if(typeof vec[0]=="number")return{x:vec[0]||0,y:vec[1]||0};return vec[0]}function vararg2vec3(vec){if(vec[0]instanceof Array)return{x:vec[0][0],y:vec[0][1],z:vec[0][2]};if(typeof vec[0]=="number")return{x:vec[0]||0,y:vec[1]||0,z:vec[2]||0};return vec[0]}function fillRuleToInt(fillRule){return fillRule=="EvenOdd"?0:fillRule=="NonZero"?1:fillRule=="Negative"?3:2}function joinTypeToInt(joinType){return joinType=="Round"?1:joinType=="Miter"?2:0}const CrossSectionCtor=Module.CrossSection;function cross(polygons,fillRule="Positive"){if(polygons instanceof CrossSectionCtor){return polygons}else{const polygonsVec=polygons2vec(polygons);const cs=new CrossSectionCtor(polygonsVec,fillRuleToInt(fillRule));disposePolygons(polygonsVec);return cs}}Module.CrossSection.prototype.translate=function(...vec){return this._Translate(vararg2vec2(vec))};Module.CrossSection.prototype.scale=function(vec){if(typeof vec=="number"){return this._Scale({x:vec,y:vec})}return this._Scale(vararg2vec2([vec]))};Module.CrossSection.prototype.mirror=function(vec){return this._Mirror(vararg2vec2([vec]))};Module.CrossSection.prototype.warp=function(func){const wasmFuncPtr=addFunction(function(vec2Ptr){const x=getValue(vec2Ptr,"double");const y=getValue(vec2Ptr+8,"double");const vert=[x,y];func(vert);setValue(vec2Ptr,vert[0],"double");setValue(vec2Ptr+8,vert[1],"double")},"vi");const out=this._Warp(wasmFuncPtr);removeFunction(wasmFuncPtr);return out};Module.CrossSection.prototype.decompose=function(){const vec=this._Decompose();const result=fromVec(vec);vec.delete();return result};Module.CrossSection.prototype.bounds=function(){const result=this._Bounds();return{min:["x","y"].map(f=>result.min[f]),max:["x","y"].map(f=>result.max[f])}};Module.CrossSection.prototype.offset=function(delta,joinType="Round",miterLimit=2,circularSegments=0){return this._Offset(delta,joinTypeToInt(joinType),miterLimit,circularSegments)};Module.CrossSection.prototype.simplify=function(epsilon=1e-6){return this._Simplify(epsilon)};Module.CrossSection.prototype.extrude=function(height,nDivisions=0,twistDegrees=0,scaleTop=[1,1],center=false){scaleTop=vararg2vec2([scaleTop]);const man=Module._Extrude(this._ToPolygons(),height,nDivisions,twistDegrees,scaleTop);return center?man.translate([0,0,-height/2]):man};Module.CrossSection.prototype.revolve=function(circularSegments=0,revolveDegrees=360){return Module._Revolve(this._ToPolygons(),circularSegments,revolveDegrees)};Module.CrossSection.prototype.add=function(other){return this._add(cross(other))};Module.CrossSection.prototype.subtract=function(other){return this._subtract(cross(other))};Module.CrossSection.prototype.intersect=function(other){return this._intersect(cross(other))};Module.CrossSection.prototype.toPolygons=function(){const vec=this._ToPolygons();const result=vec2polygons(vec,v=>[v.x,v.y]);vec.delete();return result};Module.Manifold.prototype.smoothOut=function(minSharpAngle=60,minSmoothness=0){return this._SmoothOut(minSharpAngle,minSmoothness)};Module.Manifold.prototype.warp=function(func){const wasmFuncPtr=addFunction(function(vec3Ptr){const x=getValue(vec3Ptr,"double");const y=getValue(vec3Ptr+8,"double");const z=getValue(vec3Ptr+16,"double");const vert=[x,y,z];func(vert);setValue(vec3Ptr,vert[0],"double");setValue(vec3Ptr+8,vert[1],"double");setValue(vec3Ptr+16,vert[2],"double")},"vi");const out=this._Warp(wasmFuncPtr);removeFunction(wasmFuncPtr);const status=out.status();if(status!=="NoError"){throw new Module.ManifoldError(status)}return out};Module.Manifold.prototype.calculateNormals=function(normalIdx,minSharpAngle=60){return this._CalculateNormals(normalIdx,minSharpAngle)};Module.Manifold.prototype.setProperties=function(numProp,func){const oldNumProp=this.numProp();const wasmFuncPtr=addFunction(function(newPtr,vec3Ptr,oldPtr){const newProp=[];for(let i=0;i<numProp;++i){newProp[i]=getValue(newPtr+8*i,"double")}const pos=[];for(let i=0;i<3;++i){pos[i]=getValue(vec3Ptr+8*i,"double")}const oldProp=[];for(let i=0;i<oldNumProp;++i){oldProp[i]=getValue(oldPtr+8*i,"double")}func(newProp,pos,oldProp);for(let i=0;i<numProp;++i){setValue(newPtr+8*i,newProp[i],"double")}},"viii");const out=this._SetProperties(numProp,wasmFuncPtr);removeFunction(wasmFuncPtr);return out};Module.Manifold.prototype.translate=function(...vec){return this._Translate(vararg2vec3(vec))};Module.Manifold.prototype.rotate=function(xOrVec,y,z){if(Array.isArray(xOrVec)){return this._Rotate(...xOrVec)}else{return this._Rotate(xOrVec,y||0,z||0)}};Module.Manifold.prototype.scale=function(vec){if(typeof vec=="number"){return this._Scale({x:vec,y:vec,z:vec})}return this._Scale(vararg2vec3([vec]))};Module.Manifold.prototype.mirror=function(vec){return this._Mirror(vararg2vec3([vec]))};Module.Manifold.prototype.trimByPlane=function(normal,offset=0){return this._TrimByPlane(vararg2vec3([normal]),offset)};Module.Manifold.prototype.slice=function(height=0){const polygonsVec=this._Slice(height);const result=new CrossSectionCtor(polygonsVec,fillRuleToInt("Positive"));disposePolygons(polygonsVec);return result};Module.Manifold.prototype.project=function(){const polygonsVec=this._Project();const result=new CrossSectionCtor(polygonsVec,fillRuleToInt("Positive"));disposePolygons(polygonsVec);return result};Module.Manifold.prototype.split=function(manifold){const vec=this._Split(manifold);const result=fromVec(vec);vec.delete();return result};Module.Manifold.prototype.splitByPlane=function(normal,offset=0){const vec=this._SplitByPlane(vararg2vec3([normal]),offset);const result=fromVec(vec);vec.delete();return result};Module.Manifold.prototype.decompose=function(){const vec=this._Decompose();const result=fromVec(vec);vec.delete();return result};Module.Manifold.prototype.boundingBox=function(){const result=this._boundingBox();return{min:["x","y","z"].map(f=>result.min[f]),max:["x","y","z"].map(f=>result.max[f])}};class Mesh{constructor({numProp:numProp=3,triVerts:triVerts=new Uint32Array,vertProperties:vertProperties=new Float32Array,mergeFromVert:mergeFromVert,mergeToVert:mergeToVert,runIndex:runIndex,runOriginalID:runOriginalID,faceID:faceID,halfedgeTangent:halfedgeTangent,runTransform:runTransform}={}){this.numProp=numProp;this.triVerts=triVerts;this.vertProperties=vertProperties;this.mergeFromVert=mergeFromVert;this.mergeToVert=mergeToVert;this.runIndex=runIndex;this.runOriginalID=runOriginalID;this.faceID=faceID;this.halfedgeTangent=halfedgeTangent;this.runTransform=runTransform}get numTri(){return this.triVerts.length/3}get numVert(){return this.vertProperties.length/this.numProp}get numRun(){return this.runOriginalID.length}merge(){const{changed:changed,mesh:mesh}=Module._Merge(this);Object.assign(this,{...mesh});return changed}verts(tri){return this.triVerts.subarray(3*tri,3*(tri+1))}position(vert){return this.vertProperties.subarray(this.numProp*vert,this.numProp*vert+3)}extras(vert){return this.vertProperties.subarray(this.numProp*vert+3,this.numProp*(vert+1))}tangent(halfedge){return this.halfedgeTangent.subarray(4*halfedge,4*(halfedge+1))}transform(run){const mat4=new Array(16);for(const col of[0,1,2,3]){for(const row of[0,1,2]){mat4[4*col+row]=this.runTransform[12*run+3*col+row]}}mat4[15]=1;return mat4}}Module.Mesh=Mesh;Module.Manifold.prototype.getMesh=function(normalIdx=-1){return new Mesh(this._GetMeshJS(normalIdx))};Module.ManifoldError=function ManifoldError(code,...args){let message="Unknown error";switch(code){case"NonFiniteVertex":message="Non-finite vertex";break;case"NotManifold":message="Not manifold";break;case"VertexOutOfBounds":message="Vertex index out of bounds";break;case"PropertiesWrongLength":message="Properties have wrong length";break;case"MissingPositionProperties":message="Less than three properties";break;case"MergeVectorsDifferentLengths":message="Merge vectors have different lengths";break;case"MergeIndexOutOfBounds":message="Merge index out of bounds";break;case"TransformWrongLength":message="Transform vector has wrong length";break;case"RunIndexWrongLength":message="Run index vector has wrong length";break;case"FaceIDWrongLength":message="Face ID vector has wrong length";case"InvalidConstruction":message="Manifold constructed with invalid parameters"}const base=Error.apply(this,[message,...args]);base.name=this.name="ManifoldError";this.message=base.message;this.stack=base.stack;this.code=code};Module.ManifoldError.prototype=Object.create(Error.prototype,{constructor:{value:Module.ManifoldError,writable:true,configurable:true}});Module.CrossSection=function(polygons,fillRule="Positive"){const polygonsVec=polygons2vec(polygons);const cs=new CrossSectionCtor(polygonsVec,fillRuleToInt(fillRule));disposePolygons(polygonsVec);return cs};Module.CrossSection.ofPolygons=function(polygons,fillRule="Positive"){return new Module.CrossSection(polygons,fillRule)};Module.CrossSection.square=function(...args){let size=undefined;if(args.length==0)size={x:1,y:1};else if(typeof args[0]=="number")size={x:args[0],y:args[0]};else size=vararg2vec2(args);const center=args[1]||false;return Module._Square(size,center)};Module.CrossSection.circle=function(radius,circularSegments=0){return Module._Circle(radius,circularSegments)};function crossSectionBatchbool(name){return function(...args){if(args.length==1)args=args[0];const v=new Module.Vector_crossSection;for(const cs of args)v.push_back(cross(cs));const result=Module["_crossSection"+name](v);v.delete();return result}}Module.CrossSection.compose=crossSectionBatchbool("Compose");Module.CrossSection.union=crossSectionBatchbool("UnionN");Module.CrossSection.difference=crossSectionBatchbool("DifferenceN");Module.CrossSection.intersection=crossSectionBatchbool("IntersectionN");function pushVec2(vec,ps){toVec(vec,ps,p=>{if(p instanceof Array)return{x:p[0],y:p[1]};return p})}Module.CrossSection.hull=function(...args){if(args.length==1)args=args[0];let pts=new Module.Vector_vec2;for(const cs of args){if(cs instanceof CrossSectionCtor){Module._crossSectionCollectVertices(pts,cs)}else if(cs instanceof Array&&cs.length==2&&typeof cs[0]=="number"){pts.push_back({x:cs[0],y:cs[1]})}else if(cs.x){pts.push_back(cs)}else{const wrap=cs[0].length==2&&typeof cs[0][0]=="number"||cs[0].x;const polys=wrap?[cs]:cs;for(const poly of polys)pushVec2(pts,poly)}}const result=Module._crossSectionHullPoints(pts);pts.delete();return result};Module.CrossSection.prototype=Object.create(CrossSectionCtor.prototype);Object.defineProperty(Module.CrossSection,Symbol.hasInstance,{get:()=>t=>t instanceof CrossSectionCtor});const ManifoldCtor=Module.Manifold;Module.Manifold=function(mesh){const manifold=new ManifoldCtor(mesh);const status=manifold.status();if(status!=="NoError"){throw new Module.ManifoldError(status)}return manifold};Module.Manifold.ofMesh=function(mesh){return new Module.Manifold(mesh)};Module.Manifold.tetrahedron=function(){return Module._Tetrahedron()};Module.Manifold.cube=function(...args){let size=undefined;if(args.length==0)size={x:1,y:1,z:1};else if(typeof args[0]=="number")size={x:args[0],y:args[0],z:args[0]};else size=vararg2vec3(args);const center=args[1]||false;return Module._Cube(size,center)};Module.Manifold.cylinder=function(height,radiusLow,radiusHigh=-1,circularSegments=0,center=false){return Module._Cylinder(height,radiusLow,radiusHigh,circularSegments,center)};Module.Manifold.sphere=function(radius,circularSegments=0){return Module._Sphere(radius,circularSegments)};Module.Manifold.smooth=function(mesh,sharpenedEdges=[]){const sharp=new Module.Vector_smoothness;toVec(sharp,sharpenedEdges);const result=Module._Smooth(mesh,sharp);sharp.delete();return result};Module.Manifold.extrude=function(polygons,height,nDivisions=0,twistDegrees=0,scaleTop=[1,1],center=false){const cs=polygons instanceof CrossSectionCtor?polygons:Module.CrossSection(polygons,"Positive");return cs.extrude(height,nDivisions,twistDegrees,scaleTop,center)};Module.Manifold.revolve=function(polygons,circularSegments=0,revolveDegrees=360){const cs=polygons instanceof CrossSectionCtor?polygons:Module.CrossSection(polygons,"Positive");return cs.revolve(circularSegments,revolveDegrees)};Module.Manifold.reserveIDs=function(n){return Module._ReserveIDs(n)};Module.Manifold.compose=function(manifolds){const vec=new Module.Vector_manifold;toVec(vec,manifolds);const result=Module._manifoldCompose(vec);vec.delete();return result};function manifoldBatchbool(name){return function(...args){if(args.length==1)args=args[0];const v=new Module.Vector_manifold;for(const m of args)v.push_back(m);const result=Module["_manifold"+name+"N"](v);v.delete();return result}}Module.Manifold.union=manifoldBatchbool("Union");Module.Manifold.difference=manifoldBatchbool("Difference");Module.Manifold.intersection=manifoldBatchbool("Intersection");Module.Manifold.levelSet=function(sdf,bounds,edgeLength,level=0,tolerance=-1){const bounds2={min:{x:bounds.min[0],y:bounds.min[1],z:bounds.min[2]},max:{x:bounds.max[0],y:bounds.max[1],z:bounds.max[2]}};const wasmFuncPtr=addFunction(function(vec3Ptr){const x=getValue(vec3Ptr,"double");const y=getValue(vec3Ptr+8,"double");const z=getValue(vec3Ptr+16,"double");const vert=[x,y,z];return sdf(vert)},"di");const out=Module._LevelSet(wasmFuncPtr,bounds2,edgeLength,level,tolerance);removeFunction(wasmFuncPtr);return out};function pushVec3(vec,ps){toVec(vec,ps,p=>{if(p instanceof Array)return{x:p[0],y:p[1],z:p[2]};return p})}Module.Manifold.hull=function(...args){if(args.length==1)args=args[0];let pts=new Module.Vector_vec3;for(const m of args){if(m instanceof ManifoldCtor){Module._manifoldCollectVertices(pts,m)}else if(m instanceof Array&&m.length==3&&typeof m[0]=="number"){pts.push_back({x:m[0],y:m[1],z:m[2]})}else if(m.x){pts.push_back(m)}else{pushVec3(pts,m)}}const result=Module._manifoldHullPoints(pts);pts.delete();return result};Module.Manifold.prototype=Object.create(ManifoldCtor.prototype);Object.defineProperty(Module.Manifold,Symbol.hasInstance,{get:()=>t=>t instanceof ManifoldCtor});Module.triangulate=function(polygons,epsilon=-1,allowConvex=true){const polygonsVec=polygons2vec(polygons);const result=fromVec(Module._Triangulate(polygonsVec,epsilon,allowConvex),x=>[x[0],x[1],x[2]]);disposePolygons(polygonsVec);return result}};var moduleOverrides=Object.assign({},Module);var arguments_=[];var thisProgram="./this.program";var quit_=(status,toThrow)=>{throw toThrow};var scriptDirectory="";function locateFile(path){if(Module["locateFile"]){return Module["locateFile"](path,scriptDirectory)}return scriptDirectory+path}var readAsync,readBinary;if(ENVIRONMENT_IS_NODE){var fs=require("fs");var nodePath=require("path");scriptDirectory=require("url").fileURLToPath(new URL("./",import.meta.url));readBinary=filename=>{filename=isFileURI(filename)?new URL(filename):nodePath.normalize(filename);var ret=fs.readFileSync(filename);return ret};readAsync=(filename,binary=true)=>{filename=isFileURI(filename)?new URL(filename):nodePath.normalize(filename);return new Promise((resolve,reject)=>{fs.readFile(filename,binary?undefined:"utf8",(err,data)=>{if(err)reject(err);else resolve(binary?data.buffer:data)})})};if(!Module["thisProgram"]&&process.argv.length>1){thisProgram=process.argv[1].replace(/\\/g,"/")}arguments_=process.argv.slice(2);quit_=(status,toThrow)=>{process.exitCode=status;throw toThrow}}else if(ENVIRONMENT_IS_WEB||ENVIRONMENT_IS_WORKER){if(ENVIRONMENT_IS_WORKER){scriptDirectory=self.location.href}else if(typeof document!="undefined"&&document.currentScript){scriptDirectory=document.currentScript.src}if(_scriptName){scriptDirectory=_scriptName}if(scriptDirectory.startsWith("blob:")){scriptDirectory=""}else{scriptDirectory=scriptDirectory.substr(0,scriptDirectory.replace(/[?#].*/,"").lastIndexOf("/")+1)}{if(ENVIRONMENT_IS_WORKER){readBinary=url=>{var xhr=new XMLHttpRequest;xhr.open("GET",url,false);xhr.responseType="arraybuffer";xhr.send(null);return new Uint8Array(xhr.response)}}readAsync=url=>{if(isFileURI(url)){return new Promise((reject,resolve)=>{var xhr=new XMLHttpRequest;xhr.open("GET",url,true);xhr.responseType="arraybuffer";xhr.onload=()=>{if(xhr.status==200||xhr.status==0&&xhr.response){resolve(xhr.response)}reject(xhr.status)};xhr.onerror=reject;xhr.send(null)})}return fetch(url,{credentials:"same-origin"}).then(response=>{if(response.ok){return response.arrayBuffer()}return Promise.reject(new Error(response.status+" : "+response.url))})}}}else{}var out=Module["print"]||console.log.bind(console);var err=Module["printErr"]||console.error.bind(console);Object.assign(Module,moduleOverrides);moduleOverrides=null;if(Module["arguments"])arguments_=Module["arguments"];if(Module["thisProgram"])thisProgram=Module["thisProgram"];if(Module["quit"])quit_=Module["quit"];var wasmBinary;if(Module["wasmBinary"])wasmBinary=Module["wasmBinary"];var wasmMemory;var ABORT=false;var EXITSTATUS;var HEAP8,HEAPU8,HEAP16,HEAPU16,HEAP32,HEAPU32,HEAPF32,HEAPF64;function updateMemoryViews(){var b=wasmMemory.buffer;Module["HEAP8"]=HEAP8=new Int8Array(b);Module["HEAP16"]=HEAP16=new Int16Array(b);Module["HEAPU8"]=HEAPU8=new Uint8Array(b);Module["HEAPU16"]=HEAPU16=new Uint16Array(b);Module["HEAP32"]=HEAP32=new Int32Array(b);Module["HEAPU32"]=HEAPU32=new Uint32Array(b);Module["HEAPF32"]=HEAPF32=new Float32Array(b);Module["HEAPF64"]=HEAPF64=new Float64Array(b)}var __ATPRERUN__=[];var __ATINIT__=[];var __ATPOSTRUN__=[];var runtimeInitialized=false;function preRun(){if(Module["preRun"]){if(typeof Module["preRun"]=="function")Module["preRun"]=[Module["preRun"]];while(Module["preRun"].length){addOnPreRun(Module["preRun"].shift())}}callRuntimeCallbacks(__ATPRERUN__)}function initRuntime(){runtimeInitialized=true;callRuntimeCallbacks(__ATINIT__)}function postRun(){if(Module["postRun"]){if(typeof Module["postRun"]=="function")Module["postRun"]=[Module["postRun"]];while(Module["postRun"].length){addOnPostRun(Module["postRun"].shift())}}callRuntimeCallbacks(__ATPOSTRUN__)}function addOnPreRun(cb){__ATPRERUN__.unshift(cb)}function addOnInit(cb){__ATINIT__.unshift(cb)}function addOnPostRun(cb){__ATPOSTRUN__.unshift(cb)}var runDependencies=0;var runDependencyWatcher=null;var dependenciesFulfilled=null;function addRunDependency(id){runDependencies++;Module["monitorRunDependencies"]?.(runDependencies)}function removeRunDependency(id){runDependencies--;Module["monitorRunDependencies"]?.(runDependencies);if(runDependencies==0){if(runDependencyWatcher!==null){clearInterval(runDependencyWatcher);runDependencyWatcher=null}if(dependenciesFulfilled){var callback=dependenciesFulfilled;dependenciesFulfilled=null;callback()}}}function abort(what){Module["onAbort"]?.(what);what="Aborted("+what+")";err(what);ABORT=true;EXITSTATUS=1;what+=". Build with -sASSERTIONS for more info.";var e=new WebAssembly.RuntimeError(what);readyPromiseReject(e);throw e}var dataURIPrefix="data:application/octet-stream;base64,";var isDataURI=filename=>filename.startsWith(dataURIPrefix);var isFileURI=filename=>filename.startsWith("file://");function findWasmBinary(){if(Module["locateFile"]){var f="manifold.wasm";if(!isDataURI(f)){return locateFile(f)}return f}return new URL("manifold.wasm",import.meta.url).href}var wasmBinaryFile;function getBinarySync(file){if(file==wasmBinaryFile&&wasmBinary){return new Uint8Array(wasmBinary)}if(readBinary){return readBinary(file)}throw"both async and sync fetching of the wasm failed"}function getBinaryPromise(binaryFile){if(!wasmBinary){return readAsync(binaryFile).then(response=>new Uint8Array(response),()=>getBinarySync(binaryFile))}return Promise.resolve().then(()=>getBinarySync(binaryFile))}function instantiateArrayBuffer(binaryFile,imports,receiver){return getBinaryPromise(binaryFile).then(binary=>WebAssembly.instantiate(binary,imports)).then(receiver,reason=>{err(`failed to asynchronously prepare wasm: ${reason}`);abort(reason)})}function instantiateAsync(binary,binaryFile,imports,callback){if(!binary&&typeof WebAssembly.instantiateStreaming=="function"&&!isDataURI(binaryFile)&&!isFileURI(binaryFile)&&!ENVIRONMENT_IS_NODE&&typeof fetch=="function"){return fetch(binaryFile,{credentials:"same-origin"}).then(response=>{var result=WebAssembly.instantiateStreaming(response,imports);return result.then(callback,function(reason){err(`wasm streaming compile failed: ${reason}`);err("falling back to ArrayBuffer instantiation");return instantiateArrayBuffer(binaryFile,imports,callback)})})}return instantiateArrayBuffer(binaryFile,imports,callback)}function getWasmImports(){return{a:wasmImports}}function createWasm(){var info=getWasmImports();function receiveInstance(instance,module){wasmExports=instance.exports;wasmExports=applySignatureConversions(wasmExports);wasmMemory=wasmExports["J"];updateMemoryViews();wasmTable=wasmExports["M"];addOnInit(wasmExports["K"]);removeRunDependency("wasm-instantiate");return wasmExports}addRunDependency("wasm-instantiate");function receiveInstantiationResult(result){receiveInstance(result["instance"])}if(Module["instantiateWasm"]){try{return Module["instantiateWasm"](info,receiveInstance)}catch(e){err(`Module.instantiateWasm callback failed with error: ${e}`);readyPromiseReject(e)}}if(!wasmBinaryFile)wasmBinaryFile=findWasmBinary();instantiateAsync(wasmBinary,wasmBinaryFile,info,receiveInstantiationResult).catch(readyPromiseReject);return{}}var callRuntimeCallbacks=callbacks=>{while(callbacks.length>0){callbacks.shift()(Module)}};function getValue(ptr,type="i8"){if(type.endsWith("*"))type="*";switch(type){case"i1":return HEAP8[ptr>>>0];case"i8":return HEAP8[ptr>>>0];case"i16":return HEAP16[ptr>>>1>>>0];case"i32":return HEAP32[ptr>>>2>>>0];case"i64":abort("to do getValue(i64) use WASM_BIGINT");case"float":return HEAPF32[ptr>>>2>>>0];case"double":return HEAPF64[ptr>>>3>>>0];case"*":return HEAPU32[ptr>>>2>>>0];default:abort(`invalid type for getValue: ${type}`)}}var noExitRuntime=Module["noExitRuntime"]||true;function setValue(ptr,value,type="i8"){if(type.endsWith("*"))type="*";switch(type){case"i1":HEAP8[ptr>>>0]=value;break;case"i8":HEAP8[ptr>>>0]=value;break;case"i16":HEAP16[ptr>>>1>>>0]=value;break;case"i32":HEAP32[ptr>>>2>>>0]=value;break;case"i64":abort("to do setValue(i64) use WASM_BIGINT");case"float":HEAPF32[ptr>>>2>>>0]=value;break;case"double":HEAPF64[ptr>>>3>>>0]=value;break;case"*":HEAPU32[ptr>>>2>>>0]=value;break;default:abort(`invalid type for setValue: ${type}`)}}class ExceptionInfo{constructor(excPtr){this.excPtr=excPtr;this.ptr=excPtr-24}set_type(type){HEAPU32[this.ptr+4>>>2>>>0]=type}get_type(){return HEAPU32[this.ptr+4>>>2>>>0]}set_destructor(destructor){HEAPU32[this.ptr+8>>>2>>>0]=destructor}get_destructor(){return HEAPU32[this.ptr+8>>>2>>>0]}set_caught(caught){caught=caught?1:0;HEAP8[this.ptr+12>>>0]=caught}get_caught(){return HEAP8[this.ptr+12>>>0]!=0}set_rethrown(rethrown){rethrown=rethrown?1:0;HEAP8[this.ptr+13>>>0]=rethrown}get_rethrown(){return HEAP8[this.ptr+13>>>0]!=0}init(type,destructor){this.set_adjusted_ptr(0);this.set_type(type);this.set_destructor(destructor)}set_adjusted_ptr(adjustedPtr){HEAPU32[this.ptr+16>>>2>>>0]=adjustedPtr}get_adjusted_ptr(){return HEAPU32[this.ptr+16>>>2>>>0]}get_exception_ptr(){var isPointer=___cxa_is_pointer_type(this.get_type());if(isPointer){return HEAPU32[this.excPtr>>>2>>>0]}var adjusted=this.get_adjusted_ptr();if(adjusted!==0)return adjusted;return this.excPtr}}var exceptionLast=0;var uncaughtExceptionCount=0;function ___cxa_throw(ptr,type,destructor){ptr>>>=0;type>>>=0;destructor>>>=0;var info=new ExceptionInfo(ptr);info.init(type,destructor);exceptionLast=ptr;uncaughtExceptionCount++;throw exceptionLast}var __abort_js=()=>{abort("")};var structRegistrations={};var runDestructors=destructors=>{while(destructors.length){var ptr=destructors.pop();var del=destructors.pop();del(ptr)}};function readPointer(pointer){return this["fromWireType"](HEAPU32[pointer>>>2>>>0])}var awaitingDependencies={};var registeredTypes={};var typeDependencies={};var InternalError;var throwInternalError=message=>{throw new InternalError(message)};var whenDependentTypesAreResolved=(myTypes,dependentTypes,getTypeConverters)=>{myTypes.forEach(function(type){typeDependencies[type]=dependentTypes});function onComplete(typeConverters){var myTypeConverters=getTypeConverters(typeConverters);if(myTypeConverters.length!==myTypes.length){throwInternalError("Mismatched type converter count")}for(var i=0;i<myTypes.length;++i){registerType(myTypes[i],myTypeConverters[i])}}var typeConverters=new Array(dependentTypes.length);var unregisteredTypes=[];var registered=0;dependentTypes.forEach((dt,i)=>{if(registeredTypes.hasOwnProperty(dt)){typeConverters[i]=registeredTypes[dt]}else{unregisteredTypes.push(dt);if(!awaitingDependencies.hasOwnProperty(dt)){awaitingDependencies[dt]=[]}awaitingDependencies[dt].push(()=>{typeConverters[i]=registeredTypes[dt];++registered;if(registered===unregisteredTypes.length){onComplete(typeConverters)}})}});if(0===unregisteredTypes.length){onComplete(typeConverters)}};var __embind_finalize_value_object=function(structType){structType>>>=0;var reg=structRegistrations[structType];delete structRegistrations[structType];var rawConstructor=reg.rawConstructor;var rawDestructor=reg.rawDestructor;var fieldRecords=reg.fields;var fieldTypes=fieldRecords.map(field=>field.getterReturnType).concat(fieldRecords.map(field=>field.setterArgumentType));whenDependentTypesAreResolved([structType],fieldTypes,fieldTypes=>{var fields={};fieldRecords.forEach((field,i)=>{var fieldName=field.fieldName;var getterReturnType=fieldTypes[i];var getter=field.getter;var getterContext=field.getterContext;var setterArgumentType=fieldTypes[i+fieldRecords.length];var setter=field.setter;var setterContext=field.setterContext;fields[fieldName]={read:ptr=>getterReturnType["fromWireType"](getter(getterContext,ptr)),write:(ptr,o)=>{var destructors=[];setter(setterContext,ptr,setterArgumentType["toWireType"](destructors,o));runDestructors(destructors)}}});return[{name:reg.name,fromWireType:ptr=>{var rv={};for(var i in fields){rv[i]=fields[i].read(ptr)}rawDestructor(ptr);return rv},toWireType:(destructors,o)=>{for(var fieldName in fields){if(!(fieldName in o)){throw new TypeError(`Missing field: "${fieldName}"`)}}var ptr=rawConstructor();for(fieldName in fields){fields[fieldName].write(ptr,o[fieldName])}if(destructors!==null){destructors.push(rawDestructor,ptr)}return ptr},argPackAdvance:GenericWireTypeSize,readValueFromPointer:readPointer,destructorFunction:rawDestructor}]})};function __embind_register_bigint(primitiveType,name,size,minRange,maxRange){primitiveType>>>=0;name>>>=0;size>>>=0}var embind_init_charCodes=()=>{var codes=new Array(256);for(var i=0;i<256;++i){codes[i]=String.fromCharCode(i)}embind_charCodes=codes};var embind_charCodes;var readLatin1String=ptr=>{var ret="";var c=ptr;while(HEAPU8[c>>>0]){ret+=embind_charCodes[HEAPU8[c++>>>0]]}return ret};var BindingError;var throwBindingError=message=>{throw new BindingError(message)};function sharedRegisterType(rawType,registeredInstance,options={}){var name=registeredInstance.name;if(!rawType){throwBindingError(`type "${name}" must have a positive integer typeid pointer`)}if(registeredTypes.hasOwnProperty(rawType)){if(options.ignoreDuplicateRegistrations){return}else{throwBindingError(`Cannot register type '${name}' twice`)}}registeredTypes[rawType]=registeredInstance;delete typeDependencies[rawType];if(awaitingDependencies.hasOwnProperty(rawType)){var callbacks=awaitingDependencies[rawType];delete awaitingDependencies[rawType];callbacks.forEach(cb=>cb())}}function registerType(rawType,registeredInstance,options={}){if(!("argPackAdvance"in registeredInstance)){throw new TypeError("registerType registeredInstance requires argPackAdvance")}return sharedRegisterType(rawType,registeredInstance,options)}var GenericWireTypeSize=8;function __embind_register_bool(rawType,name,trueValue,falseValue){rawType>>>=0;name>>>=0;name=readLatin1String(name);registerType(rawType,{name:name,fromWireType:function(wt){return!!wt},toWireType:function(destructors,o){return o?trueValue:falseValue},argPackAdvance:GenericWireTypeSize,readValueFromPointer:function(pointer){return this["fromWireType"](HEAPU8[pointer>>>0])},destructorFunction:null})}var shallowCopyInternalPointer=o=>({count:o.count,deleteScheduled:o.deleteScheduled,preservePointerOnDelete:o.preservePointerOnDelete,ptr:o.ptr,ptrType:o.ptrType,smartPtr:o.smartPtr,smartPtrType:o.smartPtrType});var throwInstanceAlreadyDeleted=obj=>{function getInstanceTypeName(handle){return handle.$$.ptrType.registeredClass.name}throwBindingError(getInstanceTypeName(obj)+" instance already deleted")};var finalizationRegistry=false;var detachFinalizer=handle=>{};var runDestructor=$$=>{if($$.smartPtr){$$.smartPtrType.rawDestructor($$.smartPtr)}else{$$.ptrType.registeredClass.rawDestructor($$.ptr)}};var releaseClassHandle=$$=>{$$.count.value-=1;var toDelete=0===$$.count.value;if(toDelete){runDestructor($$)}};var downcastPointer=(ptr,ptrClass,desiredClass)=>{if(ptrClass===desiredClass){return ptr}if(undefined===desiredClass.baseClass){return null}var rv=downcastPointer(ptr,ptrClass,desiredClass.baseClass);if(rv===null){return null}return desiredClass.downcast(rv)};var registeredPointers={};var getInheritedInstanceCount=()=>Object.keys(registeredInstances).length;var getLiveInheritedInstances=()=>{var rv=[];for(var k in registeredInstances){if(registeredInstances.hasOwnProperty(k)){rv.push(registeredInstances[k])}}return rv};var deletionQueue=[];var flushPendingDeletes=()=>{while(deletionQueue.length){var obj=deletionQueue.pop();obj.$$.deleteScheduled=false;obj["delete"]()}};var delayFunction;var setDelayFunction=fn=>{delayFunction=fn;if(deletionQueue.length&&delayFunction){delayFunction(flushPendingDeletes)}};var init_embind=()=>{Module["getInheritedInstanceCount"]=getInheritedInstanceCount;Module["getLiveInheritedInstances"]=getLiveInheritedInstances;Module["flushPendingDeletes"]=flushPendingDeletes;Module["setDelayFunction"]=setDelayFunction};var registeredInstances={};var getBasestPointer=(class_,ptr)=>{if(ptr===undefined){throwBindingError("ptr should not be undefined")}while(class_.baseClass){ptr=class_.upcast(ptr);class_=class_.baseClass}return ptr};var getInheritedInstance=(class_,ptr)=>{ptr=getBasestPointer(class_,ptr);return registeredInstances[ptr]};var makeClassHandle=(prototype,record)=>{if(!record.ptrType||!record.ptr){throwInternalError("makeClassHandle requires ptr and ptrType")}var hasSmartPtrType=!!record.smartPtrType;var hasSmartPtr=!!record.smartPtr;if(hasSmartPtrType!==hasSmartPtr){throwInternalError("Both smartPtrType and smartPtr must be specified")}record.count={value:1};return attachFinalizer(Object.create(prototype,{$$:{value:record,writable:true}}))};function RegisteredPointer_fromWireType(ptr){var rawPointer=this.getPointee(ptr);if(!rawPointer){this.destructor(ptr);return null}var registeredInstance=getInheritedInstance(this.registeredClass,rawPointer);if(undefined!==registeredInstance){if(0===registeredInstance.$$.count.value){registeredInstance.$$.ptr=rawPointer;registeredInstance.$$.smartPtr=ptr;return registeredInstance["clone"]()}else{var rv=registeredInstance["clone"]();this.destructor(ptr);return rv}}function makeDefaultHandle(){if(this.isSmartPointer){return makeClassHandle(this.registeredClass.instancePrototype,{ptrType:this.pointeeType,ptr:rawPointer,smartPtrType:this,smartPtr:ptr})}else{return makeClassHandle(this.registeredClass.instancePrototype,{ptrType:this,ptr:ptr})}}var actualType=this.registeredClass.getActualType(rawPointer);var registeredPointerRecord=registeredPointers[actualType];if(!registeredPointerRecord){return makeDefaultHandle.call(this)}var toType;if(this.isConst){toType=registeredPointerRecord.constPointerType}else{toType=registeredPointerRecord.pointerType}var dp=downcastPointer(rawPointer,this.registeredClass,toType.registeredClass);if(dp===null){return makeDefaultHandle.call(this)}if(this.isSmartPointer){return makeClassHandle(toType.registeredClass.instancePrototype,{ptrType:toType,ptr:dp,smartPtrType:this,smartPtr:ptr})}else{return makeClassHandle(toType.registeredClass.instancePrototype,{ptrType:toType,ptr:dp})}}var attachFinalizer=handle=>{if("undefined"===typeof FinalizationRegistry){attachFinalizer=handle=>handle;return handle}finalizationRegistry=new FinalizationRegistry(info=>{releaseClassHandle(info.$$)});attachFinalizer=handle=>{var $$=handle.$$;var hasSmartPtr=!!$$.smartPtr;if(hasSmartPtr){var info={$$:$$};finalizationRegistry.register(handle,info,handle)}return handle};detachFinalizer=handle=>finalizationRegistry.unregister(handle);return attachFinalizer(handle)};var init_ClassHandle=()=>{Object.assign(ClassHandle.prototype,{isAliasOf(other){if(!(this instanceof ClassHandle)){return false}if(!(other instanceof ClassHandle)){return false}var leftClass=this.$$.ptrType.registeredClass;var left=this.$$.ptr;other.$$=other.$$;var rightClass=other.$$.ptrType.registeredClass;var right=other.$$.ptr;while(leftClass.baseClass){left=leftClass.upcast(left);leftClass=leftClass.baseClass}while(rightClass.baseClass){right=rightClass.upcast(right);rightClass=rightClass.baseClass}return leftClass===rightClass&&left===right},clone(){if(!this.$$.ptr){throwInstanceAlreadyDeleted(this)}if(this.$$.preservePointerOnDelete){this.$$.count.value+=1;return this}else{var clone=attachFinalizer(Object.create(Object.getPrototypeOf(this),{$$:{value:shallowCopyInternalPointer(this.$$)}}));clone.$$.count.value+=1;clone.$$.deleteScheduled=false;return clone}},delete(){if(!this.$$.ptr){throwInstanceAlreadyDeleted(this)}if(this.$$.deleteScheduled&&!this.$$.preservePointerOnDelete){throwBindingError("Object already scheduled for deletion")}detachFinalizer(this);releaseClassHandle(this.$$);if(!this.$$.preservePointerOnDelete){this.$$.smartPtr=undefined;this.$$.ptr=undefined}},isDeleted(){return!this.$$.ptr},deleteLater(){if(!this.$$.ptr){throwInstanceAlreadyDeleted(this)}if(this.$$.deleteScheduled&&!this.$$.preservePointerOnDelete){throwBindingError("Object already scheduled for deletion")}deletionQueue.push(this);if(deletionQueue.length===1&&delayFunction){delayFunction(flushPendingDeletes)}this.$$.deleteScheduled=true;return this}})};function ClassHandle(){}var createNamedFunction=(name,body)=>Object.defineProperty(body,"name",{value:name});var ensureOverloadTable=(proto,methodName,humanName)=>{if(undefined===proto[methodName].overloadTable){var prevFunc=proto[methodName];proto[methodName]=function(...args){if(!proto[methodName].overloadTable.hasOwnProperty(args.length)){throwBindingError(`Function '${humanName}' called with an invalid number of arguments (${args.length}) - expects one of (${proto[methodName].overloadTable})!`)}return proto[methodName].overloadTable[args.length].apply(this,args)};proto[methodName].overloadTable=[];proto[methodName].overloadTable[prevFunc.argCount]=prevFunc}};var exposePublicSymbol=(name,value,numArguments)=>{if(Module.hasOwnProperty(name)){if(undefined===numArguments||undefined!==Module[name].overloadTable&&undefined!==Module[name].overloadTable[numArguments]){throwBindingError(`Cannot register public name '${name}' twice`)}ensureOverloadTable(Module,name,name);if(Module.hasOwnProperty(numArguments)){throwBindingError(`Cannot register multiple overloads of a function with the same number of arguments (${numArguments})!`)}Module[name].overloadTable[numArguments]=value}else{Module[name]=value;if(undefined!==numArguments){Module[name].numArguments=numArguments}}};var char_0=48;var char_9=57;var makeLegalFunctionName=name=>{if(undefined===name){return"_unknown"}name=name.replace(/[^a-zA-Z0-9_]/g,"$");var f=name.charCodeAt(0);if(f>=char_0&&f<=char_9){return`_${name}`}return name};function RegisteredClass(name,constructor,instancePrototype,rawDestructor,baseClass,getActualType,upcast,downcast){this.name=name;this.constructor=constructor;this.instancePrototype=instancePrototype;this.rawDestructor=rawDestructor;this.baseClass=baseClass;this.getActualType=getActualType;this.upcast=upcast;this.downcast=downcast;this.pureVirtualFunctions=[]}var upcastPointer=(ptr,ptrClass,desiredClass)=>{while(ptrClass!==desiredClass){if(!ptrClass.upcast){throwBindingError(`Expected null or instance of ${desiredClass.name}, got an instance of ${ptrClass.name}`)}ptr=ptrClass.upcast(ptr);ptrClass=ptrClass.baseClass}return ptr};function constNoSmartPtrRawPointerToWireType(destructors,handle){if(handle===null){if(this.isReference){throwBindingError(`null is not a valid ${this.name}`)}return 0}if(!handle.$$){throwBindingError(`Cannot pass "${embindRepr(handle)}" as a ${this.name}`)}if(!handle.$$.ptr){throwBindingError(`Cannot pass deleted object as a pointer of type ${this.name}`)}var handleClass=handle.$$.ptrType.registeredClass;var ptr=upcastPointer(handle.$$.ptr,handleClass,this.registeredClass);return ptr}function genericPointerToWireType(destructors,handle){var ptr;if(handle===null){if(this.isReference){throwBindingError(`null is not a valid ${this.name}`)}if(this.isSmartPointer){ptr=this.rawConstructor();if(destructors!==null){destructors.push(this.rawDestructor,ptr)}return ptr}else{return 0}}if(!handle||!handle.$$){throwBindingError(`Cannot pass "${embindRepr(handle)}" as a ${this.name}`)}if(!handle.$$.ptr){throwBindingError(`Cannot pass deleted object as a pointer of type ${this.name}`)}if(!this.isConst&&handle.$$.ptrType.isConst){throwBindingError(`Cannot convert argument of type ${handle.$$.smartPtrType?handle.$$.smartPtrType.name:handle.$$.ptrType.name} to parameter type ${this.name}`)}var handleClass=handle.$$.ptrType.registeredClass;ptr=upcastPointer(handle.$$.ptr,handleClass,this.registeredClass);if(this.isSmartPointer){if(undefined===handle.$$.smartPtr){throwBindingError("Passing raw pointer to smart pointer is illegal")}switch(this.sharingPolicy){case 0:if(handle.$$.smartPtrType===this){ptr=handle.$$.smartPtr}else{throwBindingError(`Cannot convert argument of type ${handle.$$.smartPtrType?handle.$$.smartPtrType.name:handle.$$.ptrType.name} to parameter type ${this.name}`)}break;case 1:ptr=handle.$$.smartPtr;break;case 2:if(handle.$$.smartPtrType===this){ptr=handle.$$.smartPtr}else{var clonedHandle=handle["clone"]();ptr=this.rawShare(ptr,Emval.toHandle(()=>clonedHandle["delete"]()));if(destructors!==null){destructors.push(this.rawDestructor,ptr)}}break;default:throwBindingError("Unsupporting sharing policy")}}return ptr}function nonConstNoSmartPtrRawPointerToWireType(destructors,handle){if(handle===null){if(this.isReference){throwBindingError(`null is not a valid ${this.name}`)}return 0}if(!handle.$$){throwBindingError(`Cannot pass "${embindRepr(handle)}" as a ${this.name}`)}if(!handle.$$.ptr){throwBindingError(`Cannot pass deleted object as a pointer of type ${this.name}`)}if(handle.$$.ptrType.isConst){throwBindingError(`Cannot convert argument of type ${handle.$$.ptrType.name} to parameter type ${this.name}`)}var handleClass=handle.$$.ptrType.registeredClass;var ptr=upcastPointer(handle.$$.ptr,handleClass,this.registeredClass);return ptr}var init_RegisteredPointer=()=>{Object.assign(RegisteredPointer.prototype,{getPointee(ptr){if(this.rawGetPointee){ptr=this.rawGetPointee(ptr)}return ptr},destructor(ptr){this.rawDestructor?.(ptr)},argPackAdvance:GenericWireTypeSize,readValueFromPointer:readPointer,fromWireType:RegisteredPointer_fromWireType})};function RegisteredPointer(name,registeredClass,isReference,isConst,isSmartPointer,pointeeType,sharingPolicy,rawGetPointee,rawConstructor,rawShare,rawDestructor){this.name=name;this.registeredClass=registeredClass;this.isReference=isReference;this.isConst=isConst;this.isSmartPointer=isSmartPointer;this.pointeeType=pointeeType;this.sharingPolicy=sharingPolicy;this.rawGetPointee=rawGetPointee;this.rawConstructor=rawConstructor;this.rawShare=rawShare;this.rawDestructor=rawDestructor;if(!isSmartPointer&&registeredClass.baseClass===undefined){if(isConst){this["toWireType"]=constNoSmartPtrRawPointerToWireType;this.destructorFunction=null}else{this["toWireType"]=nonConstNoSmartPtrRawPointerToWireType;this.destructorFunction=null}}else{this["toWireType"]=genericPointerToWireType}}var replacePublicSymbol=(name,value,numArguments)=>{if(!Module.hasOwnProperty(name)){throwInternalError("Replacing nonexistent public symbol")}if(undefined!==Module[name].overloadTable&&undefined!==numArguments){Module[name].overloadTable[numArguments]=value}else{Module[name]=value;Module[name].argCount=numArguments}};var dynCallLegacy=(sig,ptr,args)=>{sig=sig.replace(/p/g,"i");var f=Module["dynCall_"+sig];return f(ptr,...args)};var wasmTable;var getWasmTableEntry=funcPtr=>wasmTable.get(funcPtr);var dynCall=(sig,ptr,args=[])=>{if(sig.includes("j")){return dynCallLegacy(sig,ptr,args)}var rtn=getWasmTableEntry(ptr)(...args);return sig[0]=="p"?rtn>>>0:rtn};var getDynCaller=(sig,ptr)=>(...args)=>dynCall(sig,ptr,args);var embind__requireFunction=(signature,rawFunction)=>{signature=readLatin1String(signature);function makeDynCaller(){if(signature.includes("j")){return getDynCaller(signature,rawFunction)}if(signature.includes("p")){return getDynCaller(signature,rawFunction)}return getWasmTableEntry(rawFunction)}var fp=makeDynCaller();if(typeof fp!="function"){throwBindingError(`unknown function pointer with signature ${signature}: ${rawFunction}`)}return fp};var extendError=(baseErrorType,errorName)=>{var errorClass=createNamedFunction(errorName,function(message){this.name=errorName;this.message=message;var stack=new Error(message).stack;if(stack!==undefined){this.stack=this.toString()+"\n"+stack.replace(/^Error(:[^\n]*)?\n/,"")}});errorClass.prototype=Object.create(baseErrorType.prototype);errorClass.prototype.constructor=errorClass;errorClass.prototype.toString=function(){if(this.message===undefined){return this.name}else{return`${this.name}: ${this.message}`}};return errorClass};var UnboundTypeError;var getTypeName=type=>{var ptr=___getTypeName(type);var rv=readLatin1String(ptr);_free(ptr);return rv};var throwUnboundTypeError=(message,types)=>{var unboundTypes=[];var seen={};function visit(type){if(seen[type]){return}if(registeredTypes[type]){return}if(typeDependencies[type]){typeDependencies[type].forEach(visit);return}unboundTypes.push(type);seen[type]=true}types.forEach(visit);throw new UnboundTypeError(`${message}: `+unboundTypes.map(getTypeName).join([", "]))};function __embind_register_class(rawType,rawPointerType,rawConstPointerType,baseClassRawType,getActualTypeSignature,getActualType,upcastSignature,upcast,downcastSignature,downcast,name,destructorSignature,rawDestructor){rawType>>>=0;rawPointerType>>>=0;rawConstPointerType>>>=0;baseClassRawType>>>=0;getActualTypeSignature>>>=0;getActualType>>>=0;upcastSignature>>>=0;upcast>>>=0;downcastSignature>>>=0;downcast>>>=0;name>>>=0;destructorSignature>>>=0;rawDestructor>>>=0;name=readLatin1String(name);getActualType=embind__requireFunction(getActualTypeSignature,getActualType);upcast&&=embind__requireFunction(upcastSignature,upcast);downcast&&=embind__requireFunction(downcastSignature,downcast);rawDestructor=embind__requireFunction(destructorSignature,rawDestructor);var legalFunctionName=makeLegalFunctionName(name);exposePublicSymbol(legalFunctionName,function(){throwUnboundTypeError(`Cannot construct ${name} due to unbound types`,[baseClassRawType])});whenDependentTypesAreResolved([rawType,rawPointerType,rawConstPointerType],baseClassRawType?[baseClassRawType]:[],base=>{base=base[0];var baseClass;var basePrototype;if(baseClassRawType){baseClass=base.registeredClass;basePrototype=baseClass.instancePrototype}else{basePrototype=ClassHandle.prototype}var constructor=createNamedFunction(name,function(...args){if(Object.getPrototypeOf(this)!==instancePrototype){throw new BindingError("Use 'new' to construct "+name)}if(undefined===registeredClass.constructor_body){throw new BindingError(name+" has no accessible constructor")}var body=registeredClass.constructor_body[args.length];if(undefined===body){throw new BindingError(`Tried to invoke ctor of ${name} with invalid number of parameters (${args.length}) - expected (${Object.keys(registeredClass.constructor_body).toString()}) parameters instead!`)}return body.apply(this,args)});var instancePrototype=Object.create(basePrototype,{constructor:{value:constructor}});constructor.prototype=instancePrototype;var registeredClass=new RegisteredClass(name,constructor,instancePrototype,rawDestructor,baseClass,getActualType,upcast,downcast);if(registeredClass.baseClass){registeredClass.baseClass.__derivedClasses??=[];registeredClass.baseClass.__derivedClasses.push(registeredClass)}var referenceConverter=new RegisteredPointer(name,registeredClass,true,false,false);var pointerConverter=new RegisteredPointer(name+"*",registeredClass,false,false,false);var constPointerConverter=new RegisteredPointer(name+" const*",registeredClass,false,true,false);registeredPointers[rawType]={pointerType:pointerConverter,constPointerType:constPointerConverter};replacePublicSymbol(legalFunctionName,constructor);return[referenceConverter,pointerConverter,constPointerConverter]})}var heap32VectorToArray=(count,firstElement)=>{var array=[];for(var i=0;i<count;i++){array.push(HEAPU32[firstElement+i*4>>>2>>>0])}return array};function usesDestructorStack(argTypes){for(var i=1;i<argTypes.length;++i){if(argTypes[i]!==null&&argTypes[i].destructorFunction===undefined){return true}}return false}function newFunc(constructor,argumentList){if(!(constructor instanceof Function)){throw new TypeError(`new_ called with constructor type ${typeof constructor} which is not a function`)}var dummy=createNamedFunction(constructor.name||"unknownFunctionName",function(){});dummy.prototype=constructor.prototype;var obj=new dummy;var r=constructor.apply(obj,argumentList);return r instanceof Object?r:obj}function createJsInvoker(argTypes,isClassMethodFunc,returns,isAsync){var needsDestructorStack=usesDestructorStack(argTypes);var argCount=argTypes.length;var argsList="";var argsListWired="";for(var i=0;i<argCount-2;++i){argsList+=(i!==0?", ":"")+"arg"+i;argsListWired+=(i!==0?", ":"")+"arg"+i+"Wired"}var invokerFnBody=`\n        return function (${argsList}) {\n        if (arguments.length !== ${argCount-2}) {\n          throwBindingError('function ' + humanName + ' called with ' + arguments.length + ' arguments, expected ${argCount-2}');\n        }`;if(needsDestructorStack){invokerFnBody+="var destructors = [];\n"}var dtorStack=needsDestructorStack?"destructors":"null";var args1=["humanName","throwBindingError","invoker","fn","runDestructors","retType","classParam"];if(isClassMethodFunc){invokerFnBody+="var thisWired = classParam['toWireType']("+dtorStack+", this);\n"}for(var i=0;i<argCount-2;++i){invokerFnBody+="var arg"+i+"Wired = argType"+i+"['toWireType']("+dtorStack+", arg"+i+");\n";args1.push("argType"+i)}if(isClassMethodFunc){argsListWired="thisWired"+(argsListWired.length>0?", ":"")+argsListWired}invokerFnBody+=(returns||isAsync?"var rv = ":"")+"invoker(fn"+(argsListWired.length>0?", ":"")+argsListWired+");\n";if(needsDestructorStack){invokerFnBody+="runDestructors(destructors);\n"}else{for(var i=isClassMethodFunc?1:2;i<argTypes.length;++i){var paramName=i===1?"thisWired":"arg"+(i-2)+"Wired";if(argTypes[i].destructorFunction!==null){invokerFnBody+=`${paramName}_dtor(${paramName});\n`;args1.push(`${paramName}_dtor`)}}}if(returns){invokerFnBody+="var ret = retType['fromWireType'](rv);\n"+"return ret;\n"}else{}invokerFnBody+="}\n";return[args1,invokerFnBody]}function craftInvokerFunction(humanName,argTypes,classType,cppInvokerFunc,cppTargetFunc,isAsync){var argCount=argTypes.length;if(argCount<2){throwBindingError("argTypes array size mismatch! Must at least get return value and 'this' types!")}var isClassMethodFunc=argTypes[1]!==null&&classType!==null;var needsDestructorStack=usesDestructorStack(argTypes);var returns=argTypes[0].name!=="void";var closureArgs=[humanName,throwBindingError,cppInvokerFunc,cppTargetFunc,runDestructors,argTypes[0],argTypes[1]];for(var i=0;i<argCount-2;++i){closureArgs.push(argTypes[i+2])}if(!needsDestructorStack){for(var i=isClassMethodFunc?1:2;i<argTypes.length;++i){if(argTypes[i].destructorFunction!==null){closureArgs.push(argTypes[i].destructorFunction)}}}let[args,invokerFnBody]=createJsInvoker(argTypes,isClassMethodFunc,returns,isAsync);args.push(invokerFnBody);var invokerFn=newFunc(Function,args)(...closureArgs);return createNamedFunction(humanName,invokerFn)}var __embind_register_class_constructor=function(rawClassType,argCount,rawArgTypesAddr,invokerSignature,invoker,rawConstructor){rawClassType>>>=0;rawArgTypesAddr>>>=0;invokerSignature>>>=0;invoker>>>=0;rawConstructor>>>=0;var rawArgTypes=heap32VectorToArray(argCount,rawArgTypesAddr);invoker=embind__requireFunction(invokerSignature,invoker);whenDependentTypesAreResolved([],[rawClassType],classType=>{classType=classType[0];var humanName=`constructor ${classType.name}`;if(undefined===classType.registeredClass.constructor_body){classType.registeredClass.constructor_body=[]}if(undefined!==classType.registeredClass.constructor_body[argCount-1]){throw new BindingError(`Cannot register multiple constructors with identical number of parameters (${argCount-1}) for class '${classType.name}'! Overload resolution is currently only performed using the parameter count, not actual type info!`)}classType.registeredClass.constructor_body[argCount-1]=()=>{throwUnboundTypeError(`Cannot construct ${classType.name} due to unbound types`,rawArgTypes)};whenDependentTypesAreResolved([],rawArgTypes,argTypes=>{argTypes.splice(1,0,null);classType.registeredClass.constructor_body[argCount-1]=craftInvokerFunction(humanName,argTypes,null,invoker,rawConstructor);return[]});return[]})};var getFunctionName=signature=>{signature=signature.trim();const argsIndex=signature.indexOf("(");if(argsIndex!==-1){return signature.substr(0,argsIndex)}else{return signature}};var __embind_register_class_function=function(rawClassType,methodName,argCount,rawArgTypesAddr,invokerSignature,rawInvoker,context,isPureVirtual,isAsync){rawClassType>>>=0;methodName>>>=0;rawArgTypesAddr>>>=0;invokerSignature>>>=0;rawInvoker>>>=0;context>>>=0;var rawArgTypes=heap32VectorToArray(argCount,rawArgTypesAddr);methodName=readLatin1String(methodName);methodName=getFunctionName(methodName);rawInvoker=embind__requireFunction(invokerSignature,rawInvoker);whenDependentTypesAreResolved([],[rawClassType],classType=>{classType=classType[0];var humanName=`${classType.name}.${methodName}`;if(methodName.startsWith("@@")){methodName=Symbol[methodName.substring(2)]}if(isPureVirtual){classType.registeredClass.pureVirtualFunctions.push(methodName)}function unboundTypesHandler(){throwUnboundTypeError(`Cannot call ${humanName} due to unbound types`,rawArgTypes)}var proto=classType.registeredClass.instancePrototype;var method=proto[methodName];if(undefined===method||undefined===method.overloadTable&&method.className!==classType.name&&method.argCount===argCount-2){unboundTypesHandler.argCount=argCount-2;unboundTypesHandler.className=classType.name;proto[methodName]=unboundTypesHandler}else{ensureOverloadTable(proto,methodName,humanName);proto[methodName].overloadTable[argCount-2]=unboundTypesHandler}whenDependentTypesAreResolved([],rawArgTypes,argTypes=>{var memberFunction=craftInvokerFunction(humanName,argTypes,classType,rawInvoker,context,isAsync);if(undefined===proto[methodName].overloadTable){memberFunction.argCount=argCount-2;proto[methodName]=memberFunction}else{proto[methodName].overloadTable[argCount-2]=memberFunction}return[]});return[]})};var emval_freelist=[];var emval_handles=[];function __emval_decref(handle){handle>>>=0;if(handle>9&&0===--emval_handles[handle+1]){emval_handles[handle]=undefined;emval_freelist.push(handle)}}var count_emval_handles=()=>emval_handles.length/2-5-emval_freelist.length;var init_emval=()=>{emval_handles.push(0,1,undefined,1,null,1,true,1,false,1);Module["count_emval_handles"]=count_emval_handles};var Emval={toValue:handle=>{if(!handle){throwBindingError("Cannot use deleted val. handle = "+handle)}return emval_handles[handle]},toHandle:value=>{switch(value){case undefined:return 2;case null:return 4;case true:return 6;case false:return 8;default:{const handle=emval_freelist.pop()||emval_handles.length;emval_handles[handle]=value;emval_handles[handle+1]=1;return handle}}}};var EmValType={name:"emscripten::val",fromWireType:handle=>{var rv=Emval.toValue(handle);__emval_decref(handle);return rv},toWireType:(destructors,value)=>Emval.toHandle(value),argPackAdvance:GenericWireTypeSize,readValueFromPointer:readPointer,destructorFunction:null};function __embind_register_emval(rawType){rawType>>>=0;return registerType(rawType,EmValType)}var enumReadValueFromPointer=(name,width,signed)=>{switch(width){case 1:return signed?function(pointer){return this["fromWireType"](HEAP8[pointer>>>0])}:function(pointer){return this["fromWireType"](HEAPU8[pointer>>>0])};case 2:return signed?function(pointer){return this["fromWireType"](HEAP16[pointer>>>1>>>0])}:function(pointer){return this["fromWireType"](HEAPU16[pointer>>>1>>>0])};case 4:return signed?function(pointer){return this["fromWireType"](HEAP32[pointer>>>2>>>0])}:function(pointer){return this["fromWireType"](HEAPU32[pointer>>>2>>>0])};default:throw new TypeError(`invalid integer width (${width}): ${name}`)}};function __embind_register_enum(rawType,name,size,isSigned){rawType>>>=0;name>>>=0;size>>>=0;name=readLatin1String(name);function ctor(){}ctor.values={};registerType(rawType,{name:name,constructor:ctor,fromWireType:function(c){return this.constructor.values[c]},toWireType:(destructors,c)=>c.value,argPackAdvance:GenericWireTypeSize,readValueFromPointer:enumReadValueFromPointer(name,size,isSigned),destructorFunction:null});exposePublicSymbol(name,ctor)}var requireRegisteredType=(rawType,humanName)=>{var impl=registeredTypes[rawType];if(undefined===impl){throwBindingError(`${humanName} has unknown type ${getTypeName(rawType)}`)}return impl};function __embind_register_enum_value(rawEnumType,name,enumValue){rawEnumType>>>=0;name>>>=0;var enumType=requireRegisteredType(rawEnumType,"enum");name=readLatin1String(name);var Enum=enumType.constructor;var Value=Object.create(enumType.constructor.prototype,{value:{value:enumValue},constructor:{value:createNamedFunction(`${enumType.name}_${name}`,function(){})}});Enum.values[enumValue]=Value;Enum[name]=Value}var embindRepr=v=>{if(v===null){return"null"}var t=typeof v;if(t==="object"||t==="array"||t==="function"){return v.toString()}else{return""+v}};var floatReadValueFromPointer=(name,width)=>{switch(width){case 4:return function(pointer){return this["fromWireType"](HEAPF32[pointer>>>2>>>0])};case 8:return function(pointer){return this["fromWireType"](HEAPF64[pointer>>>3>>>0])};default:throw new TypeError(`invalid float width (${width}): ${name}`)}};var __embind_register_float=function(rawType,name,size){rawType>>>=0;name>>>=0;size>>>=0;name=readLatin1String(name);registerType(rawType,{name:name,fromWireType:value=>value,toWireType:(destructors,value)=>value,argPackAdvance:GenericWireTypeSize,readValueFromPointer:floatReadValueFromPointer(name,size),destructorFunction:null})};function __embind_register_function(name,argCount,rawArgTypesAddr,signature,rawInvoker,fn,isAsync){name>>>=0;rawArgTypesAddr>>>=0;signature>>>=0;rawInvoker>>>=0;fn>>>=0;var argTypes=heap32VectorToArray(argCount,rawArgTypesAddr);name=readLatin1String(name);name=getFunctionName(name);rawInvoker=embind__requireFunction(signature,rawInvoker);exposePublicSymbol(name,function(){throwUnboundTypeError(`Cannot call ${name} due to unbound types`,argTypes)},argCount-1);whenDependentTypesAreResolved([],argTypes,argTypes=>{var invokerArgsArray=[argTypes[0],null].concat(argTypes.slice(1));replacePublicSymbol(name,craftInvokerFunction(name,invokerArgsArray,null,rawInvoker,fn,isAsync),argCount-1);return[]})}var integerReadValueFromPointer=(name,width,signed)=>{switch(width){case 1:return signed?pointer=>HEAP8[pointer>>>0]:pointer=>HEAPU8[pointer>>>0];case 2:return signed?pointer=>HEAP16[pointer>>>1>>>0]:pointer=>HEAPU16[pointer>>>1>>>0];case 4:return signed?pointer=>HEAP32[pointer>>>2>>>0]:pointer=>HEAPU32[pointer>>>2>>>0];default:throw new TypeError(`invalid integer width (${width}): ${name}`)}};function __embind_register_integer(primitiveType,name,size,minRange,maxRange){primitiveType>>>=0;name>>>=0;size>>>=0;name=readLatin1String(name);if(maxRange===-1){maxRange=4294967295}var fromWireType=value=>value;if(minRange===0){var bitshift=32-8*size;fromWireType=value=>value<<bitshift>>>bitshift}var isUnsignedType=name.includes("unsigned");var checkAssertions=(value,toTypeName)=>{};var toWireType;if(isUnsignedType){toWireType=function(destructors,value){checkAssertions(value,this.name);return value>>>0}}else{toWireType=function(destructors,value){checkAssertions(value,this.name);return value}}registerType(primitiveType,{name:name,fromWireType:fromWireType,toWireType:toWireType,argPackAdvance:GenericWireTypeSize,readValueFromPointer:integerReadValueFromPointer(name,size,minRange!==0),destructorFunction:null})}function __embind_register_memory_view(rawType,dataTypeIndex,name){rawType>>>=0;name>>>=0;var typeMapping=[Int8Array,Uint8Array,Int16Array,Uint16Array,Int32Array,Uint32Array,Float32Array,Float64Array];var TA=typeMapping[dataTypeIndex];function decodeMemoryView(handle){var size=HEAPU32[handle>>>2>>>0];var data=HEAPU32[handle+4>>>2>>>0];return new TA(HEAP8.buffer,data,size)}name=readLatin1String(name);registerType(rawType,{name:name,fromWireType:decodeMemoryView,argPackAdvance:GenericWireTypeSize,readValueFromPointer:decodeMemoryView},{ignoreDuplicateRegistrations:true})}function __embind_register_optional(rawOptionalType,rawType){rawOptionalType>>>=0;rawType>>>=0;__embind_register_emval(rawOptionalType)}var stringToUTF8Array=(str,heap,outIdx,maxBytesToWrite)=>{outIdx>>>=0;if(!(maxBytesToWrite>0))return 0;var startIdx=outIdx;var endIdx=outIdx+maxBytesToWrite-1;for(var i=0;i<str.length;++i){var u=str.charCodeAt(i);if(u>=55296&&u<=57343){var u1=str.charCodeAt(++i);u=65536+((u&1023)<<10)|u1&1023}if(u<=127){if(outIdx>=endIdx)break;heap[outIdx++>>>0]=u}else if(u<=2047){if(outIdx+1>=endIdx)break;heap[outIdx++>>>0]=192|u>>6;heap[outIdx++>>>0]=128|u&63}else if(u<=65535){if(outIdx+2>=endIdx)break;heap[outIdx++>>>0]=224|u>>12;heap[outIdx++>>>0]=128|u>>6&63;heap[outIdx++>>>0]=128|u&63}else{if(outIdx+3>=endIdx)break;heap[outIdx++>>>0]=240|u>>18;heap[outIdx++>>>0]=128|u>>12&63;heap[outIdx++>>>0]=128|u>>6&63;heap[outIdx++>>>0]=128|u&63}}heap[outIdx>>>0]=0;return outIdx-startIdx};var stringToUTF8=(str,outPtr,maxBytesToWrite)=>stringToUTF8Array(str,HEAPU8,outPtr,maxBytesToWrite);var lengthBytesUTF8=str=>{var len=0;for(var i=0;i<str.length;++i){var c=str.charCodeAt(i);if(c<=127){len++}else if(c<=2047){len+=2}else if(c>=55296&&c<=57343){len+=4;++i}else{len+=3}}return len};var UTF8Decoder=typeof TextDecoder!="undefined"?new TextDecoder:undefined;var UTF8ArrayToString=(heapOrArray,idx,maxBytesToRead)=>{idx>>>=0;var endIdx=idx+maxBytesToRead;var endPtr=idx;while(heapOrArray[endPtr]&&!(endPtr>=endIdx))++endPtr;if(endPtr-idx>16&&heapOrArray.buffer&&UTF8Decoder){return UTF8Decoder.decode(heapOrArray.subarray(idx,endPtr))}var str="";while(idx<endPtr){var u0=heapOrArray[idx++];if(!(u0&128)){str+=String.fromCharCode(u0);continue}var u1=heapOrArray[idx++]&63;if((u0&224)==192){str+=String.fromCharCode((u0&31)<<6|u1);continue}var u2=heapOrArray[idx++]&63;if((u0&240)==224){u0=(u0&15)<<12|u1<<6|u2}else{u0=(u0&7)<<18|u1<<12|u2<<6|heapOrArray[idx++]&63}if(u0<65536){str+=String.fromCharCode(u0)}else{var ch=u0-65536;str+=String.fromCharCode(55296|ch>>10,56320|ch&1023)}}return str};var UTF8ToString=(ptr,maxBytesToRead)=>{ptr>>>=0;return ptr?UTF8ArrayToString(HEAPU8,ptr,maxBytesToRead):""};function __embind_register_std_string(rawType,name){rawType>>>=0;name>>>=0;name=readLatin1String(name);var stdStringIsUTF8=name==="std::string";registerType(rawType,{name:name,fromWireType(value){var length=HEAPU32[value>>>2>>>0];var payload=value+4;var str;if(stdStringIsUTF8){var decodeStartPtr=payload;for(var i=0;i<=length;++i){var currentBytePtr=payload+i;if(i==length||HEAPU8[currentBytePtr>>>0]==0){var maxRead=currentBytePtr-decodeStartPtr;var stringSegment=UTF8ToString(decodeStartPtr,maxRead);if(str===undefined){str=stringSegment}else{str+=String.fromCharCode(0);str+=stringSegment}decodeStartPtr=currentBytePtr+1}}}else{var a=new Array(length);for(var i=0;i<length;++i){a[i]=String.fromCharCode(HEAPU8[payload+i>>>0])}str=a.join("")}_free(value);return str},toWireType(destructors,value){if(value instanceof ArrayBuffer){value=new Uint8Array(value)}var length;var valueIsOfTypeString=typeof value=="string";if(!(valueIsOfTypeString||value instanceof Uint8Array||value instanceof Uint8ClampedArray||value instanceof Int8Array)){throwBindingError("Cannot pass non-string to std::string")}if(stdStringIsUTF8&&valueIsOfTypeString){length=lengthBytesUTF8(value)}else{length=value.length}var base=_malloc(4+length+1);var ptr=base+4;HEAPU32[base>>>2>>>0]=length;if(stdStringIsUTF8&&valueIsOfTypeString){stringToUTF8(value,ptr,length+1)}else{if(valueIsOfTypeString){for(var i=0;i<length;++i){var charCode=value.charCodeAt(i);if(charCode>255){_free(ptr);throwBindingError("String has UTF-16 code units that do not fit in 8 bits")}HEAPU8[ptr+i>>>0]=charCode}}else{for(var i=0;i<length;++i){HEAPU8[ptr+i>>>0]=value[i]}}}if(destructors!==null){destructors.push(_free,base)}return base},argPackAdvance:GenericWireTypeSize,readValueFromPointer:readPointer,destructorFunction(ptr){_free(ptr)}})}var UTF16Decoder=typeof TextDecoder!="undefined"?new TextDecoder("utf-16le"):undefined;var UTF16ToString=(ptr,maxBytesToRead)=>{var endPtr=ptr;var idx=endPtr>>1;var maxIdx=idx+maxBytesToRead/2;while(!(idx>=maxIdx)&&HEAPU16[idx>>>0])++idx;endPtr=idx<<1;if(endPtr-ptr>32&&UTF16Decoder)return UTF16Decoder.decode(HEAPU8.subarray(ptr>>>0,endPtr>>>0));var str="";for(var i=0;!(i>=maxBytesToRead/2);++i){var codeUnit=HEAP16[ptr+i*2>>>1>>>0];if(codeUnit==0)break;str+=String.fromCharCode(codeUnit)}return str};var stringToUTF16=(str,outPtr,maxBytesToWrite)=>{maxBytesToWrite??=2147483647;if(maxBytesToWrite<2)return 0;maxBytesToWrite-=2;var startPtr=outPtr;var numCharsToWrite=maxBytesToWrite<str.length*2?maxBytesToWrite/2:str.length;for(var i=0;i<numCharsToWrite;++i){var codeUnit=str.charCodeAt(i);HEAP16[outPtr>>>1>>>0]=codeUnit;outPtr+=2}HEAP16[outPtr>>>1>>>0]=0;return outPtr-startPtr};var lengthBytesUTF16=str=>str.length*2;var UTF32ToString=(ptr,maxBytesToRead)=>{var i=0;var str="";while(!(i>=maxBytesToRead/4)){var utf32=HEAP32[ptr+i*4>>>2>>>0];if(utf32==0)break;++i;if(utf32>=65536){var ch=utf32-65536;str+=String.fromCharCode(55296|ch>>10,56320|ch&1023)}else{str+=String.fromCharCode(utf32)}}return str};var stringToUTF32=(str,outPtr,maxBytesToWrite)=>{outPtr>>>=0;maxBytesToWrite??=2147483647;if(maxBytesToWrite<4)return 0;var startPtr=outPtr;var endPtr=startPtr+maxBytesToWrite-4;for(var i=0;i<str.length;++i){var codeUnit=str.charCodeAt(i);if(codeUnit>=55296&&codeUnit<=57343){var trailSurrogate=str.charCodeAt(++i);codeUnit=65536+((codeUnit&1023)<<10)|trailSurrogate&1023}HEAP32[outPtr>>>2>>>0]=codeUnit;outPtr+=4;if(outPtr+4>endPtr)break}HEAP32[outPtr>>>2>>>0]=0;return outPtr-startPtr};var lengthBytesUTF32=str=>{var len=0;for(var i=0;i<str.length;++i){var codeUnit=str.charCodeAt(i);if(codeUnit>=55296&&codeUnit<=57343)++i;len+=4}return len};var __embind_register_std_wstring=function(rawType,charSize,name){rawType>>>=0;charSize>>>=0;name>>>=0;name=readLatin1String(name);var decodeString,encodeString,readCharAt,lengthBytesUTF;if(charSize===2){decodeString=UTF16ToString;encodeString=stringToUTF16;lengthBytesUTF=lengthBytesUTF16;readCharAt=pointer=>HEAPU16[pointer>>>1>>>0]}else if(charSize===4){decodeString=UTF32ToString;encodeString=stringToUTF32;lengthBytesUTF=lengthBytesUTF32;readCharAt=pointer=>HEAPU32[pointer>>>2>>>0]}registerType(rawType,{name:name,fromWireType:value=>{var length=HEAPU32[value>>>2>>>0];var str;var decodeStartPtr=value+4;for(var i=0;i<=length;++i){var currentBytePtr=value+4+i*charSize;if(i==length||readCharAt(currentBytePtr)==0){var maxReadBytes=currentBytePtr-decodeStartPtr;var stringSegment=decodeString(decodeStartPtr,maxReadBytes);if(str===undefined){str=stringSegment}else{str+=String.fromCharCode(0);str+=stringSegment}decodeStartPtr=currentBytePtr+charSize}}_free(value);return str},toWireType:(destructors,value)=>{if(!(typeof value=="string")){throwBindingError(`Cannot pass non-string to C++ string type ${name}`)}var length=lengthBytesUTF(value);var ptr=_malloc(4+length+charSize);HEAPU32[ptr>>>2>>>0]=length/charSize;encodeString(value,ptr+4,length+charSize);if(destructors!==null){destructors.push(_free,ptr)}return ptr},argPackAdvance:GenericWireTypeSize,readValueFromPointer:readPointer,destructorFunction(ptr){_free(ptr)}})};function __embind_register_value_object(rawType,name,constructorSignature,rawConstructor,destructorSignature,rawDestructor){rawType>>>=0;name>>>=0;constructorSignature>>>=0;rawConstructor>>>=0;destructorSignature>>>=0;rawDestructor>>>=0;structRegistrations[rawType]={name:readLatin1String(name),rawConstructor:embind__requireFunction(constructorSignature,rawConstructor),rawDestructor:embind__requireFunction(destructorSignature,rawDestructor),fields:[]}}function __embind_register_value_object_field(structType,fieldName,getterReturnType,getterSignature,getter,getterContext,setterArgumentType,setterSignature,setter,setterContext){structType>>>=0;fieldName>>>=0;getterReturnType>>>=0;getterSignature>>>=0;getter>>>=0;getterContext>>>=0;setterArgumentType>>>=0;setterSignature>>>=0;setter>>>=0;setterContext>>>=0;structRegistrations[structType].fields.push({fieldName:readLatin1String(fieldName),getterReturnType:getterReturnType,getter:embind__requireFunction(getterSignature,getter),getterContext:getterContext,setterArgumentType:setterArgumentType,setter:embind__requireFunction(setterSignature,setter),setterContext:setterContext})}var __embind_register_void=function(rawType,name){rawType>>>=0;name>>>=0;name=readLatin1String(name);registerType(rawType,{isVoid:true,name:name,argPackAdvance:0,fromWireType:()=>undefined,toWireType:(destructors,o)=>undefined})};function __emscripten_memcpy_js(dest,src,num){dest>>>=0;src>>>=0;num>>>=0;return HEAPU8.copyWithin(dest>>>0,src>>>0,src+num>>>0)}var emval_returnValue=(returnType,destructorsRef,handle)=>{var destructors=[];var result=returnType["toWireType"](destructors,handle);if(destructors.length){HEAPU32[destructorsRef>>>2>>>0]=Emval.toHandle(destructors)}return result};function __emval_as(handle,returnType,destructorsRef){handle>>>=0;returnType>>>=0;destructorsRef>>>=0;handle=Emval.toValue(handle);returnType=requireRegisteredType(returnType,"emval::as");return emval_returnValue(returnType,destructorsRef,handle)}var emval_symbols={};var getStringOrSymbol=address=>{var symbol=emval_symbols[address];if(symbol===undefined){return readLatin1String(address)}return symbol};var emval_methodCallers=[];function __emval_call_method(caller,objHandle,methodName,destructorsRef,args){caller>>>=0;objHandle>>>=0;methodName>>>=0;destructorsRef>>>=0;args>>>=0;caller=emval_methodCallers[caller];objHandle=Emval.toValue(objHandle);methodName=getStringOrSymbol(methodName);return caller(objHandle,objHandle[methodName],destructorsRef,args)}function __emval_equals(first,second){first>>>=0;second>>>=0;first=Emval.toValue(first);second=Emval.toValue(second);return first==second}var emval_addMethodCaller=caller=>{var id=emval_methodCallers.length;emval_methodCallers.push(caller);return id};var emval_lookupTypes=(argCount,argTypes)=>{var a=new Array(argCount);for(var i=0;i<argCount;++i){a[i]=requireRegisteredType(HEAPU32[argTypes+i*4>>>2>>>0],"parameter "+i)}return a};var reflectConstruct=Reflect.construct;function __emval_get_method_caller(argCount,argTypes,kind){argTypes>>>=0;var types=emval_lookupTypes(argCount,argTypes);var retType=types.shift();argCount--;var functionBody=`return function (obj, func, destructorsRef, args) {\n`;var offset=0;var argsList=[];if(kind===0){argsList.push("obj")}var params=["retType"];var args=[retType];for(var i=0;i<argCount;++i){argsList.push("arg"+i);params.push("argType"+i);args.push(types[i]);functionBody+=`  var arg${i} = argType${i}.readValueFromPointer(args${offset?"+"+offset:""});\n`;offset+=types[i]["argPackAdvance"]}var invoker=kind===1?"new func":"func.call";functionBody+=`  var rv = ${invoker}(${argsList.join(", ")});\n`;if(!retType.isVoid){params.push("emval_returnValue");args.push(emval_returnValue);functionBody+="  return emval_returnValue(retType, destructorsRef, rv);\n"}functionBody+="};\n";params.push(functionBody);var invokerFunction=newFunc(Function,params)(...args);var functionName=`methodCaller<(${types.map(t=>t.name).join(", ")}) => ${retType.name}>`;return emval_addMethodCaller(createNamedFunction(functionName,invokerFunction))}function __emval_get_property(handle,key){handle>>>=0;key>>>=0;handle=Emval.toValue(handle);key=Emval.toValue(key);return Emval.toHandle(handle[key])}function __emval_incref(handle){handle>>>=0;if(handle>9){emval_handles[handle+1]+=1}}function __emval_new_cstring(v){v>>>=0;return Emval.toHandle(getStringOrSymbol(v))}function __emval_new_object(){return Emval.toHandle({})}function __emval_run_destructors(handle){handle>>>=0;var destructors=Emval.toValue(handle);runDestructors(destructors);__emval_decref(handle)}function __emval_set_property(handle,key,value){handle>>>=0;key>>>=0;value>>>=0;handle=Emval.toValue(handle);key=Emval.toValue(key);value=Emval.toValue(value);handle[key]=value}function __emval_take_value(type,arg){type>>>=0;arg>>>=0;type=requireRegisteredType(type,"_emval_take_value");var v=type["readValueFromPointer"](arg);return Emval.toHandle(v)}var getHeapMax=()=>4294901760;var growMemory=size=>{var b=wasmMemory.buffer;var pages=(size-b.byteLength+65535)/65536;try{wasmMemory.grow(pages);updateMemoryViews();return 1}catch(e){}};function _emscripten_resize_heap(requestedSize){requestedSize>>>=0;var oldSize=HEAPU8.length;var maxHeapSize=getHeapMax();if(requestedSize>maxHeapSize){return false}var alignUp=(x,multiple)=>x+(multiple-x%multiple)%multiple;for(var cutDown=1;cutDown<=4;cutDown*=2){var overGrownHeapSize=oldSize*(1+.2/cutDown);overGrownHeapSize=Math.min(overGrownHeapSize,requestedSize+100663296);var newSize=Math.min(maxHeapSize,alignUp(Math.max(requestedSize,overGrownHeapSize),65536));var replacement=growMemory(newSize);if(replacement){return true}}return false}var uleb128Encode=(n,target)=>{if(n<128){target.push(n)}else{target.push(n%128|128,n>>7)}};var sigToWasmTypes=sig=>{var typeNames={i:"i32",j:"i64",f:"f32",d:"f64",e:"externref",p:"i32"};var type={parameters:[],results:sig[0]=="v"?[]:[typeNames[sig[0]]]};for(var i=1;i<sig.length;++i){type.parameters.push(typeNames[sig[i]])}return type};var generateFuncType=(sig,target)=>{var sigRet=sig.slice(0,1);var sigParam=sig.slice(1);var typeCodes={i:127,p:127,j:126,f:125,d:124,e:111};target.push(96);uleb128Encode(sigParam.length,target);for(var i=0;i<sigParam.length;++i){target.push(typeCodes[sigParam[i]])}if(sigRet=="v"){target.push(0)}else{target.push(1,typeCodes[sigRet])}};var convertJsFunctionToWasm=(func,sig)=>{if(typeof WebAssembly.Function=="function"){return new WebAssembly.Function(sigToWasmTypes(sig),func)}var typeSectionBody=[1];generateFuncType(sig,typeSectionBody);var bytes=[0,97,115,109,1,0,0,0,1];uleb128Encode(typeSectionBody.length,bytes);bytes.push(...typeSectionBody);bytes.push(2,7,1,1,101,1,102,0,0,7,5,1,1,102,0,0);var module=new WebAssembly.Module(new Uint8Array(bytes));var instance=new WebAssembly.Instance(module,{e:{f:func}});var wrappedFunc=instance.exports["f"];return wrappedFunc};var updateTableMap=(offset,count)=>{if(functionsInTableMap){for(var i=offset;i<offset+count;i++){var item=getWasmTableEntry(i);if(item){functionsInTableMap.set(item,i)}}}};var functionsInTableMap;var getFunctionAddress=func=>{if(!functionsInTableMap){functionsInTableMap=new WeakMap;updateTableMap(0,wasmTable.length)}return functionsInTableMap.get(func)||0};var freeTableIndexes=[];var getEmptyTableSlot=()=>{if(freeTableIndexes.length){return freeTableIndexes.pop()}try{wasmTable.grow(1)}catch(err){if(!(err instanceof RangeError)){throw err}throw"Unable to grow wasm table. Set ALLOW_TABLE_GROWTH."}return wasmTable.length-1};var setWasmTableEntry=(idx,func)=>wasmTable.set(idx,func);var addFunction=(func,sig)=>{var rtn=getFunctionAddress(func);if(rtn){return rtn}var ret=getEmptyTableSlot();try{setWasmTableEntry(ret,func)}catch(err){if(!(err instanceof TypeError)){throw err}var wrapped=convertJsFunctionToWasm(func,sig);setWasmTableEntry(ret,wrapped)}functionsInTableMap.set(func,ret);return ret};var removeFunction=index=>{functionsInTableMap.delete(getWasmTableEntry(index));setWasmTableEntry(index,null);freeTableIndexes.push(index)};InternalError=Module["InternalError"]=class InternalError extends Error{constructor(message){super(message);this.name="InternalError"}};embind_init_charCodes();BindingError=Module["BindingError"]=class BindingError extends Error{constructor(message){super(message);this.name="BindingError"}};init_ClassHandle();init_embind();init_RegisteredPointer();UnboundTypeError=Module["UnboundTypeError"]=extendError(Error,"UnboundTypeError");init_emval();var wasmImports={i:___cxa_throw,D:__abort_js,n:__embind_finalize_value_object,C:__embind_register_bigint,H:__embind_register_bool,h:__embind_register_class,g:__embind_register_class_constructor,a:__embind_register_class_function,G:__embind_register_emval,t:__embind_register_enum,e:__embind_register_enum_value,x:__embind_register_float,c:__embind_register_function,j:__embind_register_integer,f:__embind_register_memory_view,k:__embind_register_optional,w:__embind_register_std_string,s:__embind_register_std_wstring,o:__embind_register_value_object,l:__embind_register_value_object_field,I:__embind_register_void,F:__emscripten_memcpy_js,v:__emval_as,z:__emval_call_method,b:__emval_decref,m:__emval_equals,y:__emval_get_method_caller,B:__emval_get_property,u:__emval_incref,q:__emval_new_cstring,A:__emval_new_object,p:__emval_run_destructors,r:__emval_set_property,d:__emval_take_value,E:_emscripten_resize_heap};var wasmExports=createWasm();var ___wasm_call_ctors=()=>(___wasm_call_ctors=wasmExports["K"])();var ___getTypeName=a0=>(___getTypeName=wasmExports["L"])(a0);var _malloc=a0=>(_malloc=wasmExports["N"])(a0);var _free=a0=>(_free=wasmExports["O"])(a0);var ___cxa_is_pointer_type=a0=>(___cxa_is_pointer_type=wasmExports["P"])(a0);function applySignatureConversions(wasmExports){wasmExports=Object.assign({},wasmExports);var makeWrapper_pp=f=>a0=>f(a0)>>>0;var makeWrapper_p=f=>()=>f()>>>0;wasmExports["L"]=makeWrapper_pp(wasmExports["L"]);wasmExports["N"]=makeWrapper_pp(wasmExports["N"]);wasmExports["_emscripten_stack_alloc"]=makeWrapper_pp(wasmExports["_emscripten_stack_alloc"]);wasmExports["emscripten_stack_get_current"]=makeWrapper_p(wasmExports["emscripten_stack_get_current"]);return wasmExports}Module["addFunction"]=addFunction;Module["removeFunction"]=removeFunction;var calledRun;dependenciesFulfilled=function runCaller(){if(!calledRun)run();if(!calledRun)dependenciesFulfilled=runCaller};function run(){if(runDependencies>0){return}preRun();if(runDependencies>0){return}function doRun(){if(calledRun)return;calledRun=true;Module["calledRun"]=true;if(ABORT)return;initRuntime();readyPromiseResolve(Module);Module["onRuntimeInitialized"]?.();postRun()}if(Module["setStatus"]){Module["setStatus"]("Running...");setTimeout(function(){setTimeout(function(){Module["setStatus"]("")},1);doRun()},1)}else{doRun()}}if(Module["preInit"]){if(typeof Module["preInit"]=="function")Module["preInit"]=[Module["preInit"]];while(Module["preInit"].length>0){Module["preInit"].pop()()}}run();moduleRtn=readyPromise;
-
-
-  return moduleRtn;
-}
-);
+var Mn = (() => {
+    var qe = import.meta.url;
+    return function (Fr = {}) {
+        var Ge,
+            o = Fr,
+            Je,
+            ve,
+            Mr = new Promise((e, r) => {
+                (Je = e), (ve = r);
+            }),
+            Rr = typeof window == "object",
+            Fe = typeof importScripts == "function";
+        typeof process == "object" && typeof process.versions == "object" && process.versions.node;
+        var Ke = !1;
+        o.setup = function () {
+            if (Ke) return;
+            (Ke = !0), o.initTBB();
+            function e(i, s, f = (d) => d) {
+                if (s) for (let d of s) i.push_back(f(d));
+                return i;
+            }
+            function r(i, s = (f) => f) {
+                const f = [],
+                    d = i.size();
+                for (let y = 0; y < d; y++) f.push(s(i.get(y)));
+                return f;
+            }
+            function t(i, s = (f) => f) {
+                const f = [],
+                    d = i.size();
+                for (let y = 0; y < d; y++) {
+                    const b = i.get(y),
+                        w = b.size(),
+                        E = [];
+                    for (let S = 0; S < w; S++) E.push(s(b.get(S)));
+                    f.push(E);
+                }
+                return f;
+            }
+            function n(i) {
+                return i[0].length < 3 && (i = [i]), e(new o.Vector2_vec2(), i, (s) => e(new o.Vector_vec2(), s, (f) => (f instanceof Array ? { x: f[0], y: f[1] } : f)));
+            }
+            function a(i) {
+                for (let s = 0; s < i.size(); s++) i.get(s).delete();
+                i.delete();
+            }
+            function u(i) {
+                return i[0] instanceof Array ? { x: i[0][0], y: i[0][1] } : typeof i[0] == "number" ? { x: i[0] || 0, y: i[1] || 0 } : i[0];
+            }
+            function l(i) {
+                return i[0] instanceof Array ? { x: i[0][0], y: i[0][1], z: i[0][2] } : typeof i[0] == "number" ? { x: i[0] || 0, y: i[1] || 0, z: i[2] || 0 } : i[0];
+            }
+            function c(i) {
+                return i == "EvenOdd" ? 0 : i == "NonZero" ? 1 : i == "Negative" ? 3 : 2;
+            }
+            function p(i) {
+                return i == "Round" ? 1 : i == "Miter" ? 2 : 0;
+            }
+            const v = o.CrossSection;
+            function h(i, s = "Positive") {
+                if (i instanceof v) return i;
+                {
+                    const f = n(i),
+                        d = new v(f, c(s));
+                    return a(f), d;
+                }
+            }
+            (o.CrossSection.prototype.translate = function (...i) {
+                return this._Translate(u(i));
+            }),
+                (o.CrossSection.prototype.scale = function (i) {
+                    return typeof i == "number" ? this._Scale({ x: i, y: i }) : this._Scale(u([i]));
+                }),
+                (o.CrossSection.prototype.mirror = function (i) {
+                    return this._Mirror(u([i]));
+                }),
+                (o.CrossSection.prototype.warp = function (i) {
+                    const s = le(function (d) {
+                            const y = k(d, "double"),
+                                b = k(d + 8, "double"),
+                                w = [y, b];
+                            i(w), K(d, w[0], "double"), K(d + 8, w[1], "double");
+                        }, "vi"),
+                        f = this._Warp(s);
+                    return de(s), f;
+                }),
+                (o.CrossSection.prototype.decompose = function () {
+                    const i = this._Decompose(),
+                        s = r(i);
+                    return i.delete(), s;
+                }),
+                (o.CrossSection.prototype.bounds = function () {
+                    const i = this._Bounds();
+                    return { min: ["x", "y"].map((s) => i.min[s]), max: ["x", "y"].map((s) => i.max[s]) };
+                }),
+                (o.CrossSection.prototype.offset = function (i, s = "Round", f = 2, d = 0) {
+                    return this._Offset(i, p(s), f, d);
+                }),
+                (o.CrossSection.prototype.simplify = function (i = 1e-6) {
+                    return this._Simplify(i);
+                }),
+                (o.CrossSection.prototype.extrude = function (i, s = 0, f = 0, d = [1, 1], y = !1) {
+                    d = u([d]);
+                    const b = o._Extrude(this._ToPolygons(), i, s, f, d);
+                    return y ? b.translate([0, 0, -i / 2]) : b;
+                }),
+                (o.CrossSection.prototype.revolve = function (i = 0, s = 360) {
+                    return o._Revolve(this._ToPolygons(), i, s);
+                }),
+                (o.CrossSection.prototype.add = function (i) {
+                    return this._add(h(i));
+                }),
+                (o.CrossSection.prototype.subtract = function (i) {
+                    return this._subtract(h(i));
+                }),
+                (o.CrossSection.prototype.intersect = function (i) {
+                    return this._intersect(h(i));
+                }),
+                (o.CrossSection.prototype.toPolygons = function () {
+                    const i = this._ToPolygons(),
+                        s = t(i, (f) => [f.x, f.y]);
+                    return i.delete(), s;
+                }),
+                (o.Manifold.prototype.smoothOut = function (i = 60, s = 0) {
+                    return this._SmoothOut(i, s);
+                }),
+                (o.Manifold.prototype.warp = function (i) {
+                    const s = le(function (y) {
+                            const b = k(y, "double"),
+                                w = k(y + 8, "double"),
+                                E = k(y + 16, "double"),
+                                S = [b, w, E];
+                            i(S), K(y, S[0], "double"), K(y + 8, S[1], "double"), K(y + 16, S[2], "double");
+                        }, "vi"),
+                        f = this._Warp(s);
+                    de(s);
+                    const d = f.status();
+                    if (d !== "NoError") throw new o.ManifoldError(d);
+                    return f;
+                }),
+                (o.Manifold.prototype.calculateNormals = function (i, s = 60) {
+                    return this._CalculateNormals(i, s);
+                }),
+                (o.Manifold.prototype.setProperties = function (i, s) {
+                    const f = this.numProp(),
+                        d = le(function (b, w, E) {
+                            const S = [];
+                            for (let T = 0; T < i; ++T) S[T] = k(b + 8 * T, "double");
+                            const Y = [];
+                            for (let T = 0; T < 3; ++T) Y[T] = k(w + 8 * T, "double");
+                            const ee = [];
+                            for (let T = 0; T < f; ++T) ee[T] = k(E + 8 * T, "double");
+                            s(S, Y, ee);
+                            for (let T = 0; T < i; ++T) K(b + 8 * T, S[T], "double");
+                        }, "viii"),
+                        y = this._SetProperties(i, d);
+                    return de(d), y;
+                }),
+                (o.Manifold.prototype.translate = function (...i) {
+                    return this._Translate(l(i));
+                }),
+                (o.Manifold.prototype.rotate = function (i, s, f) {
+                    return Array.isArray(i) ? this._Rotate(...i) : this._Rotate(i, s || 0, f || 0);
+                }),
+                (o.Manifold.prototype.scale = function (i) {
+                    return typeof i == "number" ? this._Scale({ x: i, y: i, z: i }) : this._Scale(l([i]));
+                }),
+                (o.Manifold.prototype.mirror = function (i) {
+                    return this._Mirror(l([i]));
+                }),
+                (o.Manifold.prototype.trimByPlane = function (i, s = 0) {
+                    return this._TrimByPlane(l([i]), s);
+                }),
+                (o.Manifold.prototype.slice = function (i = 0) {
+                    const s = this._Slice(i),
+                        f = new v(s, c("Positive"));
+                    return a(s), f;
+                }),
+                (o.Manifold.prototype.project = function () {
+                    const i = this._Project(),
+                        s = new v(i, c("Positive"));
+                    return a(i), s;
+                }),
+                (o.Manifold.prototype.split = function (i) {
+                    const s = this._Split(i),
+                        f = r(s);
+                    return s.delete(), f;
+                }),
+                (o.Manifold.prototype.splitByPlane = function (i, s = 0) {
+                    const f = this._SplitByPlane(l([i]), s),
+                        d = r(f);
+                    return f.delete(), d;
+                }),
+                (o.Manifold.prototype.decompose = function () {
+                    const i = this._Decompose(),
+                        s = r(i);
+                    return i.delete(), s;
+                }),
+                (o.Manifold.prototype.boundingBox = function () {
+                    const i = this._boundingBox();
+                    return { min: ["x", "y", "z"].map((s) => i.min[s]), max: ["x", "y", "z"].map((s) => i.max[s]) };
+                });
+            class _ {
+                constructor({
+                    numProp: s = 3,
+                    triVerts: f = new Uint32Array(),
+                    vertProperties: d = new Float32Array(),
+                    mergeFromVert: y,
+                    mergeToVert: b,
+                    runIndex: w,
+                    runOriginalID: E,
+                    faceID: S,
+                    halfedgeTangent: Y,
+                    runTransform: ee,
+                } = {}) {
+                    (this.numProp = s),
+                        (this.triVerts = f),
+                        (this.vertProperties = d),
+                        (this.mergeFromVert = y),
+                        (this.mergeToVert = b),
+                        (this.runIndex = w),
+                        (this.runOriginalID = E),
+                        (this.faceID = S),
+                        (this.halfedgeTangent = Y),
+                        (this.runTransform = ee);
+                }
+                get numTri() {
+                    return this.triVerts.length / 3;
+                }
+                get numVert() {
+                    return this.vertProperties.length / this.numProp;
+                }
+                get numRun() {
+                    return this.runOriginalID.length;
+                }
+                merge() {
+                    const { changed: s, mesh: f } = o._Merge(this);
+                    return Object.assign(this, { ...f }), s;
+                }
+                verts(s) {
+                    return this.triVerts.subarray(3 * s, 3 * (s + 1));
+                }
+                position(s) {
+                    return this.vertProperties.subarray(this.numProp * s, this.numProp * s + 3);
+                }
+                extras(s) {
+                    return this.vertProperties.subarray(this.numProp * s + 3, this.numProp * (s + 1));
+                }
+                tangent(s) {
+                    return this.halfedgeTangent.subarray(4 * s, 4 * (s + 1));
+                }
+                transform(s) {
+                    const f = new Array(16);
+                    for (const d of [0, 1, 2, 3]) for (const y of [0, 1, 2]) f[4 * d + y] = this.runTransform[12 * s + 3 * d + y];
+                    return (f[15] = 1), f;
+                }
+            }
+            (o.Mesh = _),
+                (o.Manifold.prototype.getMesh = function (i = -1) {
+                    return new _(this._GetMeshJS(i));
+                }),
+                (o.ManifoldError = function (s, ...f) {
+                    let d = "Unknown error";
+                    switch (s) {
+                        case "NonFiniteVertex":
+                            d = "Non-finite vertex";
+                            break;
+                        case "NotManifold":
+                            d = "Not manifold";
+                            break;
+                        case "VertexOutOfBounds":
+                            d = "Vertex index out of bounds";
+                            break;
+                        case "PropertiesWrongLength":
+                            d = "Properties have wrong length";
+                            break;
+                        case "MissingPositionProperties":
+                            d = "Less than three properties";
+                            break;
+                        case "MergeVectorsDifferentLengths":
+                            d = "Merge vectors have different lengths";
+                            break;
+                        case "MergeIndexOutOfBounds":
+                            d = "Merge index out of bounds";
+                            break;
+                        case "TransformWrongLength":
+                            d = "Transform vector has wrong length";
+                            break;
+                        case "RunIndexWrongLength":
+                            d = "Run index vector has wrong length";
+                            break;
+                        case "FaceIDWrongLength":
+                            d = "Face ID vector has wrong length";
+                        case "InvalidConstruction":
+                            d = "Manifold constructed with invalid parameters";
+                    }
+                    const y = Error.apply(this, [d, ...f]);
+                    (y.name = this.name = "ManifoldError"), (this.message = y.message), (this.stack = y.stack), (this.code = s);
+                }),
+                (o.ManifoldError.prototype = Object.create(Error.prototype, { constructor: { value: o.ManifoldError, writable: !0, configurable: !0 } })),
+                (o.CrossSection = function (i, s = "Positive") {
+                    const f = n(i),
+                        d = new v(f, c(s));
+                    return a(f), d;
+                }),
+                (o.CrossSection.ofPolygons = function (i, s = "Positive") {
+                    return new o.CrossSection(i, s);
+                }),
+                (o.CrossSection.square = function (...i) {
+                    let s;
+                    i.length == 0 ? (s = { x: 1, y: 1 }) : typeof i[0] == "number" ? (s = { x: i[0], y: i[0] }) : (s = u(i));
+                    const f = i[1] || !1;
+                    return o._Square(s, f);
+                }),
+                (o.CrossSection.circle = function (i, s = 0) {
+                    return o._Circle(i, s);
+                });
+            function g(i) {
+                return function (...s) {
+                    s.length == 1 && (s = s[0]);
+                    const f = new o.Vector_crossSection();
+                    for (const y of s) f.push_back(h(y));
+                    const d = o["_crossSection" + i](f);
+                    return f.delete(), d;
+                };
+            }
+            (o.CrossSection.compose = g("Compose")), (o.CrossSection.union = g("UnionN")), (o.CrossSection.difference = g("DifferenceN")), (o.CrossSection.intersection = g("IntersectionN"));
+            function P(i, s) {
+                e(i, s, (f) => (f instanceof Array ? { x: f[0], y: f[1] } : f));
+            }
+            (o.CrossSection.hull = function (...i) {
+                i.length == 1 && (i = i[0]);
+                let s = new o.Vector_vec2();
+                for (const d of i)
+                    if (d instanceof v) o._crossSectionCollectVertices(s, d);
+                    else if (d instanceof Array && d.length == 2 && typeof d[0] == "number") s.push_back({ x: d[0], y: d[1] });
+                    else if (d.x) s.push_back(d);
+                    else {
+                        const b = (d[0].length == 2 && typeof d[0][0] == "number") || d[0].x ? [d] : d;
+                        for (const w of b) P(s, w);
+                    }
+                const f = o._crossSectionHullPoints(s);
+                return s.delete(), f;
+            }),
+                (o.CrossSection.prototype = Object.create(v.prototype)),
+                Object.defineProperty(o.CrossSection, Symbol.hasInstance, { get: () => (i) => i instanceof v });
+            const C = o.Manifold;
+            (o.Manifold = function (i) {
+                const s = new C(i),
+                    f = s.status();
+                if (f !== "NoError") throw new o.ManifoldError(f);
+                return s;
+            }),
+                (o.Manifold.ofMesh = function (i) {
+                    return new o.Manifold(i);
+                }),
+                (o.Manifold.tetrahedron = function () {
+                    return o._Tetrahedron();
+                }),
+                (o.Manifold.cube = function (...i) {
+                    let s;
+                    i.length == 0 ? (s = { x: 1, y: 1, z: 1 }) : typeof i[0] == "number" ? (s = { x: i[0], y: i[0], z: i[0] }) : (s = l(i));
+                    const f = i[1] || !1;
+                    return o._Cube(s, f);
+                }),
+                (o.Manifold.cylinder = function (i, s, f = -1, d = 0, y = !1) {
+                    return o._Cylinder(i, s, f, d, y);
+                }),
+                (o.Manifold.sphere = function (i, s = 0) {
+                    return o._Sphere(i, s);
+                }),
+                (o.Manifold.smooth = function (i, s = []) {
+                    const f = new o.Vector_smoothness();
+                    e(f, s);
+                    const d = o._Smooth(i, f);
+                    return f.delete(), d;
+                }),
+                (o.Manifold.extrude = function (i, s, f = 0, d = 0, y = [1, 1], b = !1) {
+                    return (i instanceof v ? i : o.CrossSection(i, "Positive")).extrude(s, f, d, y, b);
+                }),
+                (o.Manifold.revolve = function (i, s = 0, f = 360) {
+                    return (i instanceof v ? i : o.CrossSection(i, "Positive")).revolve(s, f);
+                }),
+                (o.Manifold.reserveIDs = function (i) {
+                    return o._ReserveIDs(i);
+                }),
+                (o.Manifold.compose = function (i) {
+                    const s = new o.Vector_manifold();
+                    e(s, i);
+                    const f = o._manifoldCompose(s);
+                    return s.delete(), f;
+                });
+            function R(i) {
+                return function (...s) {
+                    s.length == 1 && (s = s[0]);
+                    const f = new o.Vector_manifold();
+                    for (const y of s) f.push_back(y);
+                    const d = o["_manifold" + i + "N"](f);
+                    return f.delete(), d;
+                };
+            }
+            (o.Manifold.union = R("Union")),
+                (o.Manifold.difference = R("Difference")),
+                (o.Manifold.intersection = R("Intersection")),
+                (o.Manifold.levelSet = function (i, s, f, d = 0, y = -1) {
+                    const b = { min: { x: s.min[0], y: s.min[1], z: s.min[2] }, max: { x: s.max[0], y: s.max[1], z: s.max[2] } },
+                        w = le(function (S) {
+                            const Y = k(S, "double"),
+                                ee = k(S + 8, "double"),
+                                T = k(S + 16, "double");
+                            return i([Y, ee, T]);
+                        }, "di"),
+                        E = o._LevelSet(w, b, f, d, y);
+                    return de(w), E;
+                });
+            function W(i, s) {
+                e(i, s, (f) => (f instanceof Array ? { x: f[0], y: f[1], z: f[2] } : f));
+            }
+            (o.Manifold.hull = function (...i) {
+                i.length == 1 && (i = i[0]);
+                let s = new o.Vector_vec3();
+                for (const d of i) d instanceof C ? o._manifoldCollectVertices(s, d) : d instanceof Array && d.length == 3 && typeof d[0] == "number" ? s.push_back({ x: d[0], y: d[1], z: d[2] }) : d.x ? s.push_back(d) : W(s, d);
+                const f = o._manifoldHullPoints(s);
+                return s.delete(), f;
+            }),
+                (o.Manifold.prototype = Object.create(C.prototype)),
+                Object.defineProperty(o.Manifold, Symbol.hasInstance, { get: () => (i) => i instanceof C }),
+                (o.triangulate = function (i, s = -1, f = !0) {
+                    const d = n(i),
+                        y = r(o._Triangulate(d, s, f), (b) => [b[0], b[1], b[2]]);
+                    return a(d), y;
+                });
+        };
+        var Ze = Object.assign({}, o),
+            D = "";
+        function Wr(e) {
+            return o.locateFile ? o.locateFile(e, D) : D + e;
+        }
+        var Qe, Me;
+        (Rr || Fe) &&
+            (Fe ? (D = self.location.href) : typeof document < "u" && document.currentScript && (D = document.currentScript.src),
+            qe && (D = qe),
+            D.startsWith("blob:") ? (D = "") : (D = D.substr(0, D.replace(/[?#].*/, "").lastIndexOf("/") + 1)),
+            Fe &&
+                (Me = (e) => {
+                    var r = new XMLHttpRequest();
+                    return r.open("GET", e, !1), (r.responseType = "arraybuffer"), r.send(null), new Uint8Array(r.response);
+                }),
+            (Qe = (e) => fetch(e, { credentials: "same-origin" }).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.status + " : " + r.url)))))),
+            o.print || console.log.bind(console);
+        var re = o.printErr || console.error.bind(console);
+        Object.assign(o, Ze), (Ze = null), o.arguments && o.arguments, o.thisProgram && o.thisProgram, o.quit && o.quit;
+        var te;
+        o.wasmBinary && (te = o.wasmBinary);
+        var pe,
+            Xe = !1,
+            V,
+            M,
+            H,
+            ne,
+            L,
+            $,
+            he,
+            ye;
+        function Ye() {
+            var e = pe.buffer;
+            (o.HEAP8 = V = new Int8Array(e)),
+                (o.HEAP16 = H = new Int16Array(e)),
+                (o.HEAPU8 = M = new Uint8Array(e)),
+                (o.HEAPU16 = ne = new Uint16Array(e)),
+                (o.HEAP32 = L = new Int32Array(e)),
+                (o.HEAPU32 = $ = new Uint32Array(e)),
+                (o.HEAPF32 = he = new Float32Array(e)),
+                (o.HEAPF64 = ye = new Float64Array(e));
+        }
+        var er = [],
+            rr = [],
+            tr = [];
+        function Er() {
+            if (o.preRun) for (typeof o.preRun == "function" && (o.preRun = [o.preRun]); o.preRun.length; ) Ir(o.preRun.shift());
+            Re(er);
+        }
+        function Vr() {
+            Re(rr);
+        }
+        function kr() {
+            if (o.postRun) for (typeof o.postRun == "function" && (o.postRun = [o.postRun]); o.postRun.length; ) Dr(o.postRun.shift());
+            Re(tr);
+        }
+        function Ir(e) {
+            er.unshift(e);
+        }
+        function Or(e) {
+            rr.unshift(e);
+        }
+        function Dr(e) {
+            tr.unshift(e);
+        }
+        var z = 0,
+            ie = null;
+        function xr(e) {
+            z++, o.monitorRunDependencies?.(z);
+        }
+        function jr(e) {
+            if ((z--, o.monitorRunDependencies?.(z), z == 0 && ie)) {
+                var r = ie;
+                (ie = null), r();
+            }
+        }
+        function J(e) {
+            o.onAbort?.(e), (e = "Aborted(" + e + ")"), re(e), (Xe = !0), (e += ". Build with -sASSERTIONS for more info.");
+            var r = new WebAssembly.RuntimeError(e);
+            throw (ve(r), r);
+        }
+        var Ur = "data:application/octet-stream;base64,",
+            nr = (e) => e.startsWith(Ur);
+        function Br() {
+            if (o.locateFile) {
+                var e = "manifold.wasm";
+                return nr(e) ? e : Wr(e);
+            }
+            return new URL("/assets/manifold.wasm", self.location).href;
+        }
+        var _e;
+        function ir(e) {
+            if (e == _e && te) return new Uint8Array(te);
+            if (Me) return Me(e);
+            throw "both async and sync fetching of the wasm failed";
+        }
+        function Hr(e) {
+            return te
+                ? Promise.resolve().then(() => ir(e))
+                : Qe(e).then(
+                      (r) => new Uint8Array(r),
+                      () => ir(e)
+                  );
+        }
+        function or(e, r, t) {
+            return Hr(e)
+                .then((n) => WebAssembly.instantiate(n, r))
+                .then(t, (n) => {
+                    re(`failed to asynchronously prepare wasm: ${n}`), J(n);
+                });
+        }
+        function Lr(e, r, t, n) {
+            return !e && typeof WebAssembly.instantiateStreaming == "function" && !nr(r) && typeof fetch == "function"
+                ? fetch(r, { credentials: "same-origin" }).then((a) => {
+                      var u = WebAssembly.instantiateStreaming(a, t);
+                      return u.then(n, function (l) {
+                          return re(`wasm streaming compile failed: ${l}`), re("falling back to ArrayBuffer instantiation"), or(r, t, n);
+                      });
+                  })
+                : or(r, t, n);
+        }
+        function zr() {
+            return { a: An };
+        }
+        function Nr() {
+            var e = zr();
+            function r(n, a) {
+                return (O = n.exports), (O = Sn(O)), (pe = O.J), Ye(), (X = O.M), Or(O.K), jr(), O;
+            }
+            xr();
+            function t(n) {
+                r(n.instance);
+            }
+            if (o.instantiateWasm)
+                try {
+                    return o.instantiateWasm(e, r);
+                } catch (n) {
+                    re(`Module.instantiateWasm callback failed with error: ${n}`), ve(n);
+                }
+            return _e || (_e = Br()), Lr(te, _e, e, t).catch(ve), {};
+        }
+        var Re = (e) => {
+            for (; e.length > 0; ) e.shift()(o);
+        };
+        function k(e, r = "i8") {
+            switch ((r.endsWith("*") && (r = "*"), r)) {
+                case "i1":
+                    return V[e >>> 0];
+                case "i8":
+                    return V[e >>> 0];
+                case "i16":
+                    return H[(e >>> 1) >>> 0];
+                case "i32":
+                    return L[(e >>> 2) >>> 0];
+                case "i64":
+                    J("to do getValue(i64) use WASM_BIGINT");
+                case "float":
+                    return he[(e >>> 2) >>> 0];
+                case "double":
+                    return ye[(e >>> 3) >>> 0];
+                case "*":
+                    return $[(e >>> 2) >>> 0];
+                default:
+                    J(`invalid type for getValue: ${r}`);
+            }
+        }
+        o.noExitRuntime;
+        function K(e, r, t = "i8") {
+            switch ((t.endsWith("*") && (t = "*"), t)) {
+                case "i1":
+                    V[e >>> 0] = r;
+                    break;
+                case "i8":
+                    V[e >>> 0] = r;
+                    break;
+                case "i16":
+                    H[(e >>> 1) >>> 0] = r;
+                    break;
+                case "i32":
+                    L[(e >>> 2) >>> 0] = r;
+                    break;
+                case "i64":
+                    J("to do setValue(i64) use WASM_BIGINT");
+                case "float":
+                    he[(e >>> 2) >>> 0] = r;
+                    break;
+                case "double":
+                    ye[(e >>> 3) >>> 0] = r;
+                    break;
+                case "*":
+                    $[(e >>> 2) >>> 0] = r;
+                    break;
+                default:
+                    J(`invalid type for setValue: ${t}`);
+            }
+        }
+        class qr {
+            constructor(r) {
+                (this.excPtr = r), (this.ptr = r - 24);
+            }
+            set_type(r) {
+                $[((this.ptr + 4) >>> 2) >>> 0] = r;
+            }
+            get_type() {
+                return $[((this.ptr + 4) >>> 2) >>> 0];
+            }
+            set_destructor(r) {
+                $[((this.ptr + 8) >>> 2) >>> 0] = r;
+            }
+            get_destructor() {
+                return $[((this.ptr + 8) >>> 2) >>> 0];
+            }
+            set_caught(r) {
+                (r = r ? 1 : 0), (V[(this.ptr + 12) >>> 0] = r);
+            }
+            get_caught() {
+                return V[(this.ptr + 12) >>> 0] != 0;
+            }
+            set_rethrown(r) {
+                (r = r ? 1 : 0), (V[(this.ptr + 13) >>> 0] = r);
+            }
+            get_rethrown() {
+                return V[(this.ptr + 13) >>> 0] != 0;
+            }
+            init(r, t) {
+                this.set_adjusted_ptr(0), this.set_type(r), this.set_destructor(t);
+            }
+            set_adjusted_ptr(r) {
+                $[((this.ptr + 16) >>> 2) >>> 0] = r;
+            }
+            get_adjusted_ptr() {
+                return $[((this.ptr + 16) >>> 2) >>> 0];
+            }
+            get_exception_ptr() {
+                var r = Ar(this.get_type());
+                if (r) return $[(this.excPtr >>> 2) >>> 0];
+                var t = this.get_adjusted_ptr();
+                return t !== 0 ? t : this.excPtr;
+            }
+        }
+        var sr = 0;
+        function Gr(e, r, t) {
+            (e >>>= 0), (r >>>= 0), (t >>>= 0);
+            var n = new qr(e);
+            throw (n.init(r, t), (sr = e), sr);
+        }
+        var Jr = () => {
+                J("");
+            },
+            me = {},
+            We = (e) => {
+                for (; e.length; ) {
+                    var r = e.pop(),
+                        t = e.pop();
+                    t(r);
+                }
+            };
+        function oe(e) {
+            return this.fromWireType($[(e >>> 2) >>> 0]);
+        }
+        var Z = {},
+            N = {},
+            ge = {},
+            ar,
+            be = (e) => {
+                throw new ar(e);
+            },
+            q = (e, r, t) => {
+                e.forEach(function (c) {
+                    ge[c] = r;
+                });
+                function n(c) {
+                    var p = t(c);
+                    p.length !== e.length && be("Mismatched type converter count");
+                    for (var v = 0; v < e.length; ++v) x(e[v], p[v]);
+                }
+                var a = new Array(r.length),
+                    u = [],
+                    l = 0;
+                r.forEach((c, p) => {
+                    N.hasOwnProperty(c)
+                        ? (a[p] = N[c])
+                        : (u.push(c),
+                          Z.hasOwnProperty(c) || (Z[c] = []),
+                          Z[c].push(() => {
+                              (a[p] = N[c]), ++l, l === u.length && n(a);
+                          }));
+                }),
+                    u.length === 0 && n(a);
+            },
+            Kr = function (e) {
+                e >>>= 0;
+                var r = me[e];
+                delete me[e];
+                var t = r.rawConstructor,
+                    n = r.rawDestructor,
+                    a = r.fields,
+                    u = a.map((l) => l.getterReturnType).concat(a.map((l) => l.setterArgumentType));
+                q([e], u, (l) => {
+                    var c = {};
+                    return (
+                        a.forEach((p, v) => {
+                            var h = p.fieldName,
+                                _ = l[v],
+                                g = p.getter,
+                                P = p.getterContext,
+                                C = l[v + a.length],
+                                R = p.setter,
+                                W = p.setterContext;
+                            c[h] = {
+                                read: (i) => _.fromWireType(g(P, i)),
+                                write: (i, s) => {
+                                    var f = [];
+                                    R(W, i, C.toWireType(f, s)), We(f);
+                                },
+                            };
+                        }),
+                        [
+                            {
+                                name: r.name,
+                                fromWireType: (p) => {
+                                    var v = {};
+                                    for (var h in c) v[h] = c[h].read(p);
+                                    return n(p), v;
+                                },
+                                toWireType: (p, v) => {
+                                    for (var h in c) if (!(h in v)) throw new TypeError(`Missing field: "${h}"`);
+                                    var _ = t();
+                                    for (h in c) c[h].write(_, v[h]);
+                                    return p !== null && p.push(n, _), _;
+                                },
+                                argPackAdvance: j,
+                                readValueFromPointer: oe,
+                                destructorFunction: n,
+                            },
+                        ]
+                    );
+                });
+            };
+        function Zr(e, r, t, n, a) {}
+        var Qr = () => {
+                for (var e = new Array(256), r = 0; r < 256; ++r) e[r] = String.fromCharCode(r);
+                ur = e;
+            },
+            ur,
+            F = (e) => {
+                for (var r = "", t = e; M[t >>> 0]; ) r += ur[M[t++ >>> 0]];
+                return r;
+            },
+            Q,
+            m = (e) => {
+                throw new Q(e);
+            };
+        function Xr(e, r, t = {}) {
+            var n = r.name;
+            if ((e || m(`type "${n}" must have a positive integer typeid pointer`), N.hasOwnProperty(e))) {
+                if (t.ignoreDuplicateRegistrations) return;
+                m(`Cannot register type '${n}' twice`);
+            }
+            if (((N[e] = r), delete ge[e], Z.hasOwnProperty(e))) {
+                var a = Z[e];
+                delete Z[e], a.forEach((u) => u());
+            }
+        }
+        function x(e, r, t = {}) {
+            if (!("argPackAdvance" in r)) throw new TypeError("registerType registeredInstance requires argPackAdvance");
+            return Xr(e, r, t);
+        }
+        var j = 8;
+        function Yr(e, r, t, n) {
+            (e >>>= 0),
+                (r >>>= 0),
+                (r = F(r)),
+                x(e, {
+                    name: r,
+                    fromWireType: function (a) {
+                        return !!a;
+                    },
+                    toWireType: function (a, u) {
+                        return u ? t : n;
+                    },
+                    argPackAdvance: j,
+                    readValueFromPointer: function (a) {
+                        return this.fromWireType(M[a >>> 0]);
+                    },
+                    destructorFunction: null,
+                });
+        }
+        var et = (e) => ({ count: e.count, deleteScheduled: e.deleteScheduled, preservePointerOnDelete: e.preservePointerOnDelete, ptr: e.ptr, ptrType: e.ptrType, smartPtr: e.smartPtr, smartPtrType: e.smartPtrType }),
+            Ee = (e) => {
+                function r(t) {
+                    return t.$$.ptrType.registeredClass.name;
+                }
+                m(r(e) + " instance already deleted");
+            },
+            Ve = !1,
+            cr = (e) => {},
+            rt = (e) => {
+                e.smartPtr ? e.smartPtrType.rawDestructor(e.smartPtr) : e.ptrType.registeredClass.rawDestructor(e.ptr);
+            },
+            fr = (e) => {
+                e.count.value -= 1;
+                var r = e.count.value === 0;
+                r && rt(e);
+            },
+            lr = (e, r, t) => {
+                if (r === t) return e;
+                if (t.baseClass === void 0) return null;
+                var n = lr(e, r, t.baseClass);
+                return n === null ? null : t.downcast(n);
+            },
+            dr = {},
+            tt = () => Object.keys(ue).length,
+            nt = () => {
+                var e = [];
+                for (var r in ue) ue.hasOwnProperty(r) && e.push(ue[r]);
+                return e;
+            },
+            se = [],
+            ke = () => {
+                for (; se.length; ) {
+                    var e = se.pop();
+                    (e.$$.deleteScheduled = !1), e.delete();
+                }
+            },
+            ae,
+            it = (e) => {
+                (ae = e), se.length && ae && ae(ke);
+            },
+            ot = () => {
+                (o.getInheritedInstanceCount = tt), (o.getLiveInheritedInstances = nt), (o.flushPendingDeletes = ke), (o.setDelayFunction = it);
+            },
+            ue = {},
+            st = (e, r) => {
+                for (r === void 0 && m("ptr should not be undefined"); e.baseClass; ) (r = e.upcast(r)), (e = e.baseClass);
+                return r;
+            },
+            at = (e, r) => ((r = st(e, r)), ue[r]),
+            Pe = (e, r) => {
+                (!r.ptrType || !r.ptr) && be("makeClassHandle requires ptr and ptrType");
+                var t = !!r.smartPtrType,
+                    n = !!r.smartPtr;
+                return t !== n && be("Both smartPtrType and smartPtr must be specified"), (r.count = { value: 1 }), ce(Object.create(e, { $$: { value: r, writable: !0 } }));
+            };
+        function ut(e) {
+            var r = this.getPointee(e);
+            if (!r) return this.destructor(e), null;
+            var t = at(this.registeredClass, r);
+            if (t !== void 0) {
+                if (t.$$.count.value === 0) return (t.$$.ptr = r), (t.$$.smartPtr = e), t.clone();
+                var n = t.clone();
+                return this.destructor(e), n;
+            }
+            function a() {
+                return this.isSmartPointer ? Pe(this.registeredClass.instancePrototype, { ptrType: this.pointeeType, ptr: r, smartPtrType: this, smartPtr: e }) : Pe(this.registeredClass.instancePrototype, { ptrType: this, ptr: e });
+            }
+            var u = this.registeredClass.getActualType(r),
+                l = dr[u];
+            if (!l) return a.call(this);
+            var c;
+            this.isConst ? (c = l.constPointerType) : (c = l.pointerType);
+            var p = lr(r, this.registeredClass, c.registeredClass);
+            return p === null ? a.call(this) : this.isSmartPointer ? Pe(c.registeredClass.instancePrototype, { ptrType: c, ptr: p, smartPtrType: this, smartPtr: e }) : Pe(c.registeredClass.instancePrototype, { ptrType: c, ptr: p });
+        }
+        var ce = (e) =>
+                typeof FinalizationRegistry > "u"
+                    ? ((ce = (r) => r), e)
+                    : ((Ve = new FinalizationRegistry((r) => {
+                          fr(r.$$);
+                      })),
+                      (ce = (r) => {
+                          var t = r.$$,
+                              n = !!t.smartPtr;
+                          if (n) {
+                              var a = { $$: t };
+                              Ve.register(r, a, r);
+                          }
+                          return r;
+                      }),
+                      (cr = (r) => Ve.unregister(r)),
+                      ce(e)),
+            ct = () => {
+                Object.assign($e.prototype, {
+                    isAliasOf(e) {
+                        if (!(this instanceof $e) || !(e instanceof $e)) return !1;
+                        var r = this.$$.ptrType.registeredClass,
+                            t = this.$$.ptr;
+                        e.$$ = e.$$;
+                        for (var n = e.$$.ptrType.registeredClass, a = e.$$.ptr; r.baseClass; ) (t = r.upcast(t)), (r = r.baseClass);
+                        for (; n.baseClass; ) (a = n.upcast(a)), (n = n.baseClass);
+                        return r === n && t === a;
+                    },
+                    clone() {
+                        if ((this.$$.ptr || Ee(this), this.$$.preservePointerOnDelete)) return (this.$$.count.value += 1), this;
+                        var e = ce(Object.create(Object.getPrototypeOf(this), { $$: { value: et(this.$$) } }));
+                        return (e.$$.count.value += 1), (e.$$.deleteScheduled = !1), e;
+                    },
+                    delete() {
+                        this.$$.ptr || Ee(this),
+                            this.$$.deleteScheduled && !this.$$.preservePointerOnDelete && m("Object already scheduled for deletion"),
+                            cr(this),
+                            fr(this.$$),
+                            this.$$.preservePointerOnDelete || ((this.$$.smartPtr = void 0), (this.$$.ptr = void 0));
+                    },
+                    isDeleted() {
+                        return !this.$$.ptr;
+                    },
+                    deleteLater() {
+                        return (
+                            this.$$.ptr || Ee(this),
+                            this.$$.deleteScheduled && !this.$$.preservePointerOnDelete && m("Object already scheduled for deletion"),
+                            se.push(this),
+                            se.length === 1 && ae && ae(ke),
+                            (this.$$.deleteScheduled = !0),
+                            this
+                        );
+                    },
+                });
+            };
+        function $e() {}
+        var fe = (e, r) => Object.defineProperty(r, "name", { value: e }),
+            vr = (e, r, t) => {
+                if (e[r].overloadTable === void 0) {
+                    var n = e[r];
+                    (e[r] = function (...a) {
+                        return (
+                            e[r].overloadTable.hasOwnProperty(a.length) || m(`Function '${t}' called with an invalid number of arguments (${a.length}) - expects one of (${e[r].overloadTable})!`), e[r].overloadTable[a.length].apply(this, a)
+                        );
+                    }),
+                        (e[r].overloadTable = []),
+                        (e[r].overloadTable[n.argCount] = n);
+                }
+            },
+            Ie = (e, r, t) => {
+                o.hasOwnProperty(e)
+                    ? ((t === void 0 || (o[e].overloadTable !== void 0 && o[e].overloadTable[t] !== void 0)) && m(`Cannot register public name '${e}' twice`),
+                      vr(o, e, e),
+                      o.hasOwnProperty(t) && m(`Cannot register multiple overloads of a function with the same number of arguments (${t})!`),
+                      (o[e].overloadTable[t] = r))
+                    : ((o[e] = r), t !== void 0 && (o[e].numArguments = t));
+            },
+            ft = 48,
+            lt = 57,
+            dt = (e) => {
+                if (e === void 0) return "_unknown";
+                e = e.replace(/[^a-zA-Z0-9_]/g, "$");
+                var r = e.charCodeAt(0);
+                return r >= ft && r <= lt ? `_${e}` : e;
+            };
+        function vt(e, r, t, n, a, u, l, c) {
+            (this.name = e), (this.constructor = r), (this.instancePrototype = t), (this.rawDestructor = n), (this.baseClass = a), (this.getActualType = u), (this.upcast = l), (this.downcast = c), (this.pureVirtualFunctions = []);
+        }
+        var Oe = (e, r, t) => {
+            for (; r !== t; ) r.upcast || m(`Expected null or instance of ${t.name}, got an instance of ${r.name}`), (e = r.upcast(e)), (r = r.baseClass);
+            return e;
+        };
+        function pt(e, r) {
+            if (r === null) return this.isReference && m(`null is not a valid ${this.name}`), 0;
+            r.$$ || m(`Cannot pass "${Be(r)}" as a ${this.name}`), r.$$.ptr || m(`Cannot pass deleted object as a pointer of type ${this.name}`);
+            var t = r.$$.ptrType.registeredClass,
+                n = Oe(r.$$.ptr, t, this.registeredClass);
+            return n;
+        }
+        function ht(e, r) {
+            var t;
+            if (r === null) return this.isReference && m(`null is not a valid ${this.name}`), this.isSmartPointer ? ((t = this.rawConstructor()), e !== null && e.push(this.rawDestructor, t), t) : 0;
+            (!r || !r.$$) && m(`Cannot pass "${Be(r)}" as a ${this.name}`),
+                r.$$.ptr || m(`Cannot pass deleted object as a pointer of type ${this.name}`),
+                !this.isConst && r.$$.ptrType.isConst && m(`Cannot convert argument of type ${r.$$.smartPtrType ? r.$$.smartPtrType.name : r.$$.ptrType.name} to parameter type ${this.name}`);
+            var n = r.$$.ptrType.registeredClass;
+            if (((t = Oe(r.$$.ptr, n, this.registeredClass)), this.isSmartPointer))
+                switch ((r.$$.smartPtr === void 0 && m("Passing raw pointer to smart pointer is illegal"), this.sharingPolicy)) {
+                    case 0:
+                        r.$$.smartPtrType === this ? (t = r.$$.smartPtr) : m(`Cannot convert argument of type ${r.$$.smartPtrType ? r.$$.smartPtrType.name : r.$$.ptrType.name} to parameter type ${this.name}`);
+                        break;
+                    case 1:
+                        t = r.$$.smartPtr;
+                        break;
+                    case 2:
+                        if (r.$$.smartPtrType === this) t = r.$$.smartPtr;
+                        else {
+                            var a = r.clone();
+                            (t = this.rawShare(
+                                t,
+                                A.toHandle(() => a.delete())
+                            )),
+                                e !== null && e.push(this.rawDestructor, t);
+                        }
+                        break;
+                    default:
+                        m("Unsupporting sharing policy");
+                }
+            return t;
+        }
+        function yt(e, r) {
+            if (r === null) return this.isReference && m(`null is not a valid ${this.name}`), 0;
+            r.$$ || m(`Cannot pass "${Be(r)}" as a ${this.name}`),
+                r.$$.ptr || m(`Cannot pass deleted object as a pointer of type ${this.name}`),
+                r.$$.ptrType.isConst && m(`Cannot convert argument of type ${r.$$.ptrType.name} to parameter type ${this.name}`);
+            var t = r.$$.ptrType.registeredClass,
+                n = Oe(r.$$.ptr, t, this.registeredClass);
+            return n;
+        }
+        var _t = () => {
+            Object.assign(Ce.prototype, {
+                getPointee(e) {
+                    return this.rawGetPointee && (e = this.rawGetPointee(e)), e;
+                },
+                destructor(e) {
+                    this.rawDestructor?.(e);
+                },
+                argPackAdvance: j,
+                readValueFromPointer: oe,
+                fromWireType: ut,
+            });
+        };
+        function Ce(e, r, t, n, a, u, l, c, p, v, h) {
+            (this.name = e),
+                (this.registeredClass = r),
+                (this.isReference = t),
+                (this.isConst = n),
+                (this.isSmartPointer = a),
+                (this.pointeeType = u),
+                (this.sharingPolicy = l),
+                (this.rawGetPointee = c),
+                (this.rawConstructor = p),
+                (this.rawShare = v),
+                (this.rawDestructor = h),
+                !a && r.baseClass === void 0 ? (n ? ((this.toWireType = pt), (this.destructorFunction = null)) : ((this.toWireType = yt), (this.destructorFunction = null))) : (this.toWireType = ht);
+        }
+        var pr = (e, r, t) => {
+                o.hasOwnProperty(e) || be("Replacing nonexistent public symbol"), o[e].overloadTable !== void 0 && t !== void 0 ? (o[e].overloadTable[t] = r) : ((o[e] = r), (o[e].argCount = t));
+            },
+            mt = (e, r, t) => {
+                e = e.replace(/p/g, "i");
+                var n = o["dynCall_" + e];
+                return n(r, ...t);
+            },
+            X,
+            we = (e) => X.get(e),
+            gt = (e, r, t = []) => {
+                if (e.includes("j")) return mt(e, r, t);
+                var n = we(r)(...t);
+                return e[0] == "p" ? n >>> 0 : n;
+            },
+            hr = (e, r) => (...t) => gt(e, r, t),
+            I = (e, r) => {
+                e = F(e);
+                function t() {
+                    return e.includes("j") || e.includes("p") ? hr(e, r) : we(r);
+                }
+                var n = t();
+                return typeof n != "function" && m(`unknown function pointer with signature ${e}: ${r}`), n;
+            },
+            bt = (e, r) => {
+                var t = fe(r, function (n) {
+                    (this.name = r), (this.message = n);
+                    var a = new Error(n).stack;
+                    a !== void 0 &&
+                        (this.stack =
+                            this.toString() +
+                            `
+` +
+                            a.replace(/^Error(:[^\n]*)?\n/, ""));
+                });
+                return (
+                    (t.prototype = Object.create(e.prototype)),
+                    (t.prototype.constructor = t),
+                    (t.prototype.toString = function () {
+                        return this.message === void 0 ? this.name : `${this.name}: ${this.message}`;
+                    }),
+                    t
+                );
+            },
+            yr,
+            _r = (e) => {
+                var r = Tr(e),
+                    t = F(r);
+                return B(r), t;
+            },
+            Te = (e, r) => {
+                var t = [],
+                    n = {};
+                function a(u) {
+                    if (!n[u] && !N[u]) {
+                        if (ge[u]) {
+                            ge[u].forEach(a);
+                            return;
+                        }
+                        t.push(u), (n[u] = !0);
+                    }
+                }
+                throw (r.forEach(a), new yr(`${e}: ` + t.map(_r).join([", "])));
+            };
+        function Pt(e, r, t, n, a, u, l, c, p, v, h, _, g) {
+            (e >>>= 0),
+                (r >>>= 0),
+                (t >>>= 0),
+                (n >>>= 0),
+                (a >>>= 0),
+                (u >>>= 0),
+                (l >>>= 0),
+                (c >>>= 0),
+                (p >>>= 0),
+                (v >>>= 0),
+                (h >>>= 0),
+                (_ >>>= 0),
+                (g >>>= 0),
+                (h = F(h)),
+                (u = I(a, u)),
+                (c &&= I(l, c)),
+                (v &&= I(p, v)),
+                (g = I(_, g));
+            var P = dt(h);
+            Ie(P, function () {
+                Te(`Cannot construct ${h} due to unbound types`, [n]);
+            }),
+                q([e, r, t], n ? [n] : [], (C) => {
+                    C = C[0];
+                    var R, W;
+                    n ? ((R = C.registeredClass), (W = R.instancePrototype)) : (W = $e.prototype);
+                    var i = fe(h, function (...w) {
+                            if (Object.getPrototypeOf(this) !== s) throw new Q("Use 'new' to construct " + h);
+                            if (f.constructor_body === void 0) throw new Q(h + " has no accessible constructor");
+                            var E = f.constructor_body[w.length];
+                            if (E === void 0) throw new Q(`Tried to invoke ctor of ${h} with invalid number of parameters (${w.length}) - expected (${Object.keys(f.constructor_body).toString()}) parameters instead!`);
+                            return E.apply(this, w);
+                        }),
+                        s = Object.create(W, { constructor: { value: i } });
+                    i.prototype = s;
+                    var f = new vt(h, i, s, g, R, u, c, v);
+                    f.baseClass && ((f.baseClass.__derivedClasses ??= []), f.baseClass.__derivedClasses.push(f));
+                    var d = new Ce(h, f, !0, !1, !1),
+                        y = new Ce(h + "*", f, !1, !1, !1),
+                        b = new Ce(h + " const*", f, !1, !0, !1);
+                    return (dr[e] = { pointerType: y, constPointerType: b }), pr(P, i), [d, y, b];
+                });
+        }
+        var De = (e, r) => {
+            for (var t = [], n = 0; n < e; n++) t.push($[((r + n * 4) >>> 2) >>> 0]);
+            return t;
+        };
+        function $t(e) {
+            for (var r = 1; r < e.length; ++r) if (e[r] !== null && e[r].destructorFunction === void 0) return !0;
+            return !1;
+        }
+        function xe(e, r, t, n, a, u) {
+            var l = r.length;
+            l < 2 && m("argTypes array size mismatch! Must at least get return value and 'this' types!");
+            var c = r[1] !== null && t !== null,
+                p = $t(r),
+                v = r[0].name !== "void",
+                h = l - 2,
+                _ = new Array(h),
+                g = [],
+                P = [],
+                C = function (...R) {
+                    R.length !== h && m(`function ${e} called with ${R.length} arguments, expected ${h}`), (P.length = 0);
+                    var W;
+                    (g.length = c ? 2 : 1), (g[0] = a), c && ((W = r[1].toWireType(P, this)), (g[1] = W));
+                    for (var i = 0; i < h; ++i) (_[i] = r[i + 2].toWireType(P, R[i])), g.push(_[i]);
+                    var s = n(...g);
+                    function f(d) {
+                        if (p) We(P);
+                        else
+                            for (var y = c ? 1 : 2; y < r.length; y++) {
+                                var b = y === 1 ? W : _[y - 2];
+                                r[y].destructorFunction !== null && r[y].destructorFunction(b);
+                            }
+                        if (v) return r[0].fromWireType(d);
+                    }
+                    return f(s);
+                };
+            return fe(e, C);
+        }
+        var Ct = function (e, r, t, n, a, u) {
+                (e >>>= 0), (t >>>= 0), (n >>>= 0), (a >>>= 0), (u >>>= 0);
+                var l = De(r, t);
+                (a = I(n, a)),
+                    q([], [e], (c) => {
+                        c = c[0];
+                        var p = `constructor ${c.name}`;
+                        if ((c.registeredClass.constructor_body === void 0 && (c.registeredClass.constructor_body = []), c.registeredClass.constructor_body[r - 1] !== void 0))
+                            throw new Q(
+                                `Cannot register multiple constructors with identical number of parameters (${r - 1}) for class '${c.name}'! Overload resolution is currently only performed using the parameter count, not actual type info!`
+                            );
+                        return (
+                            (c.registeredClass.constructor_body[r - 1] = () => {
+                                Te(`Cannot construct ${c.name} due to unbound types`, l);
+                            }),
+                            q([], l, (v) => (v.splice(1, 0, null), (c.registeredClass.constructor_body[r - 1] = xe(p, v, null, a, u)), [])),
+                            []
+                        );
+                    });
+            },
+            mr = (e) => {
+                e = e.trim();
+                const r = e.indexOf("(");
+                return r !== -1 ? e.substr(0, r) : e;
+            },
+            wt = function (e, r, t, n, a, u, l, c, p) {
+                (e >>>= 0), (r >>>= 0), (n >>>= 0), (a >>>= 0), (u >>>= 0), (l >>>= 0);
+                var v = De(t, n);
+                (r = F(r)),
+                    (r = mr(r)),
+                    (u = I(a, u)),
+                    q([], [e], (h) => {
+                        h = h[0];
+                        var _ = `${h.name}.${r}`;
+                        r.startsWith("@@") && (r = Symbol[r.substring(2)]), c && h.registeredClass.pureVirtualFunctions.push(r);
+                        function g() {
+                            Te(`Cannot call ${_} due to unbound types`, v);
+                        }
+                        var P = h.registeredClass.instancePrototype,
+                            C = P[r];
+                        return (
+                            C === void 0 || (C.overloadTable === void 0 && C.className !== h.name && C.argCount === t - 2) ? ((g.argCount = t - 2), (g.className = h.name), (P[r] = g)) : (vr(P, r, _), (P[r].overloadTable[t - 2] = g)),
+                            q([], v, (R) => {
+                                var W = xe(_, R, h, u, l);
+                                return P[r].overloadTable === void 0 ? ((W.argCount = t - 2), (P[r] = W)) : (P[r].overloadTable[t - 2] = W), [];
+                            }),
+                            []
+                        );
+                    });
+            },
+            je = [],
+            U = [];
+        function Ue(e) {
+            (e >>>= 0), e > 9 && --U[e + 1] === 0 && ((U[e] = void 0), je.push(e));
+        }
+        var Tt = () => U.length / 2 - 5 - je.length,
+            At = () => {
+                U.push(0, 1, void 0, 1, null, 1, !0, 1, !1, 1), (o.count_emval_handles = Tt);
+            },
+            A = {
+                toValue: (e) => (e || m("Cannot use deleted val. handle = " + e), U[e]),
+                toHandle: (e) => {
+                    switch (e) {
+                        case void 0:
+                            return 2;
+                        case null:
+                            return 4;
+                        case !0:
+                            return 6;
+                        case !1:
+                            return 8;
+                        default: {
+                            const r = je.pop() || U.length;
+                            return (U[r] = e), (U[r + 1] = 1), r;
+                        }
+                    }
+                },
+            },
+            St = {
+                name: "emscripten::val",
+                fromWireType: (e) => {
+                    var r = A.toValue(e);
+                    return Ue(e), r;
+                },
+                toWireType: (e, r) => A.toHandle(r),
+                argPackAdvance: j,
+                readValueFromPointer: oe,
+                destructorFunction: null,
+            };
+        function gr(e) {
+            return (e >>>= 0), x(e, St);
+        }
+        var Ft = (e, r, t) => {
+            switch (r) {
+                case 1:
+                    return t
+                        ? function (n) {
+                              return this.fromWireType(V[n >>> 0]);
+                          }
+                        : function (n) {
+                              return this.fromWireType(M[n >>> 0]);
+                          };
+                case 2:
+                    return t
+                        ? function (n) {
+                              return this.fromWireType(H[(n >>> 1) >>> 0]);
+                          }
+                        : function (n) {
+                              return this.fromWireType(ne[(n >>> 1) >>> 0]);
+                          };
+                case 4:
+                    return t
+                        ? function (n) {
+                              return this.fromWireType(L[(n >>> 2) >>> 0]);
+                          }
+                        : function (n) {
+                              return this.fromWireType($[(n >>> 2) >>> 0]);
+                          };
+                default:
+                    throw new TypeError(`invalid integer width (${r}): ${e}`);
+            }
+        };
+        function Mt(e, r, t, n) {
+            (e >>>= 0), (r >>>= 0), (t >>>= 0), (r = F(r));
+            function a() {}
+            (a.values = {}),
+                x(e, {
+                    name: r,
+                    constructor: a,
+                    fromWireType: function (u) {
+                        return this.constructor.values[u];
+                    },
+                    toWireType: (u, l) => l.value,
+                    argPackAdvance: j,
+                    readValueFromPointer: Ft(r, t, n),
+                    destructorFunction: null,
+                }),
+                Ie(r, a);
+        }
+        var Ae = (e, r) => {
+            var t = N[e];
+            return t === void 0 && m(`${r} has unknown type ${_r(e)}`), t;
+        };
+        function Rt(e, r, t) {
+            (e >>>= 0), (r >>>= 0);
+            var n = Ae(e, "enum");
+            r = F(r);
+            var a = n.constructor,
+                u = Object.create(n.constructor.prototype, { value: { value: t }, constructor: { value: fe(`${n.name}_${r}`, function () {}) } });
+            (a.values[t] = u), (a[r] = u);
+        }
+        var Be = (e) => {
+                if (e === null) return "null";
+                var r = typeof e;
+                return r === "object" || r === "array" || r === "function" ? e.toString() : "" + e;
+            },
+            Wt = (e, r) => {
+                switch (r) {
+                    case 4:
+                        return function (t) {
+                            return this.fromWireType(he[(t >>> 2) >>> 0]);
+                        };
+                    case 8:
+                        return function (t) {
+                            return this.fromWireType(ye[(t >>> 3) >>> 0]);
+                        };
+                    default:
+                        throw new TypeError(`invalid float width (${r}): ${e}`);
+                }
+            },
+            Et = function (e, r, t) {
+                (e >>>= 0), (r >>>= 0), (t >>>= 0), (r = F(r)), x(e, { name: r, fromWireType: (n) => n, toWireType: (n, a) => a, argPackAdvance: j, readValueFromPointer: Wt(r, t), destructorFunction: null });
+            };
+        function Vt(e, r, t, n, a, u, l) {
+            (e >>>= 0), (t >>>= 0), (n >>>= 0), (a >>>= 0), (u >>>= 0);
+            var c = De(r, t);
+            (e = F(e)),
+                (e = mr(e)),
+                (a = I(n, a)),
+                Ie(
+                    e,
+                    function () {
+                        Te(`Cannot call ${e} due to unbound types`, c);
+                    },
+                    r - 1
+                ),
+                q([], c, (p) => {
+                    var v = [p[0], null].concat(p.slice(1));
+                    return pr(e, xe(e, v, null, a, u), r - 1), [];
+                });
+        }
+        var kt = (e, r, t) => {
+            switch (r) {
+                case 1:
+                    return t ? (n) => V[n >>> 0] : (n) => M[n >>> 0];
+                case 2:
+                    return t ? (n) => H[(n >>> 1) >>> 0] : (n) => ne[(n >>> 1) >>> 0];
+                case 4:
+                    return t ? (n) => L[(n >>> 2) >>> 0] : (n) => $[(n >>> 2) >>> 0];
+                default:
+                    throw new TypeError(`invalid integer width (${r}): ${e}`);
+            }
+        };
+        function It(e, r, t, n, a) {
+            (e >>>= 0), (r >>>= 0), (t >>>= 0), (r = F(r));
+            var u = (h) => h;
+            if (n === 0) {
+                var l = 32 - 8 * t;
+                u = (h) => (h << l) >>> l;
+            }
+            var c = r.includes("unsigned"),
+                p = (h, _) => {},
+                v;
+            c
+                ? (v = function (h, _) {
+                      return p(_, this.name), _ >>> 0;
+                  })
+                : (v = function (h, _) {
+                      return p(_, this.name), _;
+                  }),
+                x(e, { name: r, fromWireType: u, toWireType: v, argPackAdvance: j, readValueFromPointer: kt(r, t, n !== 0), destructorFunction: null });
+        }
+        function Ot(e, r, t) {
+            (e >>>= 0), (t >>>= 0);
+            var n = [Int8Array, Uint8Array, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array],
+                a = n[r];
+            function u(l) {
+                var c = $[(l >>> 2) >>> 0],
+                    p = $[((l + 4) >>> 2) >>> 0];
+                return new a(V.buffer, p, c);
+            }
+            (t = F(t)), x(e, { name: t, fromWireType: u, argPackAdvance: j, readValueFromPointer: u }, { ignoreDuplicateRegistrations: !0 });
+        }
+        function Dt(e, r) {
+            (e >>>= 0), gr(e);
+        }
+        var xt = (e, r, t, n) => {
+                if (((t >>>= 0), !(n > 0))) return 0;
+                for (var a = t, u = t + n - 1, l = 0; l < e.length; ++l) {
+                    var c = e.charCodeAt(l);
+                    if (c >= 55296 && c <= 57343) {
+                        var p = e.charCodeAt(++l);
+                        c = (65536 + ((c & 1023) << 10)) | (p & 1023);
+                    }
+                    if (c <= 127) {
+                        if (t >= u) break;
+                        r[t++ >>> 0] = c;
+                    } else if (c <= 2047) {
+                        if (t + 1 >= u) break;
+                        (r[t++ >>> 0] = 192 | (c >> 6)), (r[t++ >>> 0] = 128 | (c & 63));
+                    } else if (c <= 65535) {
+                        if (t + 2 >= u) break;
+                        (r[t++ >>> 0] = 224 | (c >> 12)), (r[t++ >>> 0] = 128 | ((c >> 6) & 63)), (r[t++ >>> 0] = 128 | (c & 63));
+                    } else {
+                        if (t + 3 >= u) break;
+                        (r[t++ >>> 0] = 240 | (c >> 18)), (r[t++ >>> 0] = 128 | ((c >> 12) & 63)), (r[t++ >>> 0] = 128 | ((c >> 6) & 63)), (r[t++ >>> 0] = 128 | (c & 63));
+                    }
+                }
+                return (r[t >>> 0] = 0), t - a;
+            },
+            jt = (e, r, t) => xt(e, M, r, t),
+            Ut = (e) => {
+                for (var r = 0, t = 0; t < e.length; ++t) {
+                    var n = e.charCodeAt(t);
+                    n <= 127 ? r++ : n <= 2047 ? (r += 2) : n >= 55296 && n <= 57343 ? ((r += 4), ++t) : (r += 3);
+                }
+                return r;
+            },
+            br = typeof TextDecoder < "u" ? new TextDecoder() : void 0,
+            Bt = (e, r, t) => {
+                r >>>= 0;
+                for (var n = r + t, a = r; e[a] && !(a >= n); ) ++a;
+                if (a - r > 16 && e.buffer && br) return br.decode(e.subarray(r, a));
+                for (var u = ""; r < a; ) {
+                    var l = e[r++];
+                    if (!(l & 128)) {
+                        u += String.fromCharCode(l);
+                        continue;
+                    }
+                    var c = e[r++] & 63;
+                    if ((l & 224) == 192) {
+                        u += String.fromCharCode(((l & 31) << 6) | c);
+                        continue;
+                    }
+                    var p = e[r++] & 63;
+                    if (((l & 240) == 224 ? (l = ((l & 15) << 12) | (c << 6) | p) : (l = ((l & 7) << 18) | (c << 12) | (p << 6) | (e[r++] & 63)), l < 65536)) u += String.fromCharCode(l);
+                    else {
+                        var v = l - 65536;
+                        u += String.fromCharCode(55296 | (v >> 10), 56320 | (v & 1023));
+                    }
+                }
+                return u;
+            },
+            Ht = (e, r) => ((e >>>= 0), e ? Bt(M, e, r) : "");
+        function Lt(e, r) {
+            (e >>>= 0), (r >>>= 0), (r = F(r));
+            var t = r === "std::string";
+            x(e, {
+                name: r,
+                fromWireType(n) {
+                    var a = $[(n >>> 2) >>> 0],
+                        u = n + 4,
+                        l;
+                    if (t)
+                        for (var c = u, p = 0; p <= a; ++p) {
+                            var v = u + p;
+                            if (p == a || M[v >>> 0] == 0) {
+                                var h = v - c,
+                                    _ = Ht(c, h);
+                                l === void 0 ? (l = _) : ((l += String.fromCharCode(0)), (l += _)), (c = v + 1);
+                            }
+                        }
+                    else {
+                        for (var g = new Array(a), p = 0; p < a; ++p) g[p] = String.fromCharCode(M[(u + p) >>> 0]);
+                        l = g.join("");
+                    }
+                    return B(n), l;
+                },
+                toWireType(n, a) {
+                    a instanceof ArrayBuffer && (a = new Uint8Array(a));
+                    var u,
+                        l = typeof a == "string";
+                    l || a instanceof Uint8Array || a instanceof Uint8ClampedArray || a instanceof Int8Array || m("Cannot pass non-string to std::string"), t && l ? (u = Ut(a)) : (u = a.length);
+                    var c = Ne(4 + u + 1),
+                        p = c + 4;
+                    if ((($[(c >>> 2) >>> 0] = u), t && l)) jt(a, p, u + 1);
+                    else if (l)
+                        for (var v = 0; v < u; ++v) {
+                            var h = a.charCodeAt(v);
+                            h > 255 && (B(p), m("String has UTF-16 code units that do not fit in 8 bits")), (M[(p + v) >>> 0] = h);
+                        }
+                    else for (var v = 0; v < u; ++v) M[(p + v) >>> 0] = a[v];
+                    return n !== null && n.push(B, c), c;
+                },
+                argPackAdvance: j,
+                readValueFromPointer: oe,
+                destructorFunction(n) {
+                    B(n);
+                },
+            });
+        }
+        var Pr = typeof TextDecoder < "u" ? new TextDecoder("utf-16le") : void 0,
+            zt = (e, r) => {
+                for (var t = e, n = t >> 1, a = n + r / 2; !(n >= a) && ne[n >>> 0]; ) ++n;
+                if (((t = n << 1), t - e > 32 && Pr)) return Pr.decode(M.subarray(e >>> 0, t >>> 0));
+                for (var u = "", l = 0; !(l >= r / 2); ++l) {
+                    var c = H[((e + l * 2) >>> 1) >>> 0];
+                    if (c == 0) break;
+                    u += String.fromCharCode(c);
+                }
+                return u;
+            },
+            Nt = (e, r, t) => {
+                if (((t ??= 2147483647), t < 2)) return 0;
+                t -= 2;
+                for (var n = r, a = t < e.length * 2 ? t / 2 : e.length, u = 0; u < a; ++u) {
+                    var l = e.charCodeAt(u);
+                    (H[(r >>> 1) >>> 0] = l), (r += 2);
+                }
+                return (H[(r >>> 1) >>> 0] = 0), r - n;
+            },
+            qt = (e) => e.length * 2,
+            Gt = (e, r) => {
+                for (var t = 0, n = ""; !(t >= r / 4); ) {
+                    var a = L[((e + t * 4) >>> 2) >>> 0];
+                    if (a == 0) break;
+                    if ((++t, a >= 65536)) {
+                        var u = a - 65536;
+                        n += String.fromCharCode(55296 | (u >> 10), 56320 | (u & 1023));
+                    } else n += String.fromCharCode(a);
+                }
+                return n;
+            },
+            Jt = (e, r, t) => {
+                if (((r >>>= 0), (t ??= 2147483647), t < 4)) return 0;
+                for (var n = r, a = n + t - 4, u = 0; u < e.length; ++u) {
+                    var l = e.charCodeAt(u);
+                    if (l >= 55296 && l <= 57343) {
+                        var c = e.charCodeAt(++u);
+                        l = (65536 + ((l & 1023) << 10)) | (c & 1023);
+                    }
+                    if (((L[(r >>> 2) >>> 0] = l), (r += 4), r + 4 > a)) break;
+                }
+                return (L[(r >>> 2) >>> 0] = 0), r - n;
+            },
+            Kt = (e) => {
+                for (var r = 0, t = 0; t < e.length; ++t) {
+                    var n = e.charCodeAt(t);
+                    n >= 55296 && n <= 57343 && ++t, (r += 4);
+                }
+                return r;
+            },
+            Zt = function (e, r, t) {
+                (e >>>= 0), (r >>>= 0), (t >>>= 0), (t = F(t));
+                var n, a, u, l;
+                r === 2 ? ((n = zt), (a = Nt), (l = qt), (u = (c) => ne[(c >>> 1) >>> 0])) : r === 4 && ((n = Gt), (a = Jt), (l = Kt), (u = (c) => $[(c >>> 2) >>> 0])),
+                    x(e, {
+                        name: t,
+                        fromWireType: (c) => {
+                            for (var p = $[(c >>> 2) >>> 0], v, h = c + 4, _ = 0; _ <= p; ++_) {
+                                var g = c + 4 + _ * r;
+                                if (_ == p || u(g) == 0) {
+                                    var P = g - h,
+                                        C = n(h, P);
+                                    v === void 0 ? (v = C) : ((v += String.fromCharCode(0)), (v += C)), (h = g + r);
+                                }
+                            }
+                            return B(c), v;
+                        },
+                        toWireType: (c, p) => {
+                            typeof p != "string" && m(`Cannot pass non-string to C++ string type ${t}`);
+                            var v = l(p),
+                                h = Ne(4 + v + r);
+                            return ($[(h >>> 2) >>> 0] = v / r), a(p, h + 4, v + r), c !== null && c.push(B, h), h;
+                        },
+                        argPackAdvance: j,
+                        readValueFromPointer: oe,
+                        destructorFunction(c) {
+                            B(c);
+                        },
+                    });
+            };
+        function Qt(e, r, t, n, a, u) {
+            (e >>>= 0), (r >>>= 0), (t >>>= 0), (n >>>= 0), (a >>>= 0), (u >>>= 0), (me[e] = { name: F(r), rawConstructor: I(t, n), rawDestructor: I(a, u), fields: [] });
+        }
+        function Xt(e, r, t, n, a, u, l, c, p, v) {
+            (e >>>= 0),
+                (r >>>= 0),
+                (t >>>= 0),
+                (n >>>= 0),
+                (a >>>= 0),
+                (u >>>= 0),
+                (l >>>= 0),
+                (c >>>= 0),
+                (p >>>= 0),
+                (v >>>= 0),
+                me[e].fields.push({ fieldName: F(r), getterReturnType: t, getter: I(n, a), getterContext: u, setterArgumentType: l, setter: I(c, p), setterContext: v });
+        }
+        var Yt = function (e, r) {
+            (e >>>= 0), (r >>>= 0), (r = F(r)), x(e, { isVoid: !0, name: r, argPackAdvance: 0, fromWireType: () => {}, toWireType: (t, n) => {} });
+        };
+        function en(e, r, t) {
+            return (e >>>= 0), (r >>>= 0), (t >>>= 0), M.copyWithin(e >>> 0, r >>> 0, (r + t) >>> 0);
+        }
+        var $r = (e, r, t) => {
+            var n = [],
+                a = e.toWireType(n, t);
+            return n.length && ($[(r >>> 2) >>> 0] = A.toHandle(n)), a;
+        };
+        function rn(e, r, t) {
+            return (e >>>= 0), (r >>>= 0), (t >>>= 0), (e = A.toValue(e)), (r = Ae(r, "emval::as")), $r(r, t, e);
+        }
+        var tn = {},
+            Cr = (e) => {
+                var r = tn[e];
+                return r === void 0 ? F(e) : r;
+            },
+            He = [];
+        function nn(e, r, t, n, a) {
+            return (e >>>= 0), (r >>>= 0), (t >>>= 0), (n >>>= 0), (a >>>= 0), (e = He[e]), (r = A.toValue(r)), (t = Cr(t)), e(r, r[t], n, a);
+        }
+        function on(e, r) {
+            return (e >>>= 0), (r >>>= 0), (e = A.toValue(e)), (r = A.toValue(r)), e == r;
+        }
+        var sn = (e) => {
+                var r = He.length;
+                return He.push(e), r;
+            },
+            an = (e, r) => {
+                for (var t = new Array(e), n = 0; n < e; ++n) t[n] = Ae($[((r + n * 4) >>> 2) >>> 0], "parameter " + n);
+                return t;
+            },
+            un = Reflect.construct,
+            cn = function (e, r, t) {
+                r >>>= 0;
+                var n = an(e, r),
+                    a = n.shift();
+                e--;
+                var u = new Array(e),
+                    l = (p, v, h, _) => {
+                        for (var g = 0, P = 0; P < e; ++P) (u[P] = n[P].readValueFromPointer(_ + g)), (g += n[P].argPackAdvance);
+                        var C = t === 1 ? un(v, u) : v.apply(p, u);
+                        return $r(a, h, C);
+                    },
+                    c = `methodCaller<(${n.map((p) => p.name).join(", ")}) => ${a.name}>`;
+                return sn(fe(c, l));
+            };
+        function fn(e, r) {
+            return (e >>>= 0), (r >>>= 0), (e = A.toValue(e)), (r = A.toValue(r)), A.toHandle(e[r]);
+        }
+        function ln(e) {
+            (e >>>= 0), e > 9 && (U[e + 1] += 1);
+        }
+        function dn(e) {
+            return (e >>>= 0), A.toHandle(Cr(e));
+        }
+        function vn() {
+            return A.toHandle({});
+        }
+        function pn(e) {
+            e >>>= 0;
+            var r = A.toValue(e);
+            We(r), Ue(e);
+        }
+        function hn(e, r, t) {
+            (e >>>= 0), (r >>>= 0), (t >>>= 0), (e = A.toValue(e)), (r = A.toValue(r)), (t = A.toValue(t)), (e[r] = t);
+        }
+        function yn(e, r) {
+            (e >>>= 0), (r >>>= 0), (e = Ae(e, "_emval_take_value"));
+            var t = e.readValueFromPointer(r);
+            return A.toHandle(t);
+        }
+        var _n = () => 4294901760,
+            mn = (e) => {
+                var r = pe.buffer,
+                    t = (e - r.byteLength + 65535) / 65536;
+                try {
+                    return pe.grow(t), Ye(), 1;
+                } catch {}
+            };
+        function gn(e) {
+            e >>>= 0;
+            var r = M.length,
+                t = _n();
+            if (e > t) return !1;
+            for (var n = (p, v) => p + ((v - (p % v)) % v), a = 1; a <= 4; a *= 2) {
+                var u = r * (1 + 0.2 / a);
+                u = Math.min(u, e + 100663296);
+                var l = Math.min(t, n(Math.max(e, u), 65536)),
+                    c = mn(l);
+                if (c) return !0;
+            }
+            return !1;
+        }
+        var wr = (e, r) => {
+                e < 128 ? r.push(e) : r.push(e % 128 | 128, e >> 7);
+            },
+            bn = (e) => {
+                for (var r = { i: "i32", j: "i64", f: "f32", d: "f64", e: "externref", p: "i32" }, t = { parameters: [], results: e[0] == "v" ? [] : [r[e[0]]] }, n = 1; n < e.length; ++n) t.parameters.push(r[e[n]]);
+                return t;
+            },
+            Pn = (e, r) => {
+                var t = e.slice(0, 1),
+                    n = e.slice(1),
+                    a = { i: 127, p: 127, j: 126, f: 125, d: 124, e: 111 };
+                r.push(96), wr(n.length, r);
+                for (var u = 0; u < n.length; ++u) r.push(a[n[u]]);
+                t == "v" ? r.push(0) : r.push(1, a[t]);
+            },
+            $n = (e, r) => {
+                if (typeof WebAssembly.Function == "function") return new WebAssembly.Function(bn(r), e);
+                var t = [1];
+                Pn(r, t);
+                var n = [0, 97, 115, 109, 1, 0, 0, 0, 1];
+                wr(t.length, n), n.push(...t), n.push(2, 7, 1, 1, 101, 1, 102, 0, 0, 7, 5, 1, 1, 102, 0, 0);
+                var a = new WebAssembly.Module(new Uint8Array(n)),
+                    u = new WebAssembly.Instance(a, { e: { f: e } }),
+                    l = u.exports.f;
+                return l;
+            },
+            Cn = (e, r) => {
+                if (G)
+                    for (var t = e; t < e + r; t++) {
+                        var n = we(t);
+                        n && G.set(n, t);
+                    }
+            },
+            G,
+            wn = (e) => (G || ((G = new WeakMap()), Cn(0, X.length)), G.get(e) || 0),
+            Le = [],
+            Tn = () => {
+                if (Le.length) return Le.pop();
+                try {
+                    X.grow(1);
+                } catch (e) {
+                    throw e instanceof RangeError ? "Unable to grow wasm table. Set ALLOW_TABLE_GROWTH." : e;
+                }
+                return X.length - 1;
+            },
+            ze = (e, r) => X.set(e, r),
+            le = (e, r) => {
+                var t = wn(e);
+                if (t) return t;
+                var n = Tn();
+                try {
+                    ze(n, e);
+                } catch (u) {
+                    if (!(u instanceof TypeError)) throw u;
+                    var a = $n(e, r);
+                    ze(n, a);
+                }
+                return G.set(e, n), n;
+            },
+            de = (e) => {
+                G.delete(we(e)), ze(e, null), Le.push(e);
+            };
+        (ar = o.InternalError = class extends Error {
+            constructor(r) {
+                super(r), (this.name = "InternalError");
+            }
+        }),
+            Qr(),
+            (Q = o.BindingError = class extends Error {
+                constructor(r) {
+                    super(r), (this.name = "BindingError");
+                }
+            }),
+            ct(),
+            ot(),
+            _t(),
+            (yr = o.UnboundTypeError = bt(Error, "UnboundTypeError")),
+            At();
+        var An = {
+                i: Gr,
+                D: Jr,
+                n: Kr,
+                C: Zr,
+                H: Yr,
+                h: Pt,
+                g: Ct,
+                a: wt,
+                G: gr,
+                t: Mt,
+                e: Rt,
+                x: Et,
+                c: Vt,
+                j: It,
+                f: Ot,
+                k: Dt,
+                w: Lt,
+                s: Zt,
+                o: Qt,
+                l: Xt,
+                I: Yt,
+                F: en,
+                v: rn,
+                z: nn,
+                b: Ue,
+                m: on,
+                y: cn,
+                B: fn,
+                u: ln,
+                q: dn,
+                A: vn,
+                p: pn,
+                r: hn,
+                d: yn,
+                E: gn,
+            },
+            O = Nr(),
+            Tr = (e) => (Tr = O.L)(e),
+            Ne = (e) => (Ne = O.N)(e),
+            B = (e) => (B = O.O)(e),
+            Ar = (e) => (Ar = O.P)(e);
+        function Sn(e) {
+            e = Object.assign({}, e);
+            var r = (n) => (a) => n(a) >>> 0,
+                t = (n) => () => n() >>> 0;
+            return (e.L = r(e.L)), (e.N = r(e.N)), (e._emscripten_stack_alloc = r(e._emscripten_stack_alloc)), (e.emscripten_stack_get_current = t(e.emscripten_stack_get_current)), e;
+        }
+        (o.addFunction = le), (o.removeFunction = de);
+        var Se;
+        ie = function e() {
+            Se || Sr(), Se || (ie = e);
+        };
+        function Sr() {
+            if (z > 0 || (Er(), z > 0)) return;
+            function e() {
+                Se || ((Se = !0), (o.calledRun = !0), !Xe && (Vr(), Je(o), o.onRuntimeInitialized?.(), kr()));
+            }
+            o.setStatus
+                ? (o.setStatus("Running..."),
+                  setTimeout(function () {
+                      setTimeout(function () {
+                          o.setStatus("");
+                      }, 1),
+                          e();
+                  }, 1))
+                : e();
+        }
+        if (o.preInit) for (typeof o.preInit == "function" && (o.preInit = [o.preInit]); o.preInit.length > 0; ) o.preInit.pop()();
+        return Sr(), (Ge = Mr), Ge;
+    };
 })();
-export default Module;
+export { Mn as M };
