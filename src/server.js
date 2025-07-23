@@ -7,6 +7,10 @@
 /** @typedef {import("partykit/server").Connection} Connection */
 /** @typedef {import("partykit/server").ConnectionContext} ConnectionContext */
 
+import * as THREE from '../node_modules/three/build/three.module.js';
+import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
+import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js' ;
+
 /** @implements {Server} */
 class PartyServer {
   /** @param {Room} room */
@@ -106,17 +110,35 @@ class PartyServer {
         this.players[sender.id].position.y = data.position.y;
         this.players[sender.id].position.z = data.position.z;
         this.needsUpdate[sender.id] = true;
-      }else if(data.type === "chunk"){
+      } else if(data.type === "chunk"){
         if(!this.chunks[data.index]){
           this.chunks[data.index] = { index: data.index, data: data.data };
-        }else{
-            this.chunks[data.index].data = data.data;
+        } else {
+          this.chunks[data.index].data = data.data;
         }
+        this.needsUpdate[""+data.index] = true;
+      } else if(data.type === "csgoperation") {
+        if(!this.chunks[data.index]){
+          if(!data.originalChunk){ console.error("Received csgoperation without originalChunk for fresh index: " + data.index); return; }
+          this.chunks[data.index] = { index: data.index, data: data.originalChunk };
+        }
+
+        // Create a new Brush from the original chunk data and the incoming brush data
+        let scene         = new THREE.Scene();
+        let originalChunk = this.base64ToBrush(this.chunks[data.index].data);
+        let brush         = this.base64ToBrush(data.brush);
+        scene.add(originalChunk);
+        scene.add(brush);
+        brush.position  .set(data.brushPosition.x, data.brushPosition.y, data.brushPosition.z);
+        brush.quaternion.set(data.brushQuaternion.x, data.brushQuaternion.y, data.brushQuaternion.z, data.brushQuaternion.w);
+        brush.scale     .set(data.brushScale.x, data.brushScale.y, data.brushScale.z);
+        brush.updateMatrixWorld(true);
+        this.chunks[data.index].data = this.brushToBase64(new Evaluator().evaluate( originalChunk, brush, parseInt(data.operation)));
         this.needsUpdate[""+data.index] = true;
       } else if(data.type === "name"){
         this.players[sender.id].name = data.name;
         this.needsUpdate[sender.id] = true;
-      }else if(data.type === "chat"){
+      } else if(data.type === "chat"){
         this.room.broadcast(JSON.stringify({
           type: "chat",
           sender: sender.id,
@@ -140,6 +162,30 @@ class PartyServer {
     //  cards: this.cards,
     //}));
     this.hasNewInfoToSend = true;
+  }
+
+  base64ToBrush(base64String) {
+    let binaryString = this.b64decode(base64String.normalize("NFC"));
+    let unbase64CompressedPositions = new Uint8Array(binaryString.length);
+    for (let b = 0; b < binaryString.length; b++) {
+        unbase64CompressedPositions[b] = binaryString.charCodeAt(b);
+    }
+    let decompressedPositions = new Float32Array(gunzipSync(unbase64CompressedPositions).buffer);
+    let newGeometry = new THREE.BufferGeometry();
+    newGeometry.setAttribute('position', new THREE.BufferAttribute(decompressedPositions, 3));
+    newGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length / 3 * 2), 2));
+    newGeometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length), 3));
+    newGeometry.index = null;
+    return new Brush(newGeometry);
+  }
+
+  b64encode(input) { return btoa(encodeURIComponent(input)); }
+  b64decode(input) { return decodeURIComponent(atob(input)); }
+
+  brushToBase64(brush) {
+    let compressedPositions = gzipSync(new Uint8Array(brush.geometry.attributes.position.array.buffer));
+    let toReturn = this.b64encode(String.fromCharCode.apply(null, compressedPositions));
+    return toReturn.normalize("NFC");
   }
 
   /** @param {Connection} conn - The connection object. */

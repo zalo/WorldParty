@@ -12,7 +12,7 @@ import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_m
 import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from '../node_modules/three-mesh-bvh/build/index.module.js';
 import PartySocket from "../node_modules/partysocket/dist/index.mjs";
 import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
-const { gzipSync, gunzipSync }  = await import( '../node_modules/three/examples/jsm/libs/fflate.module.js' );
+import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js' ;
 
 /** The fundamental set up and animation structures for Simulation */
 export default class Main {
@@ -105,8 +105,8 @@ export default class Main {
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
         //this.mesh = new Brush( this.chunkGeometry, this.defaultMaterial );
-        this.bigChunk = new Brush( new THREE.BoxGeometry( 100.0, 100.0, 100.0 ), this.defaultMaterial );
-        this.littleChunk = new Brush( new THREE.BoxGeometry( 10.0, 10.0, 10.0 ), this.defaultMaterial );
+        this.bigChunk = new Brush( new THREE.BoxGeometry( 100.0, 100.0, 100.0 ).toNonIndexed (), this.defaultMaterial );
+        this.littleChunk = new Brush( new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed (), this.defaultMaterial );
         this.wholeChunk = this.evaluator.evaluate( this.bigChunk, this.littleChunk, SUBTRACTION );
         //this.wholeChunk = new Brush( this.chunkGeometry, this.defaultMaterial );
         this.chunks = [];
@@ -114,7 +114,7 @@ export default class Main {
         for( let x = 0; x < 10; x++ ) {
             for( let y = 0; y < 10; y++ ) {
                 for( let z = 0; z < 10; z++ ) {
-                    let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ) : new THREE.BoxGeometry( 0.1, 0.1, 0.1 );
+                    let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed () : new THREE.BoxGeometry( 0.1, 0.1, 0.1 ).toNonIndexed ();
                     // Offset the vertices in the chunk geometry by the chunk position
                     let vertices = geometry.attributes.position.array;
                     for (let i = 0; i < vertices.length; i += 3) {
@@ -143,7 +143,8 @@ export default class Main {
         this.world.scene.add( this.player );
         this.player.reset();
 
-        this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2), this.defaultMaterial );
+        this.transparentMaterial = new THREE.MeshStandardMaterial( { color: 0x8080a8, roughness: 0.5, metalness: 0.5, transparent: true, opacity: 0.5, side: THREE.DoubleSide } );
+        this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2).toNonIndexed(), this.transparentMaterial );
         this.brush2.position.y = -0.5;
         this.brush2.updateMatrixWorld();
         this.world.scene.add( this.brush2 );
@@ -262,7 +263,31 @@ export default class Main {
 
             for(let i = 0; i < this.chunks.length; i++) {
                 if (box1.intersectsBox(this.chunks[i].bbox)) {
-                    this.mesh.remove(this.chunks[i]);
+                    this.conn.send(JSON.stringify({
+                        type: "csgoperation",
+                        index: i,
+                        originalChunk: this.brushToBase64(this.chunks[i]),
+                        brush: this.brushToBase64(this.brush2),
+                        operation: this.ePressed ? ADDITION : SUBTRACTION,
+                        brushPosition: {
+                            x: this.brush2.position.x,
+                            y: this.brush2.position.y,
+                            z: this.brush2.position.z
+                        },
+                        brushQuaternion: {
+                            x: this.brush2.quaternion.x,
+                            y: this.brush2.quaternion.y,
+                            z: this.brush2.quaternion.z,
+                            w: this.brush2.quaternion.w
+                        },
+                        brushScale: {
+                            x: this.brush2.scale.x,
+                            y: this.brush2.scale.y,
+                            z: this.brush2.scale.z
+                        }
+                    }));
+
+                    /*this.mesh.remove(this.chunks[i]);
                     let bbox = this.chunks[i].bbox;
                     this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.brush2, this.ePressed ? ADDITION : SUBTRACTION);
                     // This part prevents additive chunks from leaking into neighboring chunks
@@ -271,7 +296,7 @@ export default class Main {
                     //this.wholeChunk.updateMatrixWorld( true);
                     //this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.wholeChunk, SUBTRACTION);
 
-                    let compressedChunk = this.chunkIndexToBase64(i);
+                    let compressedChunk = this.brushToBase64(this.chunks[i]);
 
                     this.conn.send(JSON.stringify({
                         type: "chunk",
@@ -284,7 +309,7 @@ export default class Main {
                     this.chunks[i].updateMatrixWorld();
                     this.chunks[i].prepareGeometry();
                     this.chunks[i].bbox = bbox;
-                    this.mesh.add(this.chunks[i]);
+                    this.mesh.add(this.chunks[i]);*/
                 }
             }
             this.ePressed = false;
@@ -303,8 +328,8 @@ export default class Main {
         return decodeURIComponent(atob(input));
     }
 
-    chunkIndexToBase64(chunkIndex) {
-        let compressedPositions = gzipSync(new Uint8Array(this.chunks[chunkIndex].geometry.attributes.position.array.buffer));
+    brushToBase64(brush) {
+        let compressedPositions = gzipSync(new Uint8Array(brush.geometry.attributes.position.array.buffer));
         let toReturn = this.b64encode(String.fromCharCode.apply(null, compressedPositions));
         return toReturn.normalize("NFC");
     }
