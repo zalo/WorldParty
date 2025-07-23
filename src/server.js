@@ -12,12 +12,12 @@ import { mergeVertices, toCreasedNormals } from '../node_modules/three/examples/
 import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
 import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js';
 
-import Module from '../node_modules/manifold-3d/manifold.js';
-/** @typedef {import("../node_modules/manifold-3d/manifold.js").CrossSection} CrossSection */
-/** @typedef {import("../node_modules/manifold-3d/manifold.js").Manifold} Manifold */
-/** @typedef {import("../node_modules/manifold-3d/manifold.js").ManifoldToplevel} ManifoldToplevel */
-/** @typedef {import("../node_modules/manifold-3d/manifold.js").Mesh} Mesh */
-/** @typedef {import("../node_modules/manifold-3d/manifold.js").Vec3} Vec3 */
+import Module from '../assets/manifold-3d/manifold.js';
+/** @typedef {import("../assets/manifold-3d/manifold.js").CrossSection} CrossSection */
+/** @typedef {import("../assets/manifold-3d/manifold.js").Manifold} Manifold */
+/** @typedef {import("../assets/manifold-3d/manifold.js").ManifoldToplevel} ManifoldToplevel */
+/** @typedef {import("../assets/manifold-3d/manifold.js").Mesh} Mesh */
+/** @typedef {import("../assets/manifold-3d/manifold.js").Vec3} Vec3 */
 
 /** @implements {Server} */
 class PartyServer {
