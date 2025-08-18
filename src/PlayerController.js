@@ -26,6 +26,15 @@ export class PlayerController extends THREE.Group {
             this.controls = new PointerLockControls(camera, document.body);
             document.getElementById('appbody').addEventListener( 'click', () => { this.controls.lock(); });
             //this.camera.parent.add( this.controls.object );
+            
+            // Handle crosshairs visibility
+            const crosshairs = document.getElementById('crosshairs');
+            this.controls.addEventListener('lock', () => {
+                crosshairs.style.display = 'block';
+            });
+            this.controls.addEventListener('unlock', () => {
+                crosshairs.style.display = 'none';
+            });
         }
 
         this.name = 'PlayerController';
