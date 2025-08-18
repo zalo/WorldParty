@@ -1,6 +1,10 @@
 import * as THREE from '../node_modules/three/build/three.module.js';
 import Stats from '../node_modules/three/examples/jsm/libs/stats.module.js';
 import { OrbitControls } from '../node_modules/three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from '../node_modules/three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from '../node_modules/three/examples/jsm/postprocessing/RenderPass.js';
+import { SSILVBPass } from './SSILVBPass.js';
+import { OutputPass } from '../node_modules/three/examples/jsm/postprocessing/OutputPass.js';
 
 /** The fundamental set up and animation structures for 3D Visualization */
 export default class World {
@@ -60,11 +64,11 @@ export default class World {
         //this.ground.receiveShadow = true;
         //this.scene.add( this.ground );
         
-        this.helper = new THREE.GridHelper( 100, 20 );
-        this.helper.material.opacity = 1.0;
-        this.helper.material.transparent = true;
-        this.helper.position.set(0, 0.005, 0);
-        this.scene.add( this.helper );
+        //this.helper = new THREE.GridHelper( 100, 20 );
+        //this.helper.material.opacity = 1.0;
+        //this.helper.material.transparent = true;
+        //this.helper.position.set(0, 0.005, 0);
+        //this.scene.add( this.helper );
 
         // renderer
         this.renderer = new THREE.WebGLRenderer( { antialias: true } ); //, alpha: true
@@ -75,6 +79,19 @@ export default class World {
         this.renderer.setClearColor( 0x000000, 0 ); // the default
         window.addEventListener('resize', this._onWindowResize.bind(this), false);
         window.addEventListener('orientationchange', this._onWindowResize.bind(this), false);
+
+        this.composer = new EffectComposer( this.renderer );
+
+        const renderPass = new RenderPass( this.scene, this.camera );
+        this.composer.addPass( renderPass );
+
+        const ssilvbPass = new SSILVBPass( this.scene, this.camera, window.innerWidth, window.innerHeight );
+        //ssilvbPass.output = SSILVBPass.OUTPUT.AO;
+        this.composer.addPass( ssilvbPass );
+
+        const outputPass = new OutputPass();
+        this.composer.addPass( outputPass );
+
         this._onWindowResize();
 
         //this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -111,6 +128,7 @@ export default class World {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
+        if(this.composer){this.composer.setSize(width, height);}
     }
 
 }

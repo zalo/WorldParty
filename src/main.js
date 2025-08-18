@@ -48,6 +48,9 @@ export default class Main {
         /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
         this.players = {};
 
+        /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number } }> } */
+        this.models = {};
+
         //this.conn.addEventListener("open"   , this.start           .bind(this));
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
 
@@ -155,6 +158,7 @@ export default class Main {
 
         this.ePressed = false;
         this.qPressed = false;
+        this.fPressed = false;
         window.addEventListener('pointerdown', (e) => {
             e.preventDefault();
             if(this.player && this.player.controls && this.player.controls.isLocked) {
@@ -165,8 +169,16 @@ export default class Main {
                 }
             }
         });
+        window.addEventListener('keydown', (e) => {
+            if(this.player && this.player.controls && this.player.controls.isLocked) {
+                if (e.key === 'f' || e.key === 'F') {
+                    this.fPressed = true;
+                }
+            }
+        });
         this.frameNum = 0;
         this.lastUpdate = 0;
+        this.constructorFinished = true;
     }
 
     /** @param {MessageEvent} event - The message event */
@@ -177,8 +189,8 @@ export default class Main {
             let data = JSON.parse(dataString);
             if (data.type.includes("update")) {
                 if(data.type === "fullupdate"){
-                    // Enumerate through the cards and the players, marking all dirty
-                    for (let   card in this.  cards) { this.  cards[  card].dirty = true; }
+                    // Enumerate through the models and the players, marking all dirty
+                    for (let  model in this. models) { this. models[ model].dirty = true; }
                     for (let player in this.players) { this.players[player].dirty = true; }
                 }
 
@@ -206,6 +218,39 @@ export default class Main {
                     this.base64FillChunkIndex(chunkIndex, ''+data.chunks[chunkIndex].data.normalize("NFC"));
                 }
 
+                for (let modelId in data.models) {
+                    if (this.models[modelId] === undefined) {
+                        // Create the model on the client since it doesn't exist
+                        this.models[modelId] = data.models[modelId];
+                        let loader = new GLTFLoader();
+                        loader.setMeshoptDecoder(MeshoptDecoder);
+                        loader.load(this.models[modelId].url, (gltf) => {
+                            gltf.scene.position.copy(this.models[modelId].position);
+                            gltf.scene.quaternion.copy(this.models[modelId].quaternion);
+                            gltf.scene.scale.copy(this.models[modelId].scale);
+                            gltf.scene.name = this.models[modelId].id;
+                            this.world.scene.add(gltf.scene);
+                            this.models[modelId].mesh = gltf.scene;
+                        });
+                    } else {
+                        Object.assign(this.models[modelId], data.models[modelId]);
+                        this.models[modelId].mesh.position.set(
+                            this.models[modelId].position.x,
+                            this.models[modelId].position.y,
+                            this.models[modelId].position.z);
+                        this.models[modelId].mesh.quaternion.set(
+                            this.models[modelId].quaternion.x,
+                            this.models[modelId].quaternion.y,
+                            this.models[modelId].quaternion.z,
+                            this.models[modelId].quaternion.w);
+                        this.models[modelId].mesh.scale.set(
+                            this.models[modelId].scale.x,
+                            this.models[modelId].scale.y,
+                            this.models[modelId].scale.z);
+                    }
+                    this.models[modelId].dirty = false;
+                }
+
                 // Enumerate through the players, removing any that are still dirty
                 if(data.type === "fullupdate"){
                     for (let player in this.players) {
@@ -213,6 +258,14 @@ export default class Main {
                             console.log(`Player ${this.players[player].name} has disconnected!`);
                             this.world.scene.remove(this.players[player].mesh);
                             delete this.players[player];
+                        }
+                    }
+
+                    for (let model in this.models) {
+                        if (this.models[model].dirty) {
+                            this.world.scene.remove(this.models[model].mesh);
+                            this.models[model].dispose();
+                            delete this.models[model];
                         }
                     }
                 }
@@ -224,6 +277,7 @@ export default class Main {
 
     /** Update the simulation */
     update(timeMS) {
+        if(!this.constructorFinished) return;
         this.deltaTime = timeMS - this.timeMS;
         this.timeMS = timeMS;
 
@@ -257,6 +311,33 @@ export default class Main {
         this.brush2.lookAt(this.world.camera.position);
         this.brush2.updateMatrixWorld();
 
+        if (this.fPressed) {
+            this.fPressed = false;
+            // Let's spawn a model from a .gltf URL
+            this.conn.send(JSON.stringify({
+                type: "model",
+                id: ""+Math.floor(Math.random() * 1000000),
+                url: "./assets/steampunk_camera.glb",
+                position: {
+                    x: this.brush2.position.x,
+                    y: this.brush2.position.y,
+                    z: this.brush2.position.z
+                },
+                quaternion: {
+                    x: this.brush2.quaternion.x,
+                    y: this.brush2.quaternion.y,
+                    z: this.brush2.quaternion.z,
+                    w: this.brush2.quaternion.w
+                },
+                scale: {
+                    x: this.brush2.scale.x,
+                    y: this.brush2.scale.y,
+                    z: this.brush2.scale.z
+                }
+            }));
+        }
+
+
         if ( this.ePressed || this.qPressed ) {
             let box1 = new THREE.Box3();
             box1.setFromObject(this.brush2);
@@ -286,37 +367,14 @@ export default class Main {
                             z: this.brush2.scale.z
                         }
                     }));
-
-                    /*this.mesh.remove(this.chunks[i]);
-                    let bbox = this.chunks[i].bbox;
-                    this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.brush2, this.ePressed ? ADDITION : SUBTRACTION);
-                    // This part prevents additive chunks from leaking into neighboring chunks
-                    // Really slow for some reason???
-                    //bbox.getCenter(this.wholeChunk.position);
-                    //this.wholeChunk.updateMatrixWorld( true);
-                    //this.chunks[i] = this.evaluator.evaluate( this.chunks[i], this.wholeChunk, SUBTRACTION);
-
-                    let compressedChunk = this.brushToBase64(this.chunks[i]);
-
-                    this.conn.send(JSON.stringify({
-                        type: "chunk",
-                        index: i,
-                        data: compressedChunk
-                    }));
-
-                    this.base64FillChunkIndex(i, compressedChunk);
-
-                    this.chunks[i].updateMatrixWorld();
-                    this.chunks[i].prepareGeometry();
-                    this.chunks[i].bbox = bbox;
-                    this.mesh.add(this.chunks[i]);*/
                 }
             }
             this.ePressed = false;
             this.qPressed = false;
         }
 
-        this.world.renderer.render(this.world.scene, this.world.camera);
+        //this.world.renderer.render(this.world.scene, this.world.camera);
+        this.world.composer.render();
         this.world.stats.update();
         this.frameNum++;
     }

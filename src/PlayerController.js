@@ -276,7 +276,7 @@ export class PlayerController extends THREE.Group {
         if(this.controls){ this.controls.update(); }
 
         // if the player has fallen too far below the level reset their position to the start
-        if (this.position.y < - 25) {
+        if (this.position.y < - 100) {
             this.reset();
         }
     }

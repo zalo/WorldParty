@@ -33,6 +33,8 @@ class PartyServer {
     this.players = {};
     /** @type {Record<number, { index:number, data: string, manifold: Manifold | null}>} */
     this.chunks = {};
+    /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number } }> } */
+    this.models = {};
     this.globalPlayerCount = 0;
 
     /** @type {Record<string, boolean>} */
@@ -49,12 +51,13 @@ class PartyServer {
         this.room.broadcast(JSON.stringify({
           type: "fullupdate",
           players: this.players,
-          chunks: this.chunks
+          chunks: this.chunks,
+          models: this.models
         }));
       } else {
         // Accumulate partial updates from the objects that need updating
-        /** @type {{type:string, players:Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>, chunks:Record<number, { index:number, data: string }>}}} */
-        let partialUpdate = { type: "partialupdate", players: {}, chunks: {} };
+        /** @type {{type:string, players:Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>, chunks:Record<number, { index:number, data: string }>, models:Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number } }>}}} */
+        let partialUpdate = { type: "partialupdate", players: {}, chunks: {}, models: {} };
         for(let player in this.players){
           if(this.needsUpdate[player]){
             partialUpdate.players[player] = this.players[player];
@@ -65,6 +68,13 @@ class PartyServer {
           if(this.needsUpdate[""+chunkIndex]){
             partialUpdate.chunks[chunkIndex] = this.chunks[chunkIndex];
             this.needsUpdate[""+chunkIndex] = false;
+          }
+        }
+
+        for(let modelId in this.models){
+          if(this.needsUpdate[""+modelId]){
+            partialUpdate.models[modelId] = this.models[modelId];
+            this.needsUpdate[""+modelId] = false;
           }
         }
 
@@ -205,9 +215,21 @@ class PartyServer {
         manifoldA.delete();
         manifoldB.delete();
         this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
-        //resultManifold.delete();
         this.chunks[data.index].manifold = resultManifold;
         this.needsUpdate[""+data.index] = true;
+      } else if(data.type === "model"){
+        if(!this.models[data.id]){
+          this.models[data.id] = {
+            id: data.id,
+            url: data.url,
+            position: data.position,
+            quaternion: data.quaternion,
+            scale: data.scale
+          };
+        }else{
+          Object.assign(this.models[data.id], data);
+        }
+        this.needsUpdate[""+data.id] = true;
       } else if(data.type === "name"){
         this.players[sender.id].name = data.name;
         this.needsUpdate[sender.id] = true;
@@ -334,7 +356,8 @@ class PartyServer {
     this.room.broadcast(JSON.stringify({
       type: "fullupdate",
       players: this.players,
-      chunks: this.chunks
+      chunks: this.chunks,
+      models: this.models
     }));
   }
 
