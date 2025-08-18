@@ -33,7 +33,7 @@ class PartyServer {
     this.players = {};
     /** @type {Record<number, { index:number, data: string, manifold: Manifold | null}>} */
     this.chunks = {};
-    /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number } }> } */
+    /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string }> } */
     this.models = {};
     this.globalPlayerCount = 0;
 
@@ -126,7 +126,8 @@ class PartyServer {
     this.room.broadcast(JSON.stringify({
       type: "fullupdate",
       players: this.players,
-      chunks: this.chunks
+      chunks: this.chunks,
+      models: this.models
     }));
   }
 
@@ -224,7 +225,8 @@ class PartyServer {
             url: data.url,
             position: data.position,
             quaternion: data.quaternion,
-            scale: data.scale
+            scale: data.scale,
+            selectedBy: data.selectedBy
           };
         }else{
           Object.assign(this.models[data.id], data);

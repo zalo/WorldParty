@@ -247,6 +247,16 @@ export default class Main {
                             this.models[modelId].scale.x,
                             this.models[modelId].scale.y,
                             this.models[modelId].scale.z);
+
+                        // If the model is selected by a player, highlight it
+                        if (this.models[modelId].selectedBy === this.conn.id) {
+                            this.models[modelId].mesh.material.emissive.set(0x555555);
+                            // TODO: Move the current Bounding Box Selection Controls around this model
+                        } else if (this.models[modelId].selectedBy !== "") {
+                            this.models[modelId].mesh.material.emissive.set(0x222222);
+                        } else {
+                            this.models[modelId].mesh.material.emissive.set(0x000000);
+                        }
                     }
                     this.models[modelId].dirty = false;
                 }
@@ -333,12 +343,17 @@ export default class Main {
                     x: this.brush2.scale.x,
                     y: this.brush2.scale.y,
                     z: this.brush2.scale.z
-                }
+                },
+                selectedBy: ""
             }));
         }
 
 
         if ( this.ePressed || this.qPressed ) {
+
+            // TODO: If nothing is selected, raycast against all the models and request a selection of the one hit
+            // Otherwise, deselect or perform a CSG operation
+
             let box1 = new THREE.Box3();
             box1.setFromObject(this.brush2);
 
