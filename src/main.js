@@ -71,7 +71,7 @@ export default class Main {
             physicsSteps: 5,
             mobile: this.isMobile(),
 
-            imageURL: "https://cdn.midjourney.com/d23a4c9f-d151-4597-89a0-983ec12e7983/0_0.webp",
+            imageURL: "",
             generateModelFunc: this.createModel.bind(this),
             curLogs: () => {}
         };
@@ -515,8 +515,13 @@ export default class Main {
             return;
         }
 
+        let imageURL = this.simulationParams.imageURL;
+        if(imageURL.includes("cdn.midjourney.com") && imageURL.includes(".png")) {
+            imageURL = imageURL.replace(".png", ".webp");
+        }
+
         // Fetch an image and encode it as a dataURL
-        fetch(this.simulationParams.imageURL).then((response)=>{
+        fetch(imageURL).then((response)=>{
             response.blob().then((blob)=>{
                 let reader = new FileReader();
                 reader.readAsDataURL(blob);
