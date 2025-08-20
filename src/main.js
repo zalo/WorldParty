@@ -14,6 +14,7 @@ import PartySocket from "../node_modules/partysocket/dist/index.mjs";
 import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js' ;
 
+
 /** The fundamental set up and animation structures for Simulation */
 export default class Main {
     constructor() {
@@ -48,7 +49,7 @@ export default class Main {
         /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
         this.players = {};
 
-        /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number } }> } */
+        /** @type {Record<string, { id:string, url: string | null, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string, imageURL: string, status: string }>} */
         this.models = {};
 
         //this.conn.addEventListener("open"   , this.start           .bind(this));
@@ -69,11 +70,18 @@ export default class Main {
             playerSpeed: 10,
             physicsSteps: 5,
             mobile: this.isMobile(),
-        };        
+
+            imageURL: "https://cdn.midjourney.com/d23a4c9f-d151-4597-89a0-983ec12e7983/0_0.webp",
+            generateModelFunc: this.createModel.bind(this),
+            curLogs: () => {}
+        };
 
         this.gui = new GUI();
 
-        let visFolder = this.gui.addFolder( 'Visualization' );
+        this.gui.add(this.simulationParams, 'imageURL').name("Image URL");
+        this.gui.add(this.simulationParams, 'generateModelFunc', "Create Model").name("Generate Model");
+        this.status = this.gui.add(this.simulationParams, 'curLogs').name("Awaiting Model Generation");
+        /*let visFolder = this.gui.addFolder( 'Visualization' );
         visFolder.add( this.simulationParams, 'displayCollider' ).onChange( v => { this.collider.visible = v; } );
         visFolder.add( this.simulationParams, 'displayBVH' ).onChange( v => { this.visualizer.visible = v; } );
         visFolder.add( this.simulationParams, 'displayGround' ).onChange( v => { this.mesh.visible = v; } );
@@ -95,7 +103,7 @@ export default class Main {
             this.gui.close();
         }else{
             this.gui.open();
-        }
+        }*/
 
         this.environment = this.world.scene;
         this.collider = null;//new THREE.Box3();
@@ -107,6 +115,7 @@ export default class Main {
         // Create a plane to render the raytraced shader material
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
+        //this.world.csm.setupMaterial( this.defaultMaterial );
         //this.mesh = new Brush( this.chunkGeometry, this.defaultMaterial );
         this.bigChunk = new Brush( new THREE.BoxGeometry( 100.0, 100.0, 100.0 ).toNonIndexed (), this.defaultMaterial );
         this.littleChunk = new Brush( new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed (), this.defaultMaterial );
@@ -132,6 +141,8 @@ export default class Main {
                         new THREE.Vector3( x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0 )
                     );
                     chunk.prepareGeometry();
+                    chunk.receiveShadow = true;
+                    chunk.castShadow = true;
                     this.mesh.add( chunk );
                     this.chunks.push( chunk );
                 }
@@ -141,6 +152,9 @@ export default class Main {
         this.mesh.updateMatrixWorld( true );
         this.mesh.chunks = this.chunks;
 
+        this.placeholderGeometry = new THREE.BoxGeometry( 2, 2, 2 );
+        this.placeholderMaterial = new THREE.MeshBasicMaterial( { color: 0xffffff, wireframe: true } );
+
         // Create the player controller
         this.player = new PlayerController(this.world.camera, this.simulationParams);
         this.world.scene.add( this.player );
@@ -149,10 +163,14 @@ export default class Main {
         this.transparentMaterial = new THREE.MeshStandardMaterial( { color: 0x8080a8, roughness: 0.5, metalness: 0.5, transparent: true, opacity: 0.5, side: THREE.DoubleSide } );
         this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2).toNonIndexed(), this.transparentMaterial );
         this.brush2.position.y = -0.5;
+        this.brush2.castShadow = true;
         this.brush2.updateMatrixWorld();
         this.world.scene.add( this.brush2 );
 
         this.world.scene.add( this.mesh );
+
+        this.modelsParent = new THREE.Group();
+        this.world.scene.add( this.modelsParent );
 
         this.player.chunks = this.chunks;
 
@@ -222,41 +240,81 @@ export default class Main {
                     if (this.models[modelId] === undefined) {
                         // Create the model on the client since it doesn't exist
                         this.models[modelId] = data.models[modelId];
-                        let loader = new GLTFLoader();
-                        loader.setMeshoptDecoder(MeshoptDecoder);
-                        loader.load(this.models[modelId].url, (gltf) => {
-                            gltf.scene.position.copy(this.models[modelId].position);
-                            gltf.scene.quaternion.copy(this.models[modelId].quaternion);
-                            gltf.scene.scale.copy(this.models[modelId].scale);
-                            gltf.scene.name = this.models[modelId].id;
-                            this.world.scene.add(gltf.scene);
-                            this.models[modelId].mesh = gltf.scene;
-                        });
+                        if(this.models[modelId].url){
+                            let loader = new GLTFLoader();
+                            loader.setMeshoptDecoder(MeshoptDecoder);
+                            loader.load(this.models[modelId].url, (gltf) => {
+                                gltf.scene.position.copy(this.models[modelId].position);
+                                gltf.scene.quaternion.copy(this.models[modelId].quaternion);
+                                gltf.scene.scale.copy(this.models[modelId].scale);
+                                gltf.scene.name = this.models[modelId].id;
+                                this.modelsParent.add(gltf.scene);
+                                this.models[modelId].mesh = gltf.scene;
+                            });
+                        }else{
+                            this.models[modelId].mesh = new THREE.Mesh( this.placeholderGeometry, this.placeholderMaterial );
+                            this.models[modelId].mesh.position.set(
+                                this.models[modelId].position.x,
+                                this.models[modelId].position.y,
+                                this.models[modelId].position.z);
+                            this.models[modelId].mesh.quaternion.set(
+                                this.models[modelId].quaternion.x,
+                                this.models[modelId].quaternion.y,
+                                this.models[modelId].quaternion.z,
+                                this.models[modelId].quaternion.w);
+                            this.models[modelId].mesh.scale.set(
+                                this.models[modelId].scale.x,
+                                this.models[modelId].scale.y,
+                                this.models[modelId].scale.z);
+                            this.models[modelId].mesh.name = this.models[modelId].id;
+                            this.modelsParent.add(this.models[modelId].mesh);
+                        }
                     } else {
                         Object.assign(this.models[modelId], data.models[modelId]);
-                        this.models[modelId].mesh.position.set(
-                            this.models[modelId].position.x,
-                            this.models[modelId].position.y,
-                            this.models[modelId].position.z);
-                        this.models[modelId].mesh.quaternion.set(
-                            this.models[modelId].quaternion.x,
-                            this.models[modelId].quaternion.y,
-                            this.models[modelId].quaternion.z,
-                            this.models[modelId].quaternion.w);
-                        this.models[modelId].mesh.scale.set(
-                            this.models[modelId].scale.x,
-                            this.models[modelId].scale.y,
-                            this.models[modelId].scale.z);
 
-                        // If the model is selected by a player, highlight it
-                        if (this.models[modelId].selectedBy === this.conn.id) {
-                            this.models[modelId].mesh.material.emissive.set(0x555555);
-                            // TODO: Move the current Bounding Box Selection Controls around this model
-                        } else if (this.models[modelId].selectedBy !== "") {
-                            this.models[modelId].mesh.material.emissive.set(0x222222);
-                        } else {
-                            this.models[modelId].mesh.material.emissive.set(0x000000);
+                        if (this.models[modelId].mesh && this.models[modelId].mesh.geometry == this.placeholderGeometry && this.models[modelId].url) {
+                            console.log("Attempting to load model at:", this.models[modelId].url);
+                            this.modelsParent.remove(this.models[modelId].mesh);
+                            this.models[modelId].mesh = null;
+                            let loader = new GLTFLoader();
+                            loader.setMeshoptDecoder(MeshoptDecoder);
+                            loader.load(this.models[modelId].url, (gltf) => {
+                                gltf.scene.position.copy(this.models[modelId].position);
+                                gltf.scene.quaternion.copy(this.models[modelId].quaternion);
+                                gltf.scene.scale.copy(this.models[modelId].scale);
+                                gltf.scene.name = this.models[modelId].id;
+                                this.modelsParent.add(gltf.scene);
+                                this.models[modelId].mesh = gltf.scene;
+                            });
+                        } else if (this.models[modelId].mesh) {
+                            this.models[modelId].mesh.position.set(
+                                this.models[modelId].position.x,
+                                this.models[modelId].position.y,
+                                this.models[modelId].position.z);
+                            this.models[modelId].mesh.quaternion.set(
+                                this.models[modelId].quaternion.x,
+                                this.models[modelId].quaternion.y,
+                                this.models[modelId].quaternion.z,
+                                this.models[modelId].quaternion.w);
+                            this.models[modelId].mesh.scale.set(
+                                this.models[modelId].scale.x,
+                                this.models[modelId].scale.y,
+                                this.models[modelId].scale.z);
+
+                            //// If the model is selected by a player, highlight it
+                            //if (this.models[modelId].selectedBy === this.conn.id) {
+                            //    this.models[modelId].mesh.material.emissive.set(0x555555);
+                            //    // TODO: Move the current Bounding Box Selection Controls around this model
+                            //} else if (this.models[modelId].selectedBy !== "") {
+                            //    this.models[modelId].mesh.material.emissive.set(0x222222);
+                            //} else {
+                            //    this.models[modelId].mesh.material.emissive.set(0x000000);
+                            //}
                         }
+                    }
+                    if(this.models[modelId].status){
+                        this.status.name(this.models[modelId].status);
+                        console.log(modelId, "status:", this.models[modelId].status);
                     }
                     this.models[modelId].dirty = false;
                 }
@@ -321,31 +379,13 @@ export default class Main {
         this.brush2.lookAt(this.world.camera.position);
         this.brush2.updateMatrixWorld();
 
+        //this.world.csm.updateFrustums();
+        //this.world.csm.update();
+
         if (this.fPressed) {
             this.fPressed = false;
-            // Let's spawn a model from a .gltf URL
-            this.conn.send(JSON.stringify({
-                type: "model",
-                id: ""+Math.floor(Math.random() * 1000000),
-                url: "./assets/steampunk_camera.glb",
-                position: {
-                    x: this.brush2.position.x,
-                    y: this.brush2.position.y,
-                    z: this.brush2.position.z
-                },
-                quaternion: {
-                    x: this.brush2.quaternion.x,
-                    y: this.brush2.quaternion.y,
-                    z: this.brush2.quaternion.z,
-                    w: this.brush2.quaternion.w
-                },
-                scale: {
-                    x: this.brush2.scale.x,
-                    y: this.brush2.scale.y,
-                    z: this.brush2.scale.z
-                },
-                selectedBy: ""
-            }));
+
+
         }
 
 
@@ -392,6 +432,46 @@ export default class Main {
         this.world.composer.render();
         this.world.stats.update();
         this.frameNum++;
+    }
+
+    createModel(){
+        // Fetch an image and encode it as a dataURL
+        fetch(this.simulationParams.imageURL).then((response)=>{
+            response.blob().then((blob)=>{
+                let reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => {
+                    const base64data = reader.result;
+                    console.log("Image fetched and encoded as dataURL:", base64data);
+
+                    // Let's spawn a model from a .gltf URL
+                    this.conn.send(JSON.stringify({
+                        type: "model",
+                        id: ""+Math.floor(Math.random() * 1000000),
+                        //url: "./assets/steampunk_camera.glb",
+                        url: null,
+                        imageURL: base64data,
+                        position: {
+                            x: this.brush2.position.x,
+                            y: this.brush2.position.y,
+                            z: this.brush2.position.z
+                        },
+                        quaternion: {
+                            x: this.brush2.quaternion.x,
+                            y: this.brush2.quaternion.y,
+                            z: this.brush2.quaternion.z,
+                            w: this.brush2.quaternion.w
+                        },
+                        scale: {
+                            x: this.brush2.scale.x,
+                            y: this.brush2.scale.y,
+                            z: this.brush2.scale.z
+                        },
+                        selectedBy: ""
+                    }));
+                };
+            });
+        });
     }
 
     b64encode(input) { 

@@ -5,6 +5,9 @@ import { EffectComposer } from '../node_modules/three/examples/jsm/postprocessin
 import { RenderPass } from '../node_modules/three/examples/jsm/postprocessing/RenderPass.js';
 import { SSILVBPass } from './SSILVBPass.js';
 import { OutputPass } from '../node_modules/three/examples/jsm/postprocessing/OutputPass.js';
+import { CSM } from '../node_modules/three/examples/jsm/csm/CSM.js';
+import { Sky } from '../node_modules/three/examples/jsm/objects/Sky.js';
+import { RGBELoader } from '../node_modules/three/examples/jsm/loaders/RGBELoader.js';
 
 /** The fundamental set up and animation structures for 3D Visualization */
 export default class World {
@@ -19,40 +22,74 @@ export default class World {
         
         // camera and world
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color( 0x000000 );
+        //this.scene.background = new THREE.Color( 0x000000 );
+
+        //this.sky = new Sky();
+        //this.sky.scale.setScalar( 450000 );
+        //this.scene.add( this.sky );
 
         this.camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.01, 1000 );
         this.camera.position.set( -5.0, 5, 0 );
         this.camera.layers.enableAll();
         this.scene.add(this.camera);
 
-        this.spotLight = new THREE.SpotLight( 0xffffff, Math.PI * 10.0 );
-        this.spotLight.angle = Math.PI / 5;
-        this.spotLight.penumbra = 0.2;
-        this.spotLight.position.set( -2, 3, -3 );
-        this.spotLight.castShadow = true;
-        this.spotLight.shadow.camera.near = 1;
-        this.spotLight.shadow.camera.far = 20;
-        this.spotLight.shadow.mapSize.width = 1024;
-        this.spotLight.shadow.mapSize.height = 1024;
-        this.scene.add( this.spotLight );
+        //this.spotLight = new THREE.SpotLight( 0xffffff, Math.PI * 10.0 );
+        //this.spotLight.angle = Math.PI / 5;
+        //this.spotLight.penumbra = 0.2;
+        //this.spotLight.position.set( -2, 3, -3 );
+        //this.spotLight.castShadow = true;
+        //this.spotLight.shadow.camera.near = 1;
+        //this.spotLight.shadow.camera.far = 20;
+        //this.spotLight.shadow.mapSize.width = 1024;
+        //this.spotLight.shadow.mapSize.height = 1024;
+        //this.scene.add( this.spotLight );
 
         this.dirLight = new THREE.DirectionalLight( 0x55505a, Math.PI * 10.0 );
-        this.dirLight.position.set( 0, 3, 0 );
+        this.dirLight.position.set( 3, 3, 0 );
+        this.dirLight.rotateX( 2 );
         this.dirLight.castShadow = true;
-        this.dirLight.shadow.camera.near  = -10;
-        this.dirLight.shadow.camera.far   = 10;
-        this.dirLight.shadow.camera.right = 3;
-        this.dirLight.shadow.camera.left  = - 3;
-        this.dirLight.shadow.camera.top	  = 3;
-        this.dirLight.shadow.camera.bottom = - 3;
-        this.dirLight.shadow.mapSize.width = 1024;
-        this.dirLight.shadow.mapSize.height = 1024;
+        this.dirLight.shadow.camera.near  = -100;
+        this.dirLight.shadow.camera.far   = 100;
+        this.dirLight.shadow.camera.right = 30;
+        this.dirLight.shadow.camera.left  = - 30;
+        this.dirLight.shadow.camera.top	  = 30;
+        this.dirLight.shadow.camera.bottom = - 30;
+        this.dirLight.shadow.mapSize.width  = 2048;
+        this.dirLight.shadow.mapSize.height = 2048;
+        this.dirLight.shadow.bias = -0.001;
         this.scene.add( this.dirLight );
+
+       //this.csm = new CSM( {
+		//			maxFar: 1000,
+		//			cascades: 4,
+		//			mode: 'practical',
+		//			parent: this.scene,
+		//			shadowMapSize: 1024,
+		//			lightDirection: new THREE.Vector3( 0, -1, 0 ).normalize(),
+		//			camera: this.camera
+		//		} );
+       //this.csm.updateFrustums();
+       //this.csm.update();
         
-        this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444 );
+        this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 1.5 );
         this.hemiLight.position.set( 0, 20, 0 );
         this.scene.add( this.hemiLight );
+
+        new THREE.TextureLoader()
+			.load( 'assets/Starry night preview4.png', ( texture, textureData ) => {
+				texture.mapping = THREE.EquirectangularReflectionMapping;
+				texture.colorSpace = THREE.SRGBColorSpace;
+                this.scene.background = texture;
+                this.scene.environment = texture;
+			} );
+
+        //const textureLoader = new THREE.TextureLoader();
+
+	    //let textureEquirec = textureLoader.load( 'assets/moonless_golf_2k.hdr.jpg' );
+	    //textureEquirec.mapping = THREE.EquirectangularReflectionMapping;
+	    //textureEquirec.colorSpace = THREE.SRGBColorSpace;
+
+	    //this.scene.background = textureEquirec;
 
         // Geometry
 

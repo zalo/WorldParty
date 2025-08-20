@@ -20,6 +20,8 @@ import manMod from '../assets/manifold-3d/manifold.wasm';
 /** @typedef {import("../assets/manifold-3d/manifold.js").Mesh} Mesh */
 /** @typedef {import("../assets/manifold-3d/manifold.js").Vec3} Vec3 */
 
+import { fal } from "../node_modules/@fal-ai/client/src/index.js";
+
 /** @implements {Server} */
 class PartyServer {
   /** @param {Room} room */
@@ -33,7 +35,7 @@ class PartyServer {
     this.players = {};
     /** @type {Record<number, { index:number, data: string, manifold: Manifold | null}>} */
     this.chunks = {};
-    /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string }> } */
+    /** @type {Record<string, { id:string, url: string | null, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string, imageURL: string, status: string }> } */
     this.models = {};
     this.globalPlayerCount = 0;
 
@@ -85,11 +87,12 @@ class PartyServer {
 
       this.hasNewInfoToSend = false;
     }, 1000/30);
-
-    this.initializeManifold();
   }
 
-  async initializeManifold() {
+  async onStart(){
+    this.chunks = await this.room.storage.get("chunks") || {};
+    this.models = await this.room.storage.get("models") || {};
+
     /** @type {ManifoldToplevel} */
     this.manifold = await M({
       instantiateWasm: (imports, callback) => {
@@ -99,6 +102,10 @@ class PartyServer {
       }
     });
     this.manifold.setup();
+
+    for(let chunk in this.chunks) {
+      this.chunks[chunk].manifold = this.base64ToManifold(this.chunks[chunk].data);
+    }
   }
 
   /**
@@ -134,7 +141,7 @@ class PartyServer {
   /**
    * @param {string} message
    * @param {Connection} sender */
-  onMessage(message, sender) {
+  async onMessage(message, sender) {
     //console.log(`connection ${sender.id} sent message: ${message}`);
 
     if(message.startsWith("{")){
@@ -226,8 +233,37 @@ class PartyServer {
             position: data.position,
             quaternion: data.quaternion,
             scale: data.scale,
-            selectedBy: data.selectedBy
+            selectedBy: data.selectedBy,
+            imageURL: "",//data.imageURL,
+            status: "Starting Inference..."
           };
+          if(data.imageURL){
+            //this.models[data.id].imageURL = data.imageURL;
+            this.models[data.id].status = "Generating 3D Model...";
+
+            fal.subscribe("fal-ai/hunyuan3d/v2/turbo", {
+              input: {
+                input_image_url: data.imageURL,
+                textured_mesh: true
+              },
+              logs: true,
+              onQueueUpdate: (update) => {
+                if (update.status === "IN_PROGRESS") {
+                  update.logs.map((log) => log.message).forEach((log) => {
+                    console.log("Model " + data.id + " status update: ", log);
+                    this.models[""+data.id].status = log;
+                    this.needsUpdate[""+data.id] = true;
+                  });
+                }
+              },
+            }).then((result)=>{
+              this.models[""+data.id].url = result.data.model_mesh.url;
+              this.models[""+data.id].status = null;
+              this.needsUpdate[""+data.id] = true;
+              console.log(result.data);
+              console.log(result.requestId);
+            });
+          }
         }else{
           Object.assign(this.models[data.id], data);
         }
@@ -348,11 +384,16 @@ class PartyServer {
   }
 
   /** @param {Connection} conn - The connection object. */
-  onDisconnect(conn){
+  async onDisconnect(conn){
 
     // Remove the player from the list of players
     delete this.players[conn.id];
     delete this.needsUpdate[conn.id];
+
+    // Store the state of the world persistently
+    this.room.storage.put("chunks", this.chunks);
+    this.room.storage.put("models", this.models);
+    console.log("Wrote the world state to KV storage");
 
     // Send an update message to all the connections
     this.room.broadcast(JSON.stringify({
