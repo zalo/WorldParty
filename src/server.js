@@ -271,6 +271,12 @@ class PartyServer {
       } else if(data.type === "name"){
         this.players[sender.id].name = data.name;
         this.needsUpdate[sender.id] = true;
+      } else if(data.type === "select"){
+        this.models[""+data.id].selectedBy = sender.id;
+        this.needsUpdate[""+data.id] = true;
+      } else if(data.type === "deselect"){
+        this.models[""+data.id].selectedBy = "";
+        this.needsUpdate[""+data.id] = true;
       } else if(data.type === "chat"){
         this.room.broadcast(JSON.stringify({
           type: "chat",
@@ -278,7 +284,16 @@ class PartyServer {
           message: data.message,
         }));
       } else if(data.type === "reset"){
-
+          this.room.storage.delete("chunks");
+          this.room.storage.delete("models");
+          this.chunks = {};
+          this.models = {};
+          this.room.broadcast(JSON.stringify({
+            type: "fullupdate",
+            players: this.players,
+            chunks: this.chunks,
+            models: this.models
+          }));
       } else {
         console.error("Unknown message type: " + message);
       }

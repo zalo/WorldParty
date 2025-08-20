@@ -109,6 +109,7 @@ export default class Main {
         this.collider = null;//new THREE.Box3();
         this.visualizer = new THREE.Line3();
         //this.controls = this.world.controls;
+        this.raycaster = new THREE.Raycaster();
 
         this.evaluator = new Evaluator();
 
@@ -178,8 +179,8 @@ export default class Main {
         this.qPressed = false;
         this.fPressed = false;
         window.addEventListener('pointerdown', (e) => {
-            e.preventDefault();
             if(this.player && this.player.controls && this.player.controls.isLocked) {
+                e.preventDefault();
                 if (e.button === 0) {
                     this.qPressed = true;
                 }else if (e.button === 2) {
@@ -187,13 +188,21 @@ export default class Main {
                 }
             }
         });
-        window.addEventListener('keydown', (e) => {
-            if(this.player && this.player.controls && this.player.controls.isLocked) {
-                if (e.key === 'f' || e.key === 'F') {
-                    this.fPressed = true;
-                }
+        //window.addEventListener('keydown', (e) => {
+        //    if(this.player && this.player.controls && this.player.controls.isLocked) {
+        //        if (e.key === 'f' || e.key === 'F') {
+        //            this.fPressed = true;
+        //        }
+        //    }
+        //});
+        window.addEventListener("wheel", (e) => {
+            if(this.player && this.player.controls && this.player.controls.isLocked){//} && this.curSelected) {
+                e.preventDefault();
+                //console.log("Zooming brush2 by", e.deltaY);
+                this.brush2.scale.multiplyScalar(1.0 + (e.deltaY * -0.001));
             }
-        });
+        }, { passive: false });
+
         this.frameNum = 0;
         this.lastUpdate = 0;
         this.constructorFinished = true;
@@ -247,11 +256,14 @@ export default class Main {
                                 gltf.scene.position.copy(this.models[modelId].position);
                                 gltf.scene.quaternion.copy(this.models[modelId].quaternion);
                                 gltf.scene.scale.copy(this.models[modelId].scale);
-                                gltf.scene.name = this.models[modelId].id;
+                                gltf.scene.name = modelId;//this.models[modelId].id;
                                 this.modelsParent.add(gltf.scene);
                                 this.models[modelId].mesh = gltf.scene;
+                                this.models[modelId].mesh.name = modelId;
+                                this.models[modelId].mesh.children[0].children[0].name = modelId;
                             });
                         }else{
+                            // Create the placeholder until its generated
                             this.models[modelId].mesh = new THREE.Mesh( this.placeholderGeometry, this.placeholderMaterial );
                             this.models[modelId].mesh.position.set(
                                 this.models[modelId].position.x,
@@ -266,7 +278,7 @@ export default class Main {
                                 this.models[modelId].scale.x,
                                 this.models[modelId].scale.y,
                                 this.models[modelId].scale.z);
-                            this.models[modelId].mesh.name = this.models[modelId].id;
+                            this.models[modelId].mesh.name = modelId;//this.models[modelId].id;
                             this.modelsParent.add(this.models[modelId].mesh);
                         }
                     } else {
@@ -282,9 +294,11 @@ export default class Main {
                                 gltf.scene.position.copy(this.models[modelId].position);
                                 gltf.scene.quaternion.copy(this.models[modelId].quaternion);
                                 gltf.scene.scale.copy(this.models[modelId].scale);
-                                gltf.scene.name = this.models[modelId].id;
+                                gltf.scene.name = modelId;//this.models[modelId].id;
                                 this.modelsParent.add(gltf.scene);
                                 this.models[modelId].mesh = gltf.scene;
+                                this.models[modelId].mesh.name = modelId;
+                                this.models[modelId].mesh.children[0].children[0].name = modelId;
                             });
                         } else if (this.models[modelId].mesh) {
                             this.models[modelId].mesh.position.set(
@@ -301,15 +315,15 @@ export default class Main {
                                 this.models[modelId].scale.y,
                                 this.models[modelId].scale.z);
 
-                            //// If the model is selected by a player, highlight it
-                            //if (this.models[modelId].selectedBy === this.conn.id) {
-                            //    this.models[modelId].mesh.material.emissive.set(0x555555);
-                            //    // TODO: Move the current Bounding Box Selection Controls around this model
-                            //} else if (this.models[modelId].selectedBy !== "") {
-                            //    this.models[modelId].mesh.material.emissive.set(0x222222);
-                            //} else {
-                            //    this.models[modelId].mesh.material.emissive.set(0x000000);
-                            //}
+                                //console.log(this.models[modelId].mesh);
+
+                            // If the model is selected by a player, highlight it
+                            //console.log("MODEL SELECTED BY:", this.models[modelId].selectedBy);
+                            if (this.models[modelId].selectedBy === this.conn.id) {
+                                this.curSelected = this.models[modelId].mesh;
+                            } else if (this.curSelected === this.models[modelId].mesh) {
+                                this.curSelected = null;
+                            }
                         }
                     }
                     if(this.models[modelId].status){
@@ -332,7 +346,7 @@ export default class Main {
                     for (let model in this.models) {
                         if (this.models[model].dirty) {
                             this.world.scene.remove(this.models[model].mesh);
-                            this.models[model].dispose();
+                            //this.models[model].dispose();
                             delete this.models[model];
                         }
                     }
@@ -357,6 +371,13 @@ export default class Main {
 
         //this.world.controls.update();
 
+        // Cast a ray against the environment collider and place the brush2 there
+        this.world.camera.getWorldDirection(this.brush2.position).normalize().multiplyScalar(6).add(this.player.position);
+        let derp = new THREE.Vector3().copy(this.world.camera.position);
+        derp.y = this.brush2.position.y;
+        this.brush2.lookAt(derp);
+        this.brush2.updateMatrixWorld();
+
         if(this.lastUpdate + 1000/30 < timeMS) {
             this.lastUpdate = timeMS;
             this.conn.send(JSON.stringify({
@@ -367,6 +388,29 @@ export default class Main {
                     z: this.player.position.z
                 }
             }));
+
+            if(this.curSelected){
+                this.conn.send(JSON.stringify({
+                    type: "model",
+                    id: this.curSelected.children[0].children[0].name,
+                    position: {
+                        x: this.brush2.position.x,
+                        y: this.brush2.position.y,
+                        z: this.brush2.position.z
+                    },
+                    quaternion: {
+                        x: this.brush2.quaternion.x,
+                        y: this.brush2.quaternion.y,
+                        z: this.brush2.quaternion.z,
+                        w: this.brush2.quaternion.w
+                    },
+                    scale: {
+                        x: this.brush2.scale.x,
+                        y: this.brush2.scale.y,
+                        z: this.brush2.scale.z
+                    }
+                }));
+            }
         }
 
         for (let player in this.players) {
@@ -374,24 +418,47 @@ export default class Main {
             //this.players[player].mesh.updateMatrixWorld();
         }
 
-        // Cast a ray against the environment collider and place the brush2 there
-        this.world.camera.getWorldDirection(this.brush2.position).normalize().multiplyScalar(6).add(this.player.position);
-        this.brush2.lookAt(this.world.camera.position);
-        this.brush2.updateMatrixWorld();
+
 
         //this.world.csm.updateFrustums();
         //this.world.csm.update();
 
         if (this.fPressed) {
             this.fPressed = false;
-
-
         }
 
 
         if ( this.ePressed || this.qPressed ) {
+            
+            if(!this.curSelected){
+                // Raycast against all of the objects in the scene to select it
+                this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.world.camera);
+                let intersects = this.raycaster.intersectObjects(this.modelsParent.children, true);
 
-            // TODO: If nothing is selected, raycast against all the models and request a selection of the one hit
+                if (intersects.length > 0) {
+                    // If we hit an object, we can select it
+                    let hit = intersects[0];
+                    //console.log("Hit object:", hit.object.name, hit.object.id, hit.object);
+                    this.conn.send(JSON.stringify({
+                        type: "select",
+                        id: hit.object.name
+                    }));
+
+                    this.ePressed = false;
+                    this.qPressed = false;
+                    
+                    return;
+                }
+            }else{
+                if(this.curSelected){
+                    this.conn.send(JSON.stringify({
+                        type: "deselect",
+                        id: this.curSelected.children[0].children[0].name
+                    }));
+                    //this.curSelected = null;
+                }
+            }
+
             // Otherwise, deselect or perform a CSG operation
 
             let box1 = new THREE.Box3();
@@ -435,6 +502,11 @@ export default class Main {
     }
 
     createModel(){
+        if(this.simulationParams.imageURL === "reset"){
+            this.conn.send(JSON.stringify({ type: "reset" }));
+            return;
+        }
+
         // Fetch an image and encode it as a dataURL
         fetch(this.simulationParams.imageURL).then((response)=>{
             response.blob().then((blob)=>{
