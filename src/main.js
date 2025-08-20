@@ -301,10 +301,10 @@ export default class Main {
                                 this.models[modelId].mesh.children[0].children[0].name = modelId;
                             });
                         } else if (this.models[modelId].mesh) {
-                            this.models[modelId].mesh.position.set(
-                                this.models[modelId].position.x,
-                                this.models[modelId].position.y,
-                                this.models[modelId].position.z);
+                            //this.models[modelId].mesh.position.set(
+                            //    this.models[modelId].position.x,
+                            //    this.models[modelId].position.y,
+                            //    this.models[modelId].position.z);
                             this.models[modelId].mesh.quaternion.set(
                                 this.models[modelId].quaternion.x,
                                 this.models[modelId].quaternion.y,
@@ -418,7 +418,12 @@ export default class Main {
             //this.players[player].mesh.updateMatrixWorld();
         }
 
-
+        for (let model in this.models) {
+            if(this.models[model].mesh) {
+                this.models[model].mesh.position.lerp(new THREE.Vector3(this.models[model].position.x, this.models[model].position.y, this.models[model].position.z), 0.1);
+                //this.models[model].mesh.updateMatrixWorld();
+            }
+        }
 
         //this.world.csm.updateFrustums();
         //this.world.csm.update();

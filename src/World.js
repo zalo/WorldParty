@@ -71,7 +71,7 @@ export default class World {
        //this.csm.updateFrustums();
        //this.csm.update();
         
-        this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 1.5 );
+        this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 3.0 );
         this.hemiLight.position.set( 0, 20, 0 );
         this.scene.add( this.hemiLight );
 
