@@ -455,6 +455,9 @@ export default class Main {
                         type: "deselect",
                         id: this.curSelected.children[0].children[0].name
                     }));
+                    this.ePressed = false;
+                    this.qPressed = false;
+                    return;
                     //this.curSelected = null;
                 }
             }
