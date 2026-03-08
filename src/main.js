@@ -1,18 +1,17 @@
 /* eslint-env browser */
 /* global PARTYKIT_HOST */
 
-import * as THREE from '../node_modules/three/build/three.module.js';
-import { GUI } from '../node_modules/three/examples/jsm/libs/lil-gui.module.min.js';
+import * as THREE from 'three/webgpu';
+import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js';
 import World from './World.js';
-import { TransformControls } from '../node_modules/three/examples/jsm/controls/TransformControls.js';
-import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
-const { MeshoptDecoder } = await import( '../node_modules/three/examples/jsm/libs/meshopt_decoder.module.js' );
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+const { MeshoptDecoder } = await import( 'three/examples/jsm/libs/meshopt_decoder.module.js' );
 import { PlayerController } from './PlayerController.js';
-import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from '../node_modules/three-bvh-csg/build/index.module.js';
-import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from '../node_modules/three-mesh-bvh/build/index.module.js';
-import PartySocket from "../node_modules/partysocket/dist/index.mjs";
-import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { gzipSync, gunzipSync } from '../node_modules/three/examples/jsm/libs/fflate.module.js' ;
+import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from 'three-bvh-csg';
+import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from 'three-mesh-bvh';
+import PartySocket from "partysocket";
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { gzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 
 
 /** The fundamental set up and animation structures for Simulation */
@@ -41,94 +40,59 @@ export default class Main {
 
         /** @type {PartySocket} - The connection object */
         this.conn = new PartySocket({
-            // @ts-expect-error This should be typed as a global string
-            host: window.location.host.includes("github.io") ? "https://worldparty.zalo.partykit.dev" : "http://127.0.0.1:1999",
+            host: PARTYKIT_HOST,
             room: this.curRoom,
         });
 
         /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
         this.players = {};
 
-        /** @type {Record<string, { id:string, url: string | null, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string, imageURL: string, status: string }>} */
+        /** @type {Record<string, { id:string, url: string | null, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string }>} */
         this.models = {};
 
-        //this.conn.addEventListener("open"   , this.start           .bind(this));
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
 
         // Construct the render world
-        this.world = new World(this);
+        this.serverTickMs = 0;
+        this.world = new World(this, this.isMobile());
 
         // Configure Settings
         this.simulationParams = {
             firstPerson: true,
-
-            displayCollider: false,
-            displayBVH: false,
-            displayGround: true,
-            visualizeDepth: 10,
-            gravity: - 30,
+            gravity: - 80,
             playerSpeed: 10,
             physicsSteps: 5,
+            jumpVelocity: 20.0,
             mobile: this.isMobile(),
 
-            imageURL: "",
-            generateModelFunc: this.createModel.bind(this),
-            curLogs: () => {}
+            modelURL: "",
+            spawnModelFunc: this.spawnModel.bind(this),
+            spawnPhysCubeFunc: this.spawnPhysCube.bind(this),
+            showBrush: false,
         };
 
         this.gui = new GUI();
-
-        this.gui.add(this.simulationParams, 'imageURL').name("Image URL");
-        this.gui.add(this.simulationParams, 'generateModelFunc', "Create Model").name("Generate Model");
-        this.status = this.gui.add(this.simulationParams, 'curLogs').name("Awaiting Model Generation");
-        /*let visFolder = this.gui.addFolder( 'Visualization' );
-        visFolder.add( this.simulationParams, 'displayCollider' ).onChange( v => { this.collider.visible = v; } );
-        visFolder.add( this.simulationParams, 'displayBVH' ).onChange( v => { this.visualizer.visible = v; } );
-        visFolder.add( this.simulationParams, 'displayGround' ).onChange( v => { this.mesh.visible = v; } );
-        visFolder.add( this.simulationParams, 'visualizeDepth', 1, 20, 1 ).onChange( v => {
-            this.visualizer.depth = v;
-            this.visualizer.update();
-        } );
-        visFolder.open();
-
-        let physicsFolder = this.gui.addFolder( 'Player' );
-        physicsFolder.add( this.simulationParams, 'physicsSteps', 0, 30, 1 );
-        physicsFolder.add( this.simulationParams, 'gravity', - 100, 100, 0.01 ).onChange( v => {
-            this.simulationParams.gravity = parseFloat( v );
-        } );
-        physicsFolder.add( this.simulationParams, 'playerSpeed', 1, 20 );
-        physicsFolder.open();
-        //this.gui.add( this.simulationParams, 'reset' );
-        if(this.simulationParams.mobile){
-            this.gui.close();
-        }else{
-            this.gui.open();
-        }*/
+        this.gui.add(this.simulationParams, 'spawnPhysCubeFunc').name("Spawn Physics Cube");
+        this.gui.add(this.simulationParams, 'modelURL').name("Model URL (.glb)");
+        this.gui.add(this.simulationParams, 'spawnModelFunc').name("Spawn Model");
+        this.gui.add(this.simulationParams, 'showBrush').name("Show CSG Brush").onChange(v => {
+            this.brush2.visible = v;
+        });
 
         this.environment = this.world.scene;
-        this.collider = null;//new THREE.Box3();
-        this.visualizer = new THREE.Line3();
-        //this.controls = this.world.controls;
         this.raycaster = new THREE.Raycaster();
-
         this.evaluator = new Evaluator();
 
-        // Create a plane to render the raytraced shader material
+        // Chunk terrain setup
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
-        //this.world.csm.setupMaterial( this.defaultMaterial );
-        //this.mesh = new Brush( this.chunkGeometry, this.defaultMaterial );
-        this.bigChunk = new Brush( new THREE.BoxGeometry( 100.0, 100.0, 100.0 ).toNonIndexed (), this.defaultMaterial );
-        this.littleChunk = new Brush( new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed (), this.defaultMaterial );
-        this.wholeChunk = this.evaluator.evaluate( this.bigChunk, this.littleChunk, SUBTRACTION );
-        //this.wholeChunk = new Brush( this.chunkGeometry, this.defaultMaterial );
+
         this.chunks = [];
         this.mesh = new THREE.Group();
         for( let x = 0; x < 10; x++ ) {
             for( let y = 0; y < 10; y++ ) {
                 for( let z = 0; z < 10; z++ ) {
                     let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed () : new THREE.BoxGeometry( 0.1, 0.1, 0.1 ).toNonIndexed ();
-                    // Offset the vertices in the chunk geometry by the chunk position
                     let vertices = geometry.attributes.position.array;
                     for (let i = 0; i < vertices.length; i += 3) {
                         vertices[i    ] += x * 10.0 - 45.0;
@@ -165,6 +129,7 @@ export default class Main {
         this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2).toNonIndexed(), this.transparentMaterial );
         this.brush2.position.y = -0.5;
         this.brush2.castShadow = true;
+        this.brush2.visible = false;
         this.brush2.updateMatrixWorld();
         this.world.scene.add( this.brush2 );
 
@@ -173,11 +138,20 @@ export default class Main {
         this.modelsParent = new THREE.Group();
         this.world.scene.add( this.modelsParent );
 
+        // Physics body meshes (cubes from server-side PhysX)
+        // Snapshot interpolation: buffer prev/target states and lerp by elapsed time
+        this.physBodyMeshes = {};
+        this.physBodySnapshots = {}; // { prev: {pos, quat, time}, target: {pos, quat, time} }
+        this.physSnapshotInterval = 1000 / 15; // 15Hz physics updates
+        this.physBodyGeometry = new THREE.BoxGeometry(1, 1, 1);
+        this.physBodyMaterial = new THREE.MeshStandardMaterial( { color: 0xdd8844, roughness: 0.4, metalness: 0.3 } );
+        this.physBodiesParent = new THREE.Group();
+        this.world.scene.add( this.physBodiesParent );
+
         this.player.chunks = this.chunks;
 
         this.ePressed = false;
         this.qPressed = false;
-        this.fPressed = false;
         window.addEventListener('pointerdown', (e) => {
             if(this.player && this.player.controls && this.player.controls.isLocked) {
                 e.preventDefault();
@@ -188,17 +162,9 @@ export default class Main {
                 }
             }
         });
-        //window.addEventListener('keydown', (e) => {
-        //    if(this.player && this.player.controls && this.player.controls.isLocked) {
-        //        if (e.key === 'f' || e.key === 'F') {
-        //            this.fPressed = true;
-        //        }
-        //    }
-        //});
         window.addEventListener("wheel", (e) => {
-            if(this.player && this.player.controls && this.player.controls.isLocked){//} && this.curSelected) {
+            if(this.player && this.player.controls && this.player.controls.isLocked){
                 e.preventDefault();
-                //console.log("Zooming brush2 by", e.deltaY);
                 this.brush2.scale.multiplyScalar(1.0 + (e.deltaY * -0.001));
             }
         }, { passive: false });
@@ -212,149 +178,176 @@ export default class Main {
     updateFromServer(event) {
         /** @type {string} */
         let dataString = event.data;
-        if (dataString.startsWith("{")) {
-            let data = JSON.parse(dataString);
-            if (data.type.includes("update")) {
-                if(data.type === "fullupdate"){
-                    // Enumerate through the models and the players, marking all dirty
-                    for (let  model in this. models) { this. models[ model].dirty = true; }
-                    for (let player in this.players) { this.players[player].dirty = true; }
+        if (!dataString.startsWith("{")) {
+            console.log(`Received -> ${dataString}`);
+            return;
+        }
+
+        let data = JSON.parse(dataString);
+        if (!data.type.includes("update")) return;
+
+        // Capture server profiling
+        if(data.serverTickMs !== undefined) {
+            this.serverTickMs = data.serverTickMs;
+        }
+
+        if(data.type === "fullupdate"){
+            for (let  model in this. models) { this. models[ model].dirty = true; }
+            for (let player in this.players) { this.players[player].dirty = true; }
+        }
+
+        // Update players
+        for (let player in data.players) {
+            if (this.players[player] === undefined) {
+                this.players[player] = data.players[player];
+                this.players[player].mesh = new THREE.Mesh(
+                    new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
+                    new THREE.MeshStandardMaterial()
+                );
+                this.players[player].mesh.visible = player !== this.conn.id;
+                this.world.scene.add(this.players[player].mesh);
+            } else {
+                Object.assign(this.players[player], data.players[player]);
+            }
+            this.players[player].dirty = false;
+        }
+
+        // Update chunks
+        for (let chunkIndex in data.chunks) {
+            this.base64FillChunkIndex(chunkIndex, ''+data.chunks[chunkIndex].data.normalize("NFC"));
+        }
+
+        // Update models
+        for (let modelId in data.models) {
+            if (this.models[modelId] === undefined) {
+                this.models[modelId] = data.models[modelId];
+                if(this.models[modelId].url){
+                    this.loadModelMesh(modelId);
+                }else{
+                    this.createPlaceholderMesh(modelId);
                 }
+            } else {
+                Object.assign(this.models[modelId], data.models[modelId]);
 
-                // Enumerate through the players, updating as necessary (and marking clean)
-                for (let player in data.players) {
-                    if (this.players[player] === undefined) {
-                        // Create the player on the client since it doesn't exist
-                        this.players[player] = data.players[player];
-                        // Create a new player object, which is a capsule
-                        this.players[player].mesh = new THREE.Mesh(
-                            new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
-                            new THREE.MeshStandardMaterial()
-                        );
-                        this.players[player].mesh.visible = player !== this.conn.id;
-                        this.world.scene.add(this.players[player].mesh);
-                    } else {
-                        Object.assign(this.players[player], data.players[player]);
-                    }
-                    this.players[player].dirty = false;
-                }
+                if (this.models[modelId].mesh && this.models[modelId].mesh.geometry == this.placeholderGeometry && this.models[modelId].url) {
+                    console.log("Loading model at:", this.models[modelId].url);
+                    this.modelsParent.remove(this.models[modelId].mesh);
+                    this.models[modelId].mesh = null;
+                    this.loadModelMesh(modelId);
+                } else if (this.models[modelId].mesh) {
+                    this.models[modelId].mesh.quaternion.set(
+                        this.models[modelId].quaternion.x,
+                        this.models[modelId].quaternion.y,
+                        this.models[modelId].quaternion.z,
+                        this.models[modelId].quaternion.w);
+                    this.models[modelId].mesh.scale.set(
+                        this.models[modelId].scale.x,
+                        this.models[modelId].scale.y,
+                        this.models[modelId].scale.z);
 
-                // Enumerate through the players, updating as necessary (and marking clean)
-                for (let chunkIndex in data.chunks) {
-                    //console.log(chunkIndex, data.chunks[chunkIndex].data.normalize("NFC"), typeof(data.chunks[chunkIndex].data.normalize("NFC")));
-                    this.base64FillChunkIndex(chunkIndex, ''+data.chunks[chunkIndex].data.normalize("NFC"));
-                }
-
-                for (let modelId in data.models) {
-                    if (this.models[modelId] === undefined) {
-                        // Create the model on the client since it doesn't exist
-                        this.models[modelId] = data.models[modelId];
-                        if(this.models[modelId].url){
-                            let loader = new GLTFLoader();
-                            loader.setMeshoptDecoder(MeshoptDecoder);
-                            loader.load(this.models[modelId].url, (gltf) => {
-                                gltf.scene.position.copy(this.models[modelId].position);
-                                gltf.scene.quaternion.copy(this.models[modelId].quaternion);
-                                gltf.scene.scale.copy(this.models[modelId].scale);
-                                gltf.scene.name = modelId;//this.models[modelId].id;
-                                this.modelsParent.add(gltf.scene);
-                                this.models[modelId].mesh = gltf.scene;
-                                this.models[modelId].mesh.name = modelId;
-                                this.models[modelId].mesh.children[0].children[0].name = modelId;
-                            });
-                        }else{
-                            // Create the placeholder until its generated
-                            this.models[modelId].mesh = new THREE.Mesh( this.placeholderGeometry, this.placeholderMaterial );
-                            this.models[modelId].mesh.position.set(
-                                this.models[modelId].position.x,
-                                this.models[modelId].position.y,
-                                this.models[modelId].position.z);
-                            this.models[modelId].mesh.quaternion.set(
-                                this.models[modelId].quaternion.x,
-                                this.models[modelId].quaternion.y,
-                                this.models[modelId].quaternion.z,
-                                this.models[modelId].quaternion.w);
-                            this.models[modelId].mesh.scale.set(
-                                this.models[modelId].scale.x,
-                                this.models[modelId].scale.y,
-                                this.models[modelId].scale.z);
-                            this.models[modelId].mesh.name = modelId;//this.models[modelId].id;
-                            this.modelsParent.add(this.models[modelId].mesh);
-                        }
-                    } else {
-                        Object.assign(this.models[modelId], data.models[modelId]);
-
-                        if (this.models[modelId].mesh && this.models[modelId].mesh.geometry == this.placeholderGeometry && this.models[modelId].url) {
-                            console.log("Attempting to load model at:", this.models[modelId].url);
-                            this.modelsParent.remove(this.models[modelId].mesh);
-                            this.models[modelId].mesh = null;
-                            let loader = new GLTFLoader();
-                            loader.setMeshoptDecoder(MeshoptDecoder);
-                            loader.load(this.models[modelId].url, (gltf) => {
-                                gltf.scene.position.copy(this.models[modelId].position);
-                                gltf.scene.quaternion.copy(this.models[modelId].quaternion);
-                                gltf.scene.scale.copy(this.models[modelId].scale);
-                                gltf.scene.name = modelId;//this.models[modelId].id;
-                                this.modelsParent.add(gltf.scene);
-                                this.models[modelId].mesh = gltf.scene;
-                                this.models[modelId].mesh.name = modelId;
-                                this.models[modelId].mesh.children[0].children[0].name = modelId;
-                            });
-                        } else if (this.models[modelId].mesh) {
-                            //this.models[modelId].mesh.position.set(
-                            //    this.models[modelId].position.x,
-                            //    this.models[modelId].position.y,
-                            //    this.models[modelId].position.z);
-                            this.models[modelId].mesh.quaternion.set(
-                                this.models[modelId].quaternion.x,
-                                this.models[modelId].quaternion.y,
-                                this.models[modelId].quaternion.z,
-                                this.models[modelId].quaternion.w);
-                            this.models[modelId].mesh.scale.set(
-                                this.models[modelId].scale.x,
-                                this.models[modelId].scale.y,
-                                this.models[modelId].scale.z);
-
-                                //console.log(this.models[modelId].mesh);
-
-                            // If the model is selected by a player, highlight it
-                            //console.log("MODEL SELECTED BY:", this.models[modelId].selectedBy);
-                            if (this.models[modelId].selectedBy === this.conn.id) {
-                                this.curSelected = this.models[modelId].mesh;
-                            } else if (this.curSelected === this.models[modelId].mesh) {
-                                this.curSelected = null;
-                            }
-                        }
-                    }
-                    if(this.models[modelId].status){
-                        this.status.name(this.models[modelId].status);
-                        console.log(modelId, "status:", this.models[modelId].status);
-                    }
-                    this.models[modelId].dirty = false;
-                }
-
-                // Enumerate through the players, removing any that are still dirty
-                if(data.type === "fullupdate"){
-                    for (let player in this.players) {
-                        if (this.players[player].dirty) {
-                            console.log(`Player ${this.players[player].name} has disconnected!`);
-                            this.world.scene.remove(this.players[player].mesh);
-                            delete this.players[player];
-                        }
-                    }
-
-                    for (let model in this.models) {
-                        if (this.models[model].dirty) {
-                            this.world.scene.remove(this.models[model].mesh);
-                            //this.models[model].dispose();
-                            delete this.models[model];
-                        }
+                    if (this.models[modelId].selectedBy === this.conn.id) {
+                        this.curSelected = this.models[modelId].mesh;
+                        this.curSelectedId = modelId;
+                    } else if (this.curSelected === this.models[modelId].mesh) {
+                        this.curSelected = null;
+                        this.curSelectedId = null;
                     }
                 }
             }
-        } else {
-            console.log(`Received -> ${dataString}`);
+            this.models[modelId].dirty = false;
         }
+
+        // Update physics body snapshots for interpolation
+        if(data.physBodies) {
+            let now = performance.now();
+            for (let bodyId in data.physBodies) {
+                let bd = data.physBodies[bodyId];
+                if(!this.physBodyMeshes[bodyId]) {
+                    let s = bd.halfExtent * 2;
+                    let mesh = new THREE.Mesh(this.physBodyGeometry, this.physBodyMaterial);
+                    mesh.scale.set(s, s, s);
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+                    this.physBodiesParent.add(mesh);
+                    this.physBodyMeshes[bodyId] = mesh;
+                }
+                let newPos = new THREE.Vector3(bd.position.x, bd.position.y, bd.position.z);
+                let newQuat = new THREE.Quaternion(bd.quaternion.x, bd.quaternion.y, bd.quaternion.z, bd.quaternion.w);
+                let snap = this.physBodySnapshots[bodyId];
+                let mesh = this.physBodyMeshes[bodyId];
+                if(!snap) {
+                    // First snapshot: set both prev and target to the same value
+                    this.physBodySnapshots[bodyId] = {
+                        prev:   { pos: newPos.clone(), quat: newQuat.clone(), time: now },
+                        target: { pos: newPos, quat: newQuat, time: now }
+                    };
+                    mesh.position.copy(newPos);
+                    mesh.quaternion.copy(newQuat);
+                } else {
+                    // Set prev to current rendered position (not old target) for seamless blend
+                    snap.prev.pos.copy(mesh.position);
+                    snap.prev.quat.copy(mesh.quaternion);
+                    snap.prev.time = now;
+                    snap.target.pos.copy(newPos);
+                    snap.target.quat.copy(newQuat);
+                    snap.target.time = now + this.physSnapshotInterval;
+                }
+            }
+        }
+
+        // Remove disconnected players and deleted models on full update
+        if(data.type === "fullupdate"){
+            for (let player in this.players) {
+                if (this.players[player].dirty) {
+                    console.log(`Player ${this.players[player].name} has disconnected!`);
+                    this.world.scene.remove(this.players[player].mesh);
+                    delete this.players[player];
+                }
+            }
+
+            for (let model in this.models) {
+                if (this.models[model].dirty) {
+                    this.world.scene.remove(this.models[model].mesh);
+                    delete this.models[model];
+                }
+            }
+        }
+    }
+
+    loadModelMesh(modelId) {
+        let loader = new GLTFLoader();
+        loader.setMeshoptDecoder(MeshoptDecoder);
+        loader.load(this.models[modelId].url, (gltf) => {
+            gltf.scene.position.copy(this.models[modelId].position);
+            gltf.scene.quaternion.copy(this.models[modelId].quaternion);
+            gltf.scene.scale.copy(this.models[modelId].scale);
+            gltf.scene.name = modelId;
+            this.modelsParent.add(gltf.scene);
+            this.models[modelId].mesh = gltf.scene;
+            this.models[modelId].mesh.name = modelId;
+            if(gltf.scene.children[0] && gltf.scene.children[0].children[0]) {
+                gltf.scene.children[0].children[0].name = modelId;
+            }
+        });
+    }
+
+    createPlaceholderMesh(modelId) {
+        this.models[modelId].mesh = new THREE.Mesh( this.placeholderGeometry, this.placeholderMaterial );
+        this.models[modelId].mesh.position.set(
+            this.models[modelId].position.x,
+            this.models[modelId].position.y,
+            this.models[modelId].position.z);
+        this.models[modelId].mesh.quaternion.set(
+            this.models[modelId].quaternion.x,
+            this.models[modelId].quaternion.y,
+            this.models[modelId].quaternion.z,
+            this.models[modelId].quaternion.w);
+        this.models[modelId].mesh.scale.set(
+            this.models[modelId].scale.x,
+            this.models[modelId].scale.y,
+            this.models[modelId].scale.z);
+        this.models[modelId].mesh.name = modelId;
+        this.modelsParent.add(this.models[modelId].mesh);
     }
 
     /** Update the simulation */
@@ -366,18 +359,17 @@ export default class Main {
         let physicsSteps = this.simulationParams.physicsSteps;
         for ( let i = 0; i < physicsSteps; i ++ ) {
             this.player.updatePlayer( Math.min( this.deltaTime/1000.0, 0.1 ) / physicsSteps );
-            if( i == 0 && this.player.tappedAction) { this.qPressed = true; } // Bind tapping the action to Q
+            if( i == 0 && this.player.tappedAction) { this.qPressed = true; }
         }
 
-        //this.world.controls.update();
-
-        // Cast a ray against the environment collider and place the brush2 there
+        // Place the CSG brush in front of the camera
         this.world.camera.getWorldDirection(this.brush2.position).normalize().multiplyScalar(6).add(this.player.position);
-        let derp = new THREE.Vector3().copy(this.world.camera.position);
-        derp.y = this.brush2.position.y;
-        this.brush2.lookAt(derp);
+        let lookTarget = new THREE.Vector3().copy(this.world.camera.position);
+        lookTarget.y = this.brush2.position.y;
+        this.brush2.lookAt(lookTarget);
         this.brush2.updateMatrixWorld();
 
+        // Send position updates at 30Hz
         if(this.lastUpdate + 1000/30 < timeMS) {
             this.lastUpdate = timeMS;
             this.conn.send(JSON.stringify({
@@ -392,7 +384,7 @@ export default class Main {
             if(this.curSelected){
                 this.conn.send(JSON.stringify({
                     type: "model",
-                    id: this.curSelected.children[0].children[0].name,
+                    id: this.curSelectedId,
                     position: {
                         x: this.brush2.position.x,
                         y: this.brush2.position.y,
@@ -413,62 +405,46 @@ export default class Main {
             }
         }
 
+        // Interpolate remote player positions
         for (let player in this.players) {
             this.players[player].mesh.position.lerp(new THREE.Vector3(this.players[player].position.x, this.players[player].position.y, this.players[player].position.z), 0.1);
-            //this.players[player].mesh.updateMatrixWorld();
         }
 
+        // Interpolate model positions
         for (let model in this.models) {
             if(this.models[model].mesh) {
                 this.models[model].mesh.position.lerp(new THREE.Vector3(this.models[model].position.x, this.models[model].position.y, this.models[model].position.z), 0.1);
-                //this.models[model].mesh.updateMatrixWorld();
             }
         }
 
-        //this.world.csm.updateFrustums();
-        //this.world.csm.update();
-
-        if (this.fPressed) {
-            this.fPressed = false;
-        }
-
-
         if ( this.ePressed || this.qPressed ) {
-            
+
             if(!this.curSelected){
-                // Raycast against all of the objects in the scene to select it
+                // Raycast to select models
                 this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.world.camera);
                 let intersects = this.raycaster.intersectObjects(this.modelsParent.children, true);
 
                 if (intersects.length > 0) {
-                    // If we hit an object, we can select it
                     let hit = intersects[0];
-                    //console.log("Hit object:", hit.object.name, hit.object.id, hit.object);
                     this.conn.send(JSON.stringify({
                         type: "select",
                         id: hit.object.name
                     }));
-
                     this.ePressed = false;
                     this.qPressed = false;
-                    
                     return;
                 }
             }else{
-                if(this.curSelected){
-                    this.conn.send(JSON.stringify({
-                        type: "deselect",
-                        id: this.curSelected.children[0].children[0].name
-                    }));
-                    this.ePressed = false;
-                    this.qPressed = false;
-                    return;
-                    //this.curSelected = null;
-                }
+                this.conn.send(JSON.stringify({
+                    type: "deselect",
+                    id: this.curSelectedId
+                }));
+                this.ePressed = false;
+                this.qPressed = false;
+                return;
             }
 
-            // Otherwise, deselect or perform a CSG operation
-
+            // CSG terrain operation
             let box1 = new THREE.Box3();
             box1.setFromObject(this.brush2);
 
@@ -503,66 +479,84 @@ export default class Main {
             this.qPressed = false;
         }
 
-        //this.world.renderer.render(this.world.scene, this.world.camera);
-        this.world.composer.render();
+        // Interpolate physics bodies between snapshots (render one interval behind)
+        let now = performance.now();
+        for(let bodyId in this.physBodySnapshots) {
+            let snap = this.physBodySnapshots[bodyId];
+            let mesh = this.physBodyMeshes[bodyId];
+            if(!mesh || !snap) continue;
+            let duration = snap.target.time - snap.prev.time;
+            if(duration <= 0) duration = this.physSnapshotInterval;
+            // t goes from 0 (at prev time) to 1 (at target time)
+            let t = (now - snap.prev.time) / duration;
+            t = Math.max(0, Math.min(t, 1.0));
+            mesh.position.lerpVectors(snap.prev.pos, snap.target.pos, t);
+            mesh.quaternion.slerpQuaternions(snap.prev.quat, snap.target.quat, t);
+        }
+
+        this.world.renderPipeline.render();
         this.world.stats.update();
+
+        // Display server tick profiling
+        if(!this.serverTickDisplay) {
+            this.serverTickDisplay = document.createElement('div');
+            this.serverTickDisplay.style.cssText = 'position:fixed;top:0;right:0;padding:4px 8px;background:rgba(0,0,0,0.7);color:#0f0;font:12px monospace;z-index:10000;';
+            document.body.appendChild(this.serverTickDisplay);
+        }
+        this.serverTickDisplay.textContent = 'Server: ' + this.serverTickMs + 'ms';
+
         this.frameNum++;
     }
 
-    createModel(){
-        if(this.simulationParams.imageURL === "reset"){
+    spawnPhysCube(){
+        this.conn.send(JSON.stringify({
+            type: "spawnphyscube",
+            position: {
+                x: this.brush2.position.x,
+                y: this.brush2.position.y,
+                z: this.brush2.position.z
+            },
+            halfExtent: 0.5
+        }));
+    }
+
+    spawnModel(){
+        let url = this.simulationParams.modelURL.trim();
+        if(!url) return;
+
+        if(url === "reset"){
             this.conn.send(JSON.stringify({ type: "reset" }));
             return;
         }
 
-        let imageURL = this.simulationParams.imageURL;
-        if(imageURL.includes("cdn.midjourney.com") && imageURL.includes(".png")) {
-            imageURL = imageURL.replace(".png", ".webp");
-        }
-
-        // Fetch an image and encode it as a dataURL
-        fetch(imageURL).then((response)=>{
-            response.blob().then((blob)=>{
-                let reader = new FileReader();
-                reader.readAsDataURL(blob);
-                reader.onloadend = () => {
-                    const base64data = reader.result;
-                    console.log("Image fetched and encoded as dataURL:", base64data);
-
-                    // Let's spawn a model from a .gltf URL
-                    this.conn.send(JSON.stringify({
-                        type: "model",
-                        id: ""+Math.floor(Math.random() * 1000000),
-                        //url: "./assets/steampunk_camera.glb",
-                        url: null,
-                        imageURL: base64data,
-                        position: {
-                            x: this.brush2.position.x,
-                            y: this.brush2.position.y,
-                            z: this.brush2.position.z
-                        },
-                        quaternion: {
-                            x: this.brush2.quaternion.x,
-                            y: this.brush2.quaternion.y,
-                            z: this.brush2.quaternion.z,
-                            w: this.brush2.quaternion.w
-                        },
-                        scale: {
-                            x: this.brush2.scale.x,
-                            y: this.brush2.scale.y,
-                            z: this.brush2.scale.z
-                        },
-                        selectedBy: ""
-                    }));
-                };
-            });
-        });
+        this.conn.send(JSON.stringify({
+            type: "model",
+            id: ""+Math.floor(Math.random() * 1000000),
+            url: url,
+            position: {
+                x: this.brush2.position.x,
+                y: this.brush2.position.y,
+                z: this.brush2.position.z
+            },
+            quaternion: {
+                x: this.brush2.quaternion.x,
+                y: this.brush2.quaternion.y,
+                z: this.brush2.quaternion.z,
+                w: this.brush2.quaternion.w
+            },
+            scale: {
+                x: this.brush2.scale.x,
+                y: this.brush2.scale.y,
+                z: this.brush2.scale.z
+            },
+            selectedBy: ""
+        }));
     }
 
-    b64encode(input) { 
-        return btoa(encodeURIComponent(input)); 
+    b64encode(input) {
+        return btoa(encodeURIComponent(input));
     }
-    b64decode(input) { 
+    b64decode(input) {
         return decodeURIComponent(atob(input));
     }
 
@@ -587,7 +581,7 @@ export default class Main {
         newGeometry.attributes.position.needsUpdate = true;
         newGeometry.attributes.uv.needsUpdate = true;
         newGeometry.attributes.normal.needsUpdate = true;
-        newGeometry.needsUpdate = true; 
+        newGeometry.needsUpdate = true;
         newGeometry.computeBoundingBox();
         newGeometry.computeBoundingSphere();
         newGeometry.computeVertexNormals();

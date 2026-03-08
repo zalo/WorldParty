@@ -21,11 +21,11 @@ import {
 	ZeroFactor,
 	Matrix4
 } from 'three';
-import { Pass, FullScreenQuad } from '../node_modules/three/examples/jsm/postprocessing/Pass.js';
+import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { generateMagicSquareNoise, SSILVBShader, SSILVBDepthShader, SSILVBBlendShader } from './SSILVBShader.js';
-import { generatePdSamplePointInitializer, PoissonDenoiseShader } from '../node_modules/three/examples/jsm/shaders/PoissonDenoiseShader.js';
-import { CopyShader } from '../node_modules/three/examples/jsm/shaders/CopyShader.js';
-import { SimplexNoise } from '../node_modules/three/examples/jsm/math/SimplexNoise.js';
+import { generatePdSamplePointInitializer, PoissonDenoiseShader } from 'three/examples/jsm/shaders/PoissonDenoiseShader.js';
+import { CopyShader } from 'three/examples/jsm/shaders/CopyShader.js';
+import { SimplexNoise } from 'three/examples/jsm/math/SimplexNoise.js';
 
 class SSILVBPass extends Pass {
 

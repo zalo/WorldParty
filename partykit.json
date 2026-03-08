@@ -2,5 +2,26 @@
   "$schema": "https://www.partykit.io/schema.json",
   "name": "worldparty",
   "main": "src/server.js",
-  "compatibilityDate": "2024-12-06"
+  "compatibilityDate": "2024-12-06",
+  "serve": {
+    "path": ".",
+    "singlePageApp": true,
+    "browserTTL": 0,
+    "edgeTTL": 0,
+    "build": {
+      "entry": "src/main.js",
+      "bundle": true,
+      "splitting": false,
+      "outdir": "dist",
+      "minify": true,
+      "format": "esm",
+      "sourcemap": true,
+      "loader": {
+        ".png": "file",
+        ".glb": "file",
+        ".webp": "file",
+        ".wasm": "file"
+      }
+    }
+  }
 }

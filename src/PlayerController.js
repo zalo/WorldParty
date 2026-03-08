@@ -1,9 +1,11 @@
-import * as THREE from '../node_modules/three/build/three.module.js';
-import { RoundedBoxGeometry } from '../node_modules/three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import * as BufferGeometryUtils from '../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js';
-import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from '../node_modules/three-mesh-bvh/build/index.module.js';
-import { PointerLockControls } from '../node_modules/three/examples/jsm/controls/PointerLockControls.js';
+import * as THREE from 'three/webgpu';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from 'three-mesh-bvh';
+import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import nipplejs from '../assets/nipplejs/src/index.js';
+
+const OFF_GROUND_GRACE = 0.05; // Coyote time: seconds after leaving ground where jump still works
 
 export class PlayerController extends THREE.Group {
     constructor(camera, simulationParams) {
@@ -12,7 +14,7 @@ export class PlayerController extends THREE.Group {
         this.simulationParams = simulationParams;
 
         this.camera = camera;
-        if (this.simulationParams.mobile){//navigator.userAgentData.mobile) {
+        if (this.simulationParams.mobile) {
             this.controls = null;
             this.nipple = nipplejs.create({
                 zone: document.getElementById('appbody'),
@@ -22,12 +24,10 @@ export class PlayerController extends THREE.Group {
                 size: 150,
                 color: 'gray'
             });
-        }else{
+        } else {
             this.controls = new PointerLockControls(camera, document.body);
             document.getElementById('appbody').addEventListener( 'click', () => { this.controls.lock(); });
-            //this.camera.parent.add( this.controls.object );
-            
-            // Handle crosshairs visibility
+
             const crosshairs = document.getElementById('crosshairs');
             this.controls.addEventListener('lock', () => {
                 crosshairs.style.display = 'block';
@@ -39,7 +39,9 @@ export class PlayerController extends THREE.Group {
 
         this.name = 'PlayerController';
         this.playerIsOnGround = false;
+        this.offGroundTimer = 0;
         this.keysPressed = {};
+        this.jumpRequested = false;
         this.lookMovement = new THREE.Vector2();
         this.walkMovement = new THREE.Vector2();
         this.playerVelocity = new THREE.Vector3();
@@ -51,8 +53,9 @@ export class PlayerController extends THREE.Group {
         this.tempBox = new THREE.Box3();
         this.tempMat = new THREE.Matrix4();
         this.tempSegment = new THREE.Line3();
+        this.walkAnimation = 0;
 
-        // Add Keyboard Controls
+        // Keyboard controls
         window.addEventListener('keydown', (e) => {
             switch (e.code) {
                 case 'KeyW': this.keysPressed['KeyW'] = true; break;
@@ -60,10 +63,7 @@ export class PlayerController extends THREE.Group {
                 case 'KeyD': this.keysPressed['KeyD'] = true; break;
                 case 'KeyA': this.keysPressed['KeyA'] = true; break;
                 case 'Space':
-                    if (this.playerIsOnGround) {
-                        this.playerVelocity.y = 10.0;
-                        this.playerIsOnGround = false;
-                    }
+                    this.jumpRequested = true;
                     break;
             }
         });
@@ -76,7 +76,7 @@ export class PlayerController extends THREE.Group {
             }
         });
 
-        // character
+        // Character mesh
         this.playerMesh = new THREE.Mesh(
             new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
             new THREE.MeshStandardMaterial()
@@ -87,19 +87,15 @@ export class PlayerController extends THREE.Group {
             segment: new THREE.Line3(new THREE.Vector3(), new THREE.Vector3(0, - 1.0, 0.0))
         };
         this.playerMesh.castShadow = true;
-        //this.playerMesh.receiveShadow = true;
         this.playerMesh.material.shadowSide = 2;
         this.add(this.playerMesh);
     }
 
     reset() {
         this.playerVelocity.set(0, 0, 0);
-        this.position.set(0,3.0,0);
-        //this.camera.position.sub(this.controls.target);
-        //this.controls.target.copy(this.position);
-        //this.camera.position.add(this.position);
+        this.position.set(0, 3.0, 0);
         this.camera.position.copy(this.position);
-        this.camera.position.y += 0.5; // adjust camera height
+        this.camera.position.y += 0.5;
         if(this.controls){ this.controls.update(); }
     }
 
@@ -114,7 +110,7 @@ export class PlayerController extends THREE.Group {
         this.lookedThisFrame = false;
 
         if (this.simulationParams.mobile) {
-            if (this.nipple && this.nipple) {
+            if (this.nipple) {
                 for(let i = 0; i < this.nipple.ids.length; i++) {
                     let nipple = this.nipple.get(this.nipple.ids[i]);
                     if (nipple && nipple.position && nipple.frontPosition) {
@@ -139,22 +135,20 @@ export class PlayerController extends THREE.Group {
             this.lookMovement.y -= this.keysPressed['ArrowDown'] ? 1 : 0;
         }
 
-        // Jump the player if they tap the look joystick
+        // Mobile: tap look joystick to jump
         if(!this.lookedThisFrame){
-            if(this.lookTimer > 0 && this.lookTimer < 0.1 && this.playerIsOnGround) {
-                this.playerVelocity.y = 10.0;
-                this.playerIsOnGround = false;
+            if(this.lookTimer > 0 && this.lookTimer < 0.1) {
+                this.jumpRequested = true;
             }
             this.lookTimer = 0.0;
         } else {
             this.lookTimer += delta;
         }
 
-        // Trigger an action if the walk joystick was tapped
+        // Mobile: tap walk joystick for action
         this.tappedAction = false;
         if(!this.walkedThisFrame){
             if(this.walkTimer > 0 && this.walkTimer < 0.1) {
-                console.log('Tapped action');
                 this.tappedAction = true;
             }
             this.walkTimer = 0.0;
@@ -163,6 +157,17 @@ export class PlayerController extends THREE.Group {
             this.walkTimer += delta;
         }
 
+        // Jump with coyote time
+        if (this.jumpRequested) {
+            if (this.playerIsOnGround || this.offGroundTimer < OFF_GROUND_GRACE) {
+                this.playerVelocity.y = this.simulationParams.jumpVelocity;
+                this.playerIsOnGround = false;
+                this.offGroundTimer = OFF_GROUND_GRACE; // Consume coyote time
+            }
+            this.jumpRequested = false;
+        }
+
+        // Gravity
         if (this.playerIsOnGround) {
             this.playerVelocity.y = delta * this.simulationParams.gravity;
         } else {
@@ -171,17 +176,17 @@ export class PlayerController extends THREE.Group {
 
         this.position.addScaledVector(this.playerVelocity, delta);
 
-        // adjust the camera rotation
+        // Camera rotation (mobile joystick or arrow keys)
         let _euler = new THREE.Euler( 0, 0, 0, 'YXZ' );
         _euler.setFromQuaternion(this.camera.quaternion);
         _euler.y -= this.lookMovement.x * 0.01;
         _euler.x -= this.lookMovement.y * 0.01;
-        _euler.x = Math.max(Math.PI / 2 - Math.PI, Math.min(Math.PI / 2, _euler.x ) );
+        _euler.x = Math.max( -Math.PI / 2, Math.min( Math.PI / 2, _euler.x ) );
         this.camera.quaternion.setFromEuler(_euler);
 
-        // move the player
-		this.rightVector.setFromMatrixColumn( this.camera.matrix, 0 );
-		this.forwardVector.crossVectors( this.camera.up, this.rightVector );
+        // Camera-relative movement
+        this.rightVector.setFromMatrixColumn( this.camera.matrix, 0 );
+        this.forwardVector.crossVectors( this.camera.up, this.rightVector );
         this.forwardVector.normalize().multiplyScalar(this.simulationParams.playerSpeed * delta * this.walkMovement.y);
         this.  rightVector.normalize().multiplyScalar(this.simulationParams.playerSpeed * delta * this.walkMovement.x);
         this.position.add(this.forwardVector);
@@ -189,15 +194,13 @@ export class PlayerController extends THREE.Group {
 
         this.updateMatrixWorld();
 
-        // adjust player position based on collisions
+        // Capsule collision against chunk BVHs
         const capsuleInfo = this.capsuleInfo;
         this.tempSegment.copy(capsuleInfo.segment);
         this.tempSegment.start.applyMatrix4(this.matrixWorld);
-        this.tempSegment.end  .applyMatrix4(this.matrixWorld);    
+        this.tempSegment.end  .applyMatrix4(this.matrixWorld);
 
         let globalBox = new THREE.Box3().makeEmpty();
-
-        // get the axis aligned bounding box of the capsule
         globalBox.expandByPoint(this.tempSegment.start);
         globalBox.expandByPoint(this.tempSegment.end);
         globalBox.min.addScalar(- capsuleInfo.radius);
@@ -209,20 +212,18 @@ export class PlayerController extends THREE.Group {
             }
             if(!this.chunks[i].geometry.boundsTree) { continue; }
             if(!globalBox.intersectsBox(this.chunks[i].bbox)) {
-                continue; // skip chunks that are not intersecting the capsule
+                continue;
             }
 
             this.tempBox.makeEmpty();
             this.tempMat.copy(this.chunks[i].matrixWorld).invert();
 
-            // get the position of the capsule in the local space of the collider
+            // Transform capsule into chunk local space
             this.tempSegment.start.applyMatrix4(this.tempMat);
             this.tempSegment.end  .applyMatrix4(this.tempMat);
 
-            // get the axis aligned bounding box of the capsule
             this.tempBox.expandByPoint(this.tempSegment.start);
             this.tempBox.expandByPoint(this.tempSegment.end);
-
             this.tempBox.min.addScalar(- capsuleInfo.radius);
             this.tempBox.max.addScalar(capsuleInfo.radius);
 
@@ -231,7 +232,6 @@ export class PlayerController extends THREE.Group {
             bvh.shapecast({
                 intersectsBounds: box => box.intersectsBox(this.tempBox),
                 intersectsTriangle: tri => {
-                    // check if the triangle is intersecting the capsule and adjust the capsule position if it is.
                     const triPoint = this.tempVector;
                     const capsulePoint = this.tempVector2;
 
@@ -246,45 +246,60 @@ export class PlayerController extends THREE.Group {
                 }
             });
 
+            // Transform back to world space
             this.tempSegment.start.applyMatrix4(this.chunks[i].matrixWorld);
             this.tempSegment.end.applyMatrix4(this.chunks[i].matrixWorld);
         }
 
-        // get the adjusted position of the capsule collider in world space after checking
-        // triangle collisions and moving it. capsuleInfo.segment.start is assumed to be
-        // the origin of the player model.
+        // Resolve final position from collision
         let newPosition = this.tempVector;
         newPosition.copy(this.tempSegment.start);
 
-        // check how much the collider was moved
         let deltaVector = this.tempVector2;
         deltaVector.subVectors(newPosition, this.position);
 
-        // if the player was primarily adjusted vertically we assume it's on something we should consider ground
+        // Ground detection
+        const wasOnGround = this.playerIsOnGround;
         this.playerIsOnGround = deltaVector.y > Math.abs(delta * this.playerVelocity.y * 0.25);
+
+        // Track time off ground for coyote time
+        if (this.playerIsOnGround) {
+            this.offGroundTimer = 0;
+        } else {
+            this.offGroundTimer += delta;
+        }
 
         let offset = Math.max(0.0, deltaVector.length() - 1e-5);
         deltaVector.normalize().multiplyScalar(offset);
 
-        // adjust the player model
         this.position.add(deltaVector);
 
         if (!this.playerIsOnGround) {
+            // Remove velocity component along collision normal
             deltaVector.normalize();
             this.playerVelocity.addScaledVector(deltaVector, - deltaVector.dot(this.playerVelocity));
         } else {
             this.playerVelocity.set(0, 0, 0);
         }
 
-        //// adjust the camera
-        //this.camera.position.sub(this.controls.target);
-        //this.controls.target.copy(this.position);
-        //this.camera.position.add(this.position);
+        // Walk animation (bounce)
+        let isMoving = Math.abs(this.walkMovement.x) > 0.1 || Math.abs(this.walkMovement.y) > 0.1;
+        if (this.playerIsOnGround && isMoving) {
+            this.walkAnimation += delta * 12;
+            this.playerMesh.position.y = Math.abs(Math.sin(this.walkAnimation)) * 0.15;
+            this.playerMesh.rotation.x = Math.sin(this.walkAnimation) * 0.08;
+        } else {
+            this.playerMesh.position.y = 0;
+            this.playerMesh.rotation.x = 0;
+            this.walkAnimation = 0;
+        }
+
+        // Update camera to follow player
         this.camera.position.copy(this.position);
-        this.camera.position.y += 0.5; // adjust camera height
+        this.camera.position.y += 0.5;
         if(this.controls){ this.controls.update(); }
 
-        // if the player has fallen too far below the level reset their position to the start
+        // Reset if fallen too far
         if (this.position.y < - 100) {
             this.reset();
         }
