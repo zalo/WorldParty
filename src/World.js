@@ -36,7 +36,8 @@ export default class World {
         this.dirLight.shadow.camera.bottom = - 30;
         this.dirLight.shadow.mapSize.width  = 2048;
         this.dirLight.shadow.mapSize.height = 2048;
-        this.dirLight.shadow.bias = -0.001;
+        this.dirLight.shadow.bias = -0.0002;
+        this.dirLight.shadow.normalBias = 0.02;
         this.scene.add( this.dirLight );
 
         this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 3.0 );
@@ -52,10 +53,10 @@ export default class World {
             } );
 
         // Mobile renders at half resolution
-        let pixelRatio = this.isMobile ? Math.max(0.5, window.devicePixelRatio * 0.25) : window.devicePixelRatio;
+        let pixelRatio = this.isMobile ? Math.max(0.5, window.devicePixelRatio * 0.25) : Math.min(1, window.devicePixelRatio);
 
-        // WebGPU Renderer
-        this.renderer = new THREE.WebGPURenderer( { antialias: !this.isMobile } );
+        // WebGPU Renderer — no hardware AA since TRAA handles it
+        this.renderer = new THREE.WebGPURenderer();
         this.renderer.setPixelRatio( pixelRatio );
         this.renderer.shadowMap.enabled = true;
         this.container.appendChild(this.renderer.domElement);

@@ -20,10 +20,24 @@ import manMod from '../assets/manifold-3d/manifold.wasm';
 
 import PhysXInit from '../assets/physx/physx-js-webidl.mjs';
 import physxWasm from '../assets/physx/physx-js-webidl.wasm';
+import { PROP_HULLS } from './props/PropHulls.js';
 
 const PHYS_CUBE_COUNT = 12;
-const PHYS_CUBE_HALF = 0.5; // half-extent
-const PHYS_GROUND_Y = -0.5; // top of ground at y=0
+const PHYS_CUBE_HALF = 0.5;
+
+// shape: 'box'|'sphere'|'capsule'|'hulls' — analytic shapes are faster and more accurate
+const PROP_DEFS = {
+  barrel:  { half: 0.5, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/barrel/model.gltf" },
+  crate:   { half: 0.5, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/sci-fi-crate/model.gltf" },
+  chest:   { half: 0.4, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/chest/model.gltf" },
+  bench:   { half: 0.5, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/bench/model.gltf" },
+  ball:    { half: 0.3, shape: 'sphere',  url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/cannon-ball/model.gltf" },
+  can:     { half: 0.15,shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/soda-can/model.gltf" },
+  pot:     { half: 0.3, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/pot/model.gltf" },
+  tower:   { half: 0.6, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/tower/model.gltf" },
+  board:   { half: 0.3, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/cutting-board/model.gltf" },
+  sword:   { half: 0.2, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/sword/model.gltf" },
+};
 
 /** @implements {Server} */
 class PartyServer {
@@ -57,7 +71,9 @@ class PartyServer {
     this.playerKinematics = {};
     /** @type {Record<number, any>} - Static physics actors for chunk terrain */
     this.chunkPhysActors = {};
-    this.physBodyStates = {};
+    /** @type {Record<string, {id:string, type:string, bodyIdA:string, bodyIdB:string, pxJoint:any}>} */
+    this.joints = {};
+    this.jointCounter = 0;
     this.lastPhysTime = Date.now();
 
     this.updateCounter = 0;
@@ -81,6 +97,7 @@ class PartyServer {
           chunks: this.getSerializableChunks(),
           models: this.models,
           physBodies: this.getPhysBodiesState(),
+          joints: this.getJointsState(),
           serverTickMs: this.serverTickMs
         };
         this.room.broadcast(JSON.stringify(msg));
@@ -143,7 +160,10 @@ class PartyServer {
         id: b.id,
         position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
         quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
-        halfExtent: b.halfExtent || PHYS_CUBE_HALF
+        halfExtent: b.halfExtent || PHYS_CUBE_HALF,
+        propId: b.propId || null,
+        propUrl: b.propUrl || null,
+        frozen: b.frozen || false
       };
     }
     return result;
@@ -154,7 +174,7 @@ class PartyServer {
     let result = {};
     let hasAny = false;
     for(let b of this.physBodies) {
-      if(!b.body.isSleeping()) {
+      if(!b.body.isSleeping() || b.frozen) {
         let pose = b.body.getGlobalPose();
         let p = pose.get_p();
         let q = pose.get_q();
@@ -162,7 +182,10 @@ class PartyServer {
           id: b.id,
           position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
           quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
-          halfExtent: b.halfExtent || PHYS_CUBE_HALF
+          halfExtent: b.halfExtent || PHYS_CUBE_HALF,
+          propId: b.propId || null,
+          propUrl: b.propUrl || null,
+          frozen: b.frozen || false
         };
         hasAny = true;
       }
@@ -252,12 +275,325 @@ class PartyServer {
     boxShape.setSimulationFilterData(this.pxFilterData);
     let box = this.pxPhysics.createRigidDynamic(bpose);
     box.attachShape(boxShape);
+    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(box, 500.0);
     this.pxScene.addActor(box);
     let id = "phys_" + (this.physBodyCounter++);
     this.physBodies.push({ body: box, id: id, halfExtent: half });
     this.hasNewInfoToSend = true;
     console.log(`Spawned phys cube ${id} at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}) half=${half}`);
     return id;
+  }
+
+  /** Spawn a prop with CoACD convex hull colliders */
+  spawnPropWithHulls(x, y, z, half, hulls, propId, propUrl) {
+    if(!this.px || !this.pxScene) return null;
+    let scale = half * 2; // hulls are normalized to unit size
+
+    let bv = new this.px.PxVec3(x, y, z);
+    let bq = new this.px.PxQuat(0, 0, 0, 1);
+    let bpose = new this.px.PxTransform(bv, bq);
+    let body = this.pxPhysics.createRigidDynamic(bpose);
+
+    let attachedAny = false;
+    for(let hull of hulls) {
+      let verts = hull.vertices;
+      if(!verts || verts.length < 4) continue;
+
+      // Create PxArray with scaled vertices
+      let pxVerts = new this.px.PxArray_PxVec3(verts.length);
+      for(let i = 0; i < verts.length; i++) {
+        let v = new this.px.PxVec3(verts[i][0] * scale, verts[i][1] * scale, verts[i][2] * scale);
+        pxVerts.set(i, v);
+      }
+
+      let desc = new this.px.PxConvexMeshDesc();
+      desc.points.set_count(verts.length);
+      desc.points.set_stride(12);
+      desc.points.set_data(pxVerts.begin());
+      desc.flags.raise(this.px.PxConvexFlagEnum.eCOMPUTE_CONVEX);
+
+      let convexMesh = this.px.CreateConvexMesh(this.pxCookingParams, desc);
+      if(!convexMesh) {
+        console.warn(`Failed to cook convex hull for ${propId}`);
+        continue;
+      }
+
+      let convexGeom = new this.px.PxConvexMeshGeometry(convexMesh);
+      let sf = new this.px.PxShapeFlags(
+        this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
+        this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
+      );
+      let shape = this.pxPhysics.createShape(convexGeom, this.pxMaterial, true, sf);
+      shape.setSimulationFilterData(this.pxFilterData);
+      body.attachShape(shape);
+      attachedAny = true;
+    }
+
+    if(!attachedAny) {
+      // Fallback to box if all hulls failed
+      let boxGeom = new this.px.PxBoxGeometry(half, half, half);
+      let sf = new this.px.PxShapeFlags(
+        this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
+        this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
+      );
+      let shape = this.pxPhysics.createShape(boxGeom, this.pxMaterial, true, sf);
+      shape.setSimulationFilterData(this.pxFilterData);
+      body.attachShape(shape);
+    }
+
+    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
+    this.pxScene.addActor(body);
+    let id = "phys_" + (this.physBodyCounter++);
+    this.physBodies.push({ body, id, halfExtent: half, propId, propUrl: propUrl || null });
+    this.hasNewInfoToSend = true;
+    console.log(`Spawned prop ${propId} (${id}) with ${hulls.length} convex hulls at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
+    return id;
+  }
+
+  /** Spawn a prop with the appropriate collider type based on PROP_DEFS.shape */
+  spawnPropBody(x, y, z, def, propId) {
+    if(!this.px || !this.pxScene) return null;
+    let half = def.half;
+
+    let bv = new this.px.PxVec3(x, y, z);
+    let bq = new this.px.PxQuat(0, 0, 0, 1);
+    let bpose = new this.px.PxTransform(bv, bq);
+    let body = this.pxPhysics.createRigidDynamic(bpose);
+
+    let sf = new this.px.PxShapeFlags(
+      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
+      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
+    );
+
+    let shape = null;
+    if(def.shape === 'sphere') {
+      let geom = new this.px.PxSphereGeometry(half);
+      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
+    } else if(def.shape === 'capsule') {
+      // PhysX capsule: radius + halfHeight along X axis
+      let geom = new this.px.PxCapsuleGeometry(half * 0.6, half * 0.4);
+      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
+    } else if(def.shape === 'hulls') {
+      let hulls = PROP_HULLS[propId];
+      if(hulls && hulls.length > 0) {
+        let id = this.spawnPropWithHulls(x, y, z, half, hulls, propId, def.url);
+        return id; // spawnPropWithHulls handles everything
+      }
+      // Fallback to box
+      let geom = new this.px.PxBoxGeometry(half, half, half);
+      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
+    } else {
+      // Default: box
+      let geom = new this.px.PxBoxGeometry(half, half, half);
+      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
+    }
+
+    if(shape) {
+      shape.setSimulationFilterData(this.pxFilterData);
+      body.attachShape(shape);
+    }
+
+    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
+    this.pxScene.addActor(body);
+    let id = "phys_" + (this.physBodyCounter++);
+    this.physBodies.push({ body, id, halfExtent: half, propId, propUrl: def.url || null });
+    this.hasNewInfoToSend = true;
+    console.log(`Spawned ${def.shape || 'box'} prop ${propId} (${id}) at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
+    return id;
+  }
+
+  // --- PhysGun: D6 joint with spring drives (keeps body dynamic for collisions) ---
+
+  physGunGrab(playerId, bodyId) {
+    if(!this.px || !this.pxScene) return;
+    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
+    if(!bodyEntry || bodyEntry.grabbedBy) return;
+
+    let body = bodyEntry.body;
+    body.wakeUp();
+
+    // Create an anchor (invisible kinematic body at the object's current position)
+    let pose = body.getGlobalPose();
+    let anchorPose = new this.px.PxTransform(pose.get_p(), pose.get_q());
+    let anchor = this.pxPhysics.createRigidDynamic(anchorPose);
+    anchor.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
+    let sf = new this.px.PxShapeFlags(0); // No collision shape needed
+    this.pxScene.addActor(anchor);
+
+    // Create D6 joint between anchor and body with spring drives
+    let identityPose = new this.px.PxTransform(this.px.PxIDENTITYEnum.PxIdentity);
+    let joint = this.px.D6JointCreate(this.pxPhysics, anchor, identityPose, body, identityPose);
+
+    // Free all axes, driven by springs
+    joint.setMotion(this.px.PxD6AxisEnum.eX, this.px.PxD6MotionEnum.eFREE);
+    joint.setMotion(this.px.PxD6AxisEnum.eY, this.px.PxD6MotionEnum.eFREE);
+    joint.setMotion(this.px.PxD6AxisEnum.eZ, this.px.PxD6MotionEnum.eFREE);
+    joint.setMotion(this.px.PxD6AxisEnum.eTWIST, this.px.PxD6MotionEnum.eFREE);
+    joint.setMotion(this.px.PxD6AxisEnum.eSWING1, this.px.PxD6MotionEnum.eFREE);
+    joint.setMotion(this.px.PxD6AxisEnum.eSWING2, this.px.PxD6MotionEnum.eFREE);
+
+    // Strong position + rotation spring drives
+    let linearDrive = new this.px.PxD6JointDrive(5000, 500, Infinity, true);
+    joint.setDrive(this.px.PxD6DriveEnum.eX, linearDrive);
+    joint.setDrive(this.px.PxD6DriveEnum.eY, linearDrive);
+    joint.setDrive(this.px.PxD6DriveEnum.eZ, linearDrive);
+
+    let angularDrive = new this.px.PxD6JointDrive(3000, 300, Infinity, true);
+    joint.setDrive(this.px.PxD6DriveEnum.eSLERP, angularDrive);
+
+    bodyEntry.grabbedBy = playerId;
+    bodyEntry.grabJoint = joint;
+    bodyEntry.grabAnchor = anchor;
+    this.hasNewInfoToSend = true;
+    console.log(`PhysGun grab: ${bodyId} by ${playerId}`);
+  }
+
+  physGunMove(playerId, bodyId, targetPos, targetQuat) {
+    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
+    if(!bodyEntry || bodyEntry.grabbedBy !== playerId || !bodyEntry.grabAnchor) return;
+
+    // Move the kinematic anchor to the target pose
+    this.pxTmpVec.set_x(targetPos.x);
+    this.pxTmpVec.set_y(targetPos.y);
+    this.pxTmpVec.set_z(targetPos.z);
+    this.pxTmpQuat.set_x(targetQuat.x);
+    this.pxTmpQuat.set_y(targetQuat.y);
+    this.pxTmpQuat.set_z(targetQuat.z);
+    this.pxTmpQuat.set_w(targetQuat.w);
+    this.pxTmpPose.set_p(this.pxTmpVec);
+    this.pxTmpPose.set_q(this.pxTmpQuat);
+    bodyEntry.grabAnchor.setKinematicTarget(this.pxTmpPose);
+
+    bodyEntry.body.wakeUp();
+    this.hasNewInfoToSend = true;
+  }
+
+  physGunRelease(playerId, bodyId) {
+    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
+    if(!bodyEntry || bodyEntry.grabbedBy !== playerId) return;
+
+    if(bodyEntry.grabJoint) bodyEntry.grabJoint.release();
+    if(bodyEntry.grabAnchor) {
+      this.pxScene.removeActor(bodyEntry.grabAnchor);
+    }
+    bodyEntry.grabJoint = null;
+    bodyEntry.grabAnchor = null;
+    bodyEntry.grabbedBy = null;
+    bodyEntry.body.wakeUp();
+    this.hasNewInfoToSend = true;
+    console.log(`PhysGun release: ${bodyId}`);
+  }
+
+  physGunFreeze(bodyId) {
+    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
+    if(!bodyEntry) return;
+
+    // Release grab if held
+    if(bodyEntry.grabJoint) bodyEntry.grabJoint.release();
+    if(bodyEntry.grabAnchor) this.pxScene.removeActor(bodyEntry.grabAnchor);
+    bodyEntry.grabJoint = null;
+    bodyEntry.grabAnchor = null;
+    bodyEntry.grabbedBy = null;
+
+    // Toggle frozen state
+    bodyEntry.frozen = !bodyEntry.frozen;
+    if(bodyEntry.frozen) {
+      bodyEntry.body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
+    } else {
+      bodyEntry.body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, false);
+      bodyEntry.body.wakeUp();
+    }
+    this.hasNewInfoToSend = true;
+    console.log(`PhysGun ${bodyEntry.frozen ? 'freeze' : 'unfreeze'}: ${bodyId}`);
+  }
+
+  // --- Constraint Tools ---
+
+  createJoint(data) {
+    if(!this.px || !this.pxScene) return;
+    let bodyA = this.physBodies.find(b => b.id === data.bodyIdA);
+    let bodyB = this.physBodies.find(b => b.id === data.bodyIdB);
+    if(!bodyA || !bodyB) return;
+
+    // Compute local frames from world positions
+    let poseA = bodyA.body.getGlobalPose();
+    let poseB = bodyB.body.getGlobalPose();
+
+    // World pos to local frame (simplified: just offset, no rotation transform)
+    let wpA = data.worldPosA;
+    let wpB = data.worldPosB;
+    let pA = poseA.get_p();
+    let pB = poseB.get_p();
+
+    let localA = new this.px.PxVec3(wpA.x - pA.get_x(), wpA.y - pA.get_y(), wpA.z - pA.get_z());
+    let localB = new this.px.PxVec3(wpB.x - pB.get_x(), wpB.y - pB.get_y(), wpB.z - pB.get_z());
+    let q = new this.px.PxQuat(0, 0, 0, 1);
+    let frameA = new this.px.PxTransform(localA, q);
+    let frameB = new this.px.PxTransform(localB, q);
+
+    let pxJoint = null;
+    let jointId = "joint_" + (this.jointCounter++);
+
+    if(data.jointType === "rope") {
+      pxJoint = this.px.DistanceJointCreate(this.pxPhysics, bodyA.body, frameA, bodyB.body, frameB);
+      if(pxJoint) {
+        let dist = Math.sqrt(
+          (wpA.x-wpB.x)**2 + (wpA.y-wpB.y)**2 + (wpA.z-wpB.z)**2
+        );
+        pxJoint.setMaxDistance(Math.max(dist, 0.5));
+        pxJoint.setDistanceJointFlag(this.px.PxDistanceJointFlagEnum.eMAX_DISTANCE_ENABLED, true);
+        pxJoint.setStiffness(100);
+        pxJoint.setDamping(10);
+        pxJoint.setDistanceJointFlag(this.px.PxDistanceJointFlagEnum.eSPRING_ENABLED, true);
+      }
+    } else if(data.jointType === "weld") {
+      pxJoint = this.px.FixedJointCreate(this.pxPhysics, bodyA.body, frameA, bodyB.body, frameB);
+      if(pxJoint) {
+        pxJoint.setBreakForce(100000, 100000);
+      }
+    } else if(data.jointType === "hinge") {
+      // For hinge, orient frame along the provided axis
+      let axis = data.axis || { x: 0, y: 1, z: 0 };
+      let axisVec = new this.px.PxVec3(axis.x, axis.y, axis.z);
+      let hingeQ = new this.px.PxQuat(0, axisVec);
+      let hingeFrameA = new this.px.PxTransform(localA, hingeQ);
+      let hingeFrameB = new this.px.PxTransform(localB, hingeQ);
+      pxJoint = this.px.RevoluteJointCreate(this.pxPhysics, bodyA.body, hingeFrameA, bodyB.body, hingeFrameB);
+    }
+
+    if(pxJoint) {
+      // Store local offsets for visual rendering
+      let lA = { x: wpA.x - pA.get_x(), y: wpA.y - pA.get_y(), z: wpA.z - pA.get_z() };
+      let lB = { x: wpB.x - pB.get_x(), y: wpB.y - pB.get_y(), z: wpB.z - pB.get_z() };
+      this.joints[jointId] = {
+        id: jointId, type: data.jointType,
+        bodyIdA: data.bodyIdA, bodyIdB: data.bodyIdB,
+        localOffsetA: lA, localOffsetB: lB,
+        pxJoint: pxJoint
+      };
+      bodyA.body.wakeUp();
+      bodyB.body.wakeUp();
+      this.hasNewInfoToSend = true;
+      console.log(`Created ${data.jointType} joint ${jointId} between ${data.bodyIdA} and ${data.bodyIdB}`);
+    }
+  }
+
+  removeJoint(jointId) {
+    let joint = this.joints[jointId];
+    if(!joint) return;
+    if(joint.pxJoint) joint.pxJoint.release();
+    delete this.joints[jointId];
+    this.hasNewInfoToSend = true;
+  }
+
+  /** Get serializable joint state for broadcasting */
+  getJointsState() {
+    let result = {};
+    for(let id in this.joints) {
+      let j = this.joints[id];
+      result[id] = { id: j.id, type: j.type, bodyIdA: j.bodyIdA, bodyIdB: j.bodyIdB, localOffsetA: j.localOffsetA, localOffsetB: j.localOffsetB };
+    }
+    return result;
   }
 
   /** Rebuild the PhysX static triangle mesh collider for a given chunk index */
@@ -618,6 +954,23 @@ class PartyServer {
       let pos = data.position || { x: 0, y: 5, z: 0 };
       let half = data.halfExtent || PHYS_CUBE_HALF;
       this.spawnPhysCube(pos.x, pos.y, pos.z, half);
+    } else if(data.type === "spawnprop"){
+      let pos = data.position || { x: 0, y: 5, z: 0 };
+      let propId = data.propId || "crate";
+      let def = PROP_DEFS[propId] || { half: PHYS_CUBE_HALF, shape: 'box' };
+      let id = this.spawnPropBody(pos.x, pos.y, pos.z, def, propId);
+    } else if(data.type === "physgun_grab"){
+      this.physGunGrab(sender.id, data.bodyId);
+    } else if(data.type === "physgun_move"){
+      this.physGunMove(sender.id, data.bodyId, data.targetPos, data.targetQuat);
+    } else if(data.type === "physgun_release"){
+      this.physGunRelease(sender.id, data.bodyId);
+    } else if(data.type === "physgun_freeze"){
+      this.physGunFreeze(data.bodyId);
+    } else if(data.type === "createjoint"){
+      this.createJoint(data);
+    } else if(data.type === "removejoint"){
+      this.removeJoint(data.jointId);
     } else if(data.type === "chat"){
       this.room.broadcast(JSON.stringify({
         type: "chat",

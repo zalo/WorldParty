@@ -15,6 +15,20 @@
     </head>
 
 
+    <style>
+        * {
+            -webkit-tap-highlight-color: transparent !important;
+            -webkit-touch-callout: none !important;
+            -webkit-user-select: none !important;
+            user-select: none !important;
+        }
+        body { touch-action: none; }
+        /* Prevent nipplejs joystick elements from being highlighted */
+        .back, .front, [data-nipple] {
+            -webkit-tap-highlight-color: transparent !important;
+            outline: none !important;
+        }
+    </style>
     <body style="margin:0px; background-color:rgb(255, 255, 255); user-select: none; overflow:hidden;">
         <h1 hidden></h1>
 
@@ -69,7 +83,7 @@
         <div id="info" style="position: absolute; top: 10px; left: 10px; z-index: 100;"></div>
         
         <div id="appbody" style="position: absolute;z-index: -100;">
-            <script type="module" src="./dist/main.js?v=17"></script>
+            <script type="module" src="./dist/main.js?v=31"></script>
         </div>
     </body>
 </html>

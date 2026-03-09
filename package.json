@@ -2,14 +2,14 @@
 	"scripts": {
 		"dev": "partykit dev --live",
 		"deploy": "partykit deploy",
-		"build": "esbuild ./src/main.js --bundle --minify --sourcemap --format=esm --outdir=./dist"
+		"build": "esbuild ./src/main.js --bundle --minify --sourcemap --format=esm --outdir=./dist --define:PARTYKIT_HOST='\"worldparty.zalo.partykit.dev\"'"
 	},
 	"dependencies": {
 		"esbuild": "^0.25.6",
 		"partysocket": "^1.1.4",
 		"three": "^0.183.2",
 		"three-bvh-csg": "^0.0.17",
-		"three-mesh-bvh": "^0.9.1"
+		"three-mesh-bvh": "^0.9.9"
 	},
 	"devDependencies": {
 		"partykit": "^0.0.115",

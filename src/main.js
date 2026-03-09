@@ -2,22 +2,28 @@
 /* global PARTYKIT_HOST */
 
 import * as THREE from 'three/webgpu';
-import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js';
 import World from './World.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 const { MeshoptDecoder } = await import( 'three/examples/jsm/libs/meshopt_decoder.module.js' );
 import { PlayerController } from './PlayerController.js';
-import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from 'three-bvh-csg';
-import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from 'three-mesh-bvh';
+import { Brush, Evaluator } from 'three-bvh-csg';
+import { MeshBVH, computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import PartySocket from "partysocket";
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { gzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
+
+import { CSGBrushTool } from './tools/CSGBrushTool.js';
+import { PhysGunTool } from './tools/PhysGunTool.js';
+import { RopeTool } from './tools/RopeTool.js';
+import { WeldTool } from './tools/WeldTool.js';
+import { HingeTool } from './tools/HingeTool.js';
+import { SpawnMenu } from './ui/SpawnMenu.js';
 
 
 /** The fundamental set up and animation structures for Simulation */
 export default class Main {
     constructor() {
-        // Intercept Main Window Errors
         window.realConsoleError = console.error;
         window.addEventListener('error', (event) => {
             let path = event.filename.split("/");
@@ -38,25 +44,15 @@ export default class Main {
             window.history.replaceState({}, "", `${window.location.pathname}?${this.queryParams.toString()}`);
         }
 
-        /** @type {PartySocket} - The connection object */
-        this.conn = new PartySocket({
-            host: PARTYKIT_HOST,
-            room: this.curRoom,
-        });
-
-        /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
+        this.conn = new PartySocket({ host: PARTYKIT_HOST, room: this.curRoom });
         this.players = {};
-
-        /** @type {Record<string, { id:string, url: string | null, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string }>} */
         this.models = {};
-
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
 
         // Construct the render world
         this.serverTickMs = 0;
         this.world = new World(this, this.isMobile());
 
-        // Configure Settings
         this.simulationParams = {
             firstPerson: true,
             gravity: - 80,
@@ -64,35 +60,46 @@ export default class Main {
             physicsSteps: 5,
             jumpVelocity: 20.0,
             mobile: this.isMobile(),
-
-            modelURL: "",
-            spawnModelFunc: this.spawnModel.bind(this),
-            spawnPhysCubeFunc: this.spawnPhysCube.bind(this),
-            showBrush: false,
         };
 
-        this.gui = new GUI();
-        this.gui.add(this.simulationParams, 'spawnPhysCubeFunc').name("Spawn Physics Cube");
-        this.gui.add(this.simulationParams, 'modelURL').name("Model URL (.glb)");
-        this.gui.add(this.simulationParams, 'spawnModelFunc').name("Spawn Model");
-        this.gui.add(this.simulationParams, 'showBrush').name("Show CSG Brush").onChange(v => {
-            this.brush2.visible = v;
-        });
-
-        this.environment = this.world.scene;
         this.raycaster = new THREE.Raycaster();
-        this.evaluator = new Evaluator();
 
-        // Chunk terrain setup
+        // Shared GLTF loader with Draco + Meshopt support
+        this.gltfLoader = new GLTFLoader();
+        let dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+        this.gltfLoader.setDRACOLoader(dracoLoader);
+        this.gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+
+        // Chunk terrain setup using BatchedMesh for minimal draw calls
+        const CHUNK_RESERVED_VERTS = 10000;
+        const CHUNK_RESERVED_INDICES = 30000; // ~3 indices per vertex for non-indexed triangle soup
+        const CHUNK_COUNT = 1000; // 10x10x10
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
 
-        this.chunks = [];
-        this.mesh = new THREE.Group();
+        // Install BatchedMesh BVH extension
+        THREE.BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
+        THREE.BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
+        THREE.BatchedMesh.prototype.raycast = acceleratedRaycast;
+
+        this.terrainBatch = new THREE.BatchedMesh(CHUNK_COUNT, CHUNK_COUNT * CHUNK_RESERVED_VERTS, CHUNK_COUNT * CHUNK_RESERVED_INDICES, this.defaultMaterial);
+        this.terrainBatch.perObjectFrustumCulled = true;
+        this.terrainBatch.castShadow = true;
+        this.terrainBatch.receiveShadow = true;
+
+        // Per-chunk metadata (bbox for broadphase, geoId/instanceId into the batch)
+        this.chunkGeoIds = [];
+        this.chunkInstanceIds = [];
+        this.chunkBBoxes = [];
+        // Keep Brush objects for CSG encoding (brushToBase64 needs them)
+        this.chunkBrushes = [];
+
         for( let x = 0; x < 10; x++ ) {
             for( let y = 0; y < 10; y++ ) {
                 for( let z = 0; z < 10; z++ ) {
-                    let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ).toNonIndexed () : new THREE.BoxGeometry( 0.1, 0.1, 0.1 ).toNonIndexed ();
+                    // BoxGeometry is indexed with position, normal, uv
+                    let geometry = y < 5 ? new THREE.BoxGeometry( 10.0, 10.0, 10.0 ) : new THREE.BoxGeometry( 0.1, 0.1, 0.1 );
                     let vertices = geometry.attributes.position.array;
                     for (let i = 0; i < vertices.length; i += 3) {
                         vertices[i    ] += x * 10.0 - 45.0;
@@ -100,31 +107,46 @@ export default class Main {
                         vertices[i + 2] += z * 10.0 - 45.0;
                     }
                     geometry.attributes.position.needsUpdate = true;
-                    let chunk = new Brush( geometry, this.defaultMaterial );
-                    chunk.updateMatrixWorld( true );
-                    chunk.bbox = bbox.clone().translate(
+                    geometry.computeBoundingBox();
+                    geometry.computeBoundingSphere();
+
+                    let geoId = this.terrainBatch.addGeometry(geometry, CHUNK_RESERVED_VERTS, CHUNK_RESERVED_INDICES);
+                    let instanceId = this.terrainBatch.addInstance(geoId);
+                    // Identity matrix - geometry is already in world space
+                    this.terrainBatch.setMatrixAt(instanceId, new THREE.Matrix4());
+
+                    let chunkBbox = bbox.clone().translate(
                         new THREE.Vector3( x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0 )
                     );
-                    chunk.prepareGeometry();
-                    chunk.receiveShadow = true;
-                    chunk.castShadow = true;
-                    this.mesh.add( chunk );
-                    this.chunks.push( chunk );
+
+                    // Keep a Brush for CSG serialization
+                    let brush = new Brush( geometry.clone(), this.defaultMaterial );
+                    brush.updateMatrixWorld( true );
+                    brush.prepareGeometry();
+
+                    this.chunkGeoIds.push(geoId);
+                    this.chunkInstanceIds.push(instanceId);
+                    this.chunkBBoxes.push(chunkBbox);
+                    this.chunkBrushes.push(brush);
                 }
             }
         }
-        this.mesh.receiveShadow = true;
-        this.mesh.updateMatrixWorld( true );
-        this.mesh.chunks = this.chunks;
+
+        // Compute BVH for all geometries in the batch
+        this.terrainBatch.computeBoundsTree();
+
+        // Legacy compat: this.chunks array used by CSGBrushTool and PlayerController
+        this.chunks = this.chunkBrushes;
 
         this.placeholderGeometry = new THREE.BoxGeometry( 2, 2, 2 );
         this.placeholderMaterial = new THREE.MeshBasicMaterial( { color: 0xffffff, wireframe: true } );
 
-        // Create the player controller
+        // Player controller
         this.player = new PlayerController(this.world.camera, this.simulationParams);
         this.world.scene.add( this.player );
         this.player.reset();
 
+        // CSG brush (owned by CSGBrushTool but created here for shared access)
         this.transparentMaterial = new THREE.MeshStandardMaterial( { color: 0x8080a8, roughness: 0.5, metalness: 0.5, transparent: true, opacity: 0.5, side: THREE.DoubleSide } );
         this.brush2 = new Brush( new THREE.BoxGeometry(2, 2, 2).toNonIndexed(), this.transparentMaterial );
         this.brush2.position.y = -0.5;
@@ -133,41 +155,86 @@ export default class Main {
         this.brush2.updateMatrixWorld();
         this.world.scene.add( this.brush2 );
 
-        this.world.scene.add( this.mesh );
+        this.world.scene.add( this.terrainBatch );
 
         this.modelsParent = new THREE.Group();
         this.world.scene.add( this.modelsParent );
 
-        // Physics body meshes (cubes from server-side PhysX)
-        // Snapshot interpolation: buffer prev/target states and lerp by elapsed time
+        // Physics body meshes + snapshot interpolation
         this.physBodyMeshes = {};
-        this.physBodySnapshots = {}; // { prev: {pos, quat, time}, target: {pos, quat, time} }
-        this.physSnapshotInterval = 1000 / 15; // 15Hz physics updates
+        this.physBodySnapshots = {};
+        this.physSnapshotInterval = 1000 / 15;
         this.physBodyGeometry = new THREE.BoxGeometry(1, 1, 1);
+        this.physBodySphereGeometry = new THREE.SphereGeometry(0.5, 16, 12);
+        this.physBodyCylinderGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 16);
+        this.physBodyConeGeometry = new THREE.ConeGeometry(0.5, 1, 16);
         this.physBodyMaterial = new THREE.MeshStandardMaterial( { color: 0xdd8844, roughness: 0.4, metalness: 0.3 } );
+        this.propColors = {
+            cube: 0xdd8844, barrel: 0x8B4513, crate: 0xDEB887, plank: 0xCD853F,
+            sphere: 0xCC4444, wheel: 0x555555, ramp: 0x888888, cone: 0xFF8C00,
+            cylinder: 0x6B8E23, bigcube: 0x8B0000, smallcube: 0xFFD700
+        };
         this.physBodiesParent = new THREE.Group();
         this.world.scene.add( this.physBodiesParent );
 
-        this.player.chunks = this.chunks;
+        // Joint visuals
+        this.jointVisuals = {};
+        this.jointLineMaterial = new THREE.LineBasicMaterial({ color: 0xffaa00 });
 
-        this.ePressed = false;
-        this.qPressed = false;
+        this.player.chunks = this.chunks; // Legacy: Brush array for CSGBrushTool
+        this.player.terrainBatch = this.terrainBatch;
+        this.player.chunkGeoIds = this.chunkGeoIds;
+        this.player.chunkBBoxes = this.chunkBBoxes;
+        this.player.physBodyMeshes = this.physBodyMeshes;
+
+        // --- Tool system ---
+        let csgTool = new CSGBrushTool();
+        let physGunTool = new PhysGunTool();
+        let ropeTool = new RopeTool();
+        let weldTool = new WeldTool();
+        let hingeTool = new HingeTool();
+
+        this.tools = [physGunTool, csgTool, ropeTool, weldTool, hingeTool];
+        this.spawnMenu = new SpawnMenu(this, this.tools);
+
+        // Initialize tools that need setup
+        csgTool.init(this);
+
+        // Spawn menu callback
+        this.spawnMenu.onPropSelected = (propId) => {
+            this.spawnProp(propId);
+        };
+
+        // Input handling: route to active tool
         window.addEventListener('pointerdown', (e) => {
+            if(this.spawnMenu.isOpen) return;
             if(this.player && this.player.controls && this.player.controls.isLocked) {
                 e.preventDefault();
+                let tool = this.spawnMenu.getCurrentTool();
                 if (e.button === 0) {
-                    this.qPressed = true;
-                }else if (e.button === 2) {
-                    this.ePressed = true;
+                    tool.onPrimaryFire(this);
+                } else if (e.button === 2) {
+                    tool.onSecondaryFire(this);
                 }
             }
         });
         window.addEventListener("wheel", (e) => {
             if(this.player && this.player.controls && this.player.controls.isLocked){
                 e.preventDefault();
-                this.brush2.scale.multiplyScalar(1.0 + (e.deltaY * -0.001));
+                this.spawnMenu.getCurrentTool().onScroll(this, e.deltaY);
             }
         }, { passive: false });
+        window.addEventListener('keydown', (e) => {
+            // Tool switching with number keys
+            if(e.code >= 'Digit1' && e.code <= 'Digit9') {
+                let idx = parseInt(e.code.charAt(5)) - 1;
+                if(idx < this.tools.length) this.spawnMenu.selectTool(idx);
+            }
+            // Q to toggle spawn menu
+            if(e.code === 'KeyQ') {
+                this.spawnMenu.toggle();
+            }
+        });
 
         this.frameNum = 0;
         this.lastUpdate = 0;
@@ -176,20 +243,13 @@ export default class Main {
 
     /** @param {MessageEvent} event - The message event */
     updateFromServer(event) {
-        /** @type {string} */
         let dataString = event.data;
-        if (!dataString.startsWith("{")) {
-            console.log(`Received -> ${dataString}`);
-            return;
-        }
+        if (!dataString.startsWith("{")) return;
 
         let data = JSON.parse(dataString);
         if (!data.type.includes("update")) return;
 
-        // Capture server profiling
-        if(data.serverTickMs !== undefined) {
-            this.serverTickMs = data.serverTickMs;
-        }
+        if(data.serverTickMs !== undefined) this.serverTickMs = data.serverTickMs;
 
         if(data.type === "fullupdate"){
             for (let  model in this. models) { this. models[ model].dirty = true; }
@@ -206,8 +266,19 @@ export default class Main {
                 );
                 this.players[player].mesh.visible = player !== this.conn.id;
                 this.world.scene.add(this.players[player].mesh);
+
+                // Name label
+                let label = document.createElement('div');
+                label.textContent = this.players[player].name || 'Player';
+                label.style.cssText = 'position:fixed;color:#fff;font:bold 12px monospace;background:rgba(0,0,0,0.5);padding:2px 6px;border-radius:3px;pointer-events:none;white-space:nowrap;z-index:1500;';
+                label.style.display = player !== this.conn.id ? 'block' : 'none';
+                document.body.appendChild(label);
+                this.players[player].label = label;
             } else {
                 Object.assign(this.players[player], data.players[player]);
+                if(this.players[player].label) {
+                    this.players[player].label.textContent = this.players[player].name || 'Player';
+                }
             }
             this.players[player].dirty = false;
         }
@@ -228,55 +299,75 @@ export default class Main {
                 }
             } else {
                 Object.assign(this.models[modelId], data.models[modelId]);
-
                 if (this.models[modelId].mesh && this.models[modelId].mesh.geometry == this.placeholderGeometry && this.models[modelId].url) {
-                    console.log("Loading model at:", this.models[modelId].url);
                     this.modelsParent.remove(this.models[modelId].mesh);
                     this.models[modelId].mesh = null;
                     this.loadModelMesh(modelId);
                 } else if (this.models[modelId].mesh) {
                     this.models[modelId].mesh.quaternion.set(
-                        this.models[modelId].quaternion.x,
-                        this.models[modelId].quaternion.y,
-                        this.models[modelId].quaternion.z,
-                        this.models[modelId].quaternion.w);
+                        this.models[modelId].quaternion.x, this.models[modelId].quaternion.y,
+                        this.models[modelId].quaternion.z, this.models[modelId].quaternion.w);
                     this.models[modelId].mesh.scale.set(
-                        this.models[modelId].scale.x,
-                        this.models[modelId].scale.y,
-                        this.models[modelId].scale.z);
-
-                    if (this.models[modelId].selectedBy === this.conn.id) {
-                        this.curSelected = this.models[modelId].mesh;
-                        this.curSelectedId = modelId;
-                    } else if (this.curSelected === this.models[modelId].mesh) {
-                        this.curSelected = null;
-                        this.curSelectedId = null;
-                    }
+                        this.models[modelId].scale.x, this.models[modelId].scale.y, this.models[modelId].scale.z);
                 }
             }
             this.models[modelId].dirty = false;
         }
 
-        // Update physics body snapshots for interpolation
+        // Update physics body snapshots
         if(data.physBodies) {
             let now = performance.now();
             for (let bodyId in data.physBodies) {
                 let bd = data.physBodies[bodyId];
                 if(!this.physBodyMeshes[bodyId]) {
                     let s = bd.halfExtent * 2;
-                    let mesh = new THREE.Mesh(this.physBodyGeometry, this.physBodyMaterial);
+                    // Create placeholder mesh immediately
+                    let color = this.propColors[bd.propId] || 0xdd8844;
+                    let mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 });
+                    let mesh = new THREE.Mesh(this.physBodyGeometry, mat);
                     mesh.scale.set(s, s, s);
                     mesh.castShadow = true;
                     mesh.receiveShadow = true;
                     this.physBodiesParent.add(mesh);
                     this.physBodyMeshes[bodyId] = mesh;
+
+                    // Load GLTF model if available, replace placeholder
+                    if(bd.propUrl) {
+                        this.gltfLoader.load(bd.propUrl, (gltf) => {
+                            let model = gltf.scene;
+                            // Fit model to physics body size
+                            let box = new THREE.Box3().setFromObject(model);
+                            let size = new THREE.Vector3();
+                            box.getSize(size);
+                            let maxDim = Math.max(size.x, size.y, size.z);
+                            let scale = (bd.halfExtent * 2) / (maxDim || 1);
+                            model.scale.set(scale, scale, scale);
+                            // Center model
+                            let center = new THREE.Vector3();
+                            box.getCenter(center);
+                            model.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
+                            // Wrap in group to apply transforms
+                            let group = new THREE.Group();
+                            group.add(model);
+                            group.castShadow = true;
+                            group.receiveShadow = true;
+                            // Enable shadows on all children
+                            model.traverse(c => { if(c.isMesh) { c.castShadow = true; c.receiveShadow = true; }});
+                            // Replace placeholder
+                            this.physBodiesParent.remove(mesh);
+                            this.physBodiesParent.add(group);
+                            // Copy current position/rotation from placeholder
+                            group.position.copy(mesh.position);
+                            group.quaternion.copy(mesh.quaternion);
+                            this.physBodyMeshes[bodyId] = group;
+                        });
+                    }
                 }
                 let newPos = new THREE.Vector3(bd.position.x, bd.position.y, bd.position.z);
                 let newQuat = new THREE.Quaternion(bd.quaternion.x, bd.quaternion.y, bd.quaternion.z, bd.quaternion.w);
                 let snap = this.physBodySnapshots[bodyId];
                 let mesh = this.physBodyMeshes[bodyId];
                 if(!snap) {
-                    // First snapshot: set both prev and target to the same value
                     this.physBodySnapshots[bodyId] = {
                         prev:   { pos: newPos.clone(), quat: newQuat.clone(), time: now },
                         target: { pos: newPos, quat: newQuat, time: now }
@@ -284,13 +375,44 @@ export default class Main {
                     mesh.position.copy(newPos);
                     mesh.quaternion.copy(newQuat);
                 } else {
-                    // Set prev to current rendered position (not old target) for seamless blend
                     snap.prev.pos.copy(mesh.position);
                     snap.prev.quat.copy(mesh.quaternion);
                     snap.prev.time = now;
                     snap.target.pos.copy(newPos);
                     snap.target.quat.copy(newQuat);
                     snap.target.time = now + this.physSnapshotInterval;
+                }
+
+                // Highlight frozen bodies
+                if(bd.frozen && mesh.material) {
+                    mesh.material.color.setHex(0x8888ff);
+                } else if(mesh.material) {
+                    mesh.material.color.setHex(0xdd8844);
+                }
+            }
+        }
+
+        // Update joint visuals
+        if(data.joints) {
+            for(let jointId in data.joints) {
+                let j = data.joints[jointId];
+                if(!this.jointVisuals[jointId]) {
+                    let geom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+                    let line = new THREE.Line(geom, this.jointLineMaterial);
+                    line.frustumCulled = false;
+                    this.world.scene.add(line);
+                    this.jointVisuals[jointId] = { line, data: j };
+                } else {
+                    this.jointVisuals[jointId].data = j;
+                }
+            }
+            // Remove joints no longer in data (on full update)
+            if(data.type === "fullupdate") {
+                for(let jointId in this.jointVisuals) {
+                    if(!data.joints[jointId]) {
+                        this.world.scene.remove(this.jointVisuals[jointId].line);
+                        delete this.jointVisuals[jointId];
+                    }
                 }
             }
         }
@@ -299,12 +421,11 @@ export default class Main {
         if(data.type === "fullupdate"){
             for (let player in this.players) {
                 if (this.players[player].dirty) {
-                    console.log(`Player ${this.players[player].name} has disconnected!`);
                     this.world.scene.remove(this.players[player].mesh);
+                    if(this.players[player].label) this.players[player].label.remove();
                     delete this.players[player];
                 }
             }
-
             for (let model in this.models) {
                 if (this.models[model].dirty) {
                     this.world.scene.remove(this.models[model].mesh);
@@ -315,9 +436,7 @@ export default class Main {
     }
 
     loadModelMesh(modelId) {
-        let loader = new GLTFLoader();
-        loader.setMeshoptDecoder(MeshoptDecoder);
-        loader.load(this.models[modelId].url, (gltf) => {
+        this.gltfLoader.load(this.models[modelId].url, (gltf) => {
             gltf.scene.position.copy(this.models[modelId].position);
             gltf.scene.quaternion.copy(this.models[modelId].quaternion);
             gltf.scene.scale.copy(this.models[modelId].scale);
@@ -325,27 +444,18 @@ export default class Main {
             this.modelsParent.add(gltf.scene);
             this.models[modelId].mesh = gltf.scene;
             this.models[modelId].mesh.name = modelId;
-            if(gltf.scene.children[0] && gltf.scene.children[0].children[0]) {
-                gltf.scene.children[0].children[0].name = modelId;
-            }
         });
     }
 
     createPlaceholderMesh(modelId) {
         this.models[modelId].mesh = new THREE.Mesh( this.placeholderGeometry, this.placeholderMaterial );
         this.models[modelId].mesh.position.set(
-            this.models[modelId].position.x,
-            this.models[modelId].position.y,
-            this.models[modelId].position.z);
+            this.models[modelId].position.x, this.models[modelId].position.y, this.models[modelId].position.z);
         this.models[modelId].mesh.quaternion.set(
-            this.models[modelId].quaternion.x,
-            this.models[modelId].quaternion.y,
-            this.models[modelId].quaternion.z,
-            this.models[modelId].quaternion.w);
+            this.models[modelId].quaternion.x, this.models[modelId].quaternion.y,
+            this.models[modelId].quaternion.z, this.models[modelId].quaternion.w);
         this.models[modelId].mesh.scale.set(
-            this.models[modelId].scale.x,
-            this.models[modelId].scale.y,
-            this.models[modelId].scale.z);
+            this.models[modelId].scale.x, this.models[modelId].scale.y, this.models[modelId].scale.z);
         this.models[modelId].mesh.name = modelId;
         this.modelsParent.add(this.models[modelId].mesh);
     }
@@ -359,15 +469,11 @@ export default class Main {
         let physicsSteps = this.simulationParams.physicsSteps;
         for ( let i = 0; i < physicsSteps; i ++ ) {
             this.player.updatePlayer( Math.min( this.deltaTime/1000.0, 0.1 ) / physicsSteps );
-            if( i == 0 && this.player.tappedAction) { this.qPressed = true; }
         }
 
-        // Place the CSG brush in front of the camera
-        this.world.camera.getWorldDirection(this.brush2.position).normalize().multiplyScalar(6).add(this.player.position);
-        let lookTarget = new THREE.Vector3().copy(this.world.camera.position);
-        lookTarget.y = this.brush2.position.y;
-        this.brush2.lookAt(lookTarget);
-        this.brush2.updateMatrixWorld();
+        // Update active tool
+        let tool = this.spawnMenu.getCurrentTool();
+        tool.update(this, this.deltaTime / 1000.0);
 
         // Send position updates at 30Hz
         if(this.lastUpdate + 1000/30 < timeMS) {
@@ -380,34 +486,27 @@ export default class Main {
                     z: this.player.position.z
                 }
             }));
-
-            if(this.curSelected){
-                this.conn.send(JSON.stringify({
-                    type: "model",
-                    id: this.curSelectedId,
-                    position: {
-                        x: this.brush2.position.x,
-                        y: this.brush2.position.y,
-                        z: this.brush2.position.z
-                    },
-                    quaternion: {
-                        x: this.brush2.quaternion.x,
-                        y: this.brush2.quaternion.y,
-                        z: this.brush2.quaternion.z,
-                        w: this.brush2.quaternion.w
-                    },
-                    scale: {
-                        x: this.brush2.scale.x,
-                        y: this.brush2.scale.y,
-                        z: this.brush2.scale.z
-                    }
-                }));
-            }
         }
 
-        // Interpolate remote player positions
+        // Interpolate remote player positions + update name labels
         for (let player in this.players) {
-            this.players[player].mesh.position.lerp(new THREE.Vector3(this.players[player].position.x, this.players[player].position.y, this.players[player].position.z), 0.1);
+            let p = this.players[player];
+            p.mesh.position.lerp(new THREE.Vector3(p.position.x, p.position.y, p.position.z), 0.1);
+
+            // Project name label to screen
+            if(p.label && p.mesh.visible) {
+                let labelPos = new THREE.Vector3().copy(p.mesh.position);
+                labelPos.y += 1.5;
+                labelPos.project(this.world.camera);
+                let x = (labelPos.x * 0.5 + 0.5) * window.innerWidth;
+                let y = (-labelPos.y * 0.5 + 0.5) * window.innerHeight;
+                if(labelPos.z < 1) {
+                    p.label.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
+                    p.label.style.display = 'block';
+                } else {
+                    p.label.style.display = 'none';
+                }
+            }
         }
 
         // Interpolate model positions
@@ -417,69 +516,7 @@ export default class Main {
             }
         }
 
-        if ( this.ePressed || this.qPressed ) {
-
-            if(!this.curSelected){
-                // Raycast to select models
-                this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.world.camera);
-                let intersects = this.raycaster.intersectObjects(this.modelsParent.children, true);
-
-                if (intersects.length > 0) {
-                    let hit = intersects[0];
-                    this.conn.send(JSON.stringify({
-                        type: "select",
-                        id: hit.object.name
-                    }));
-                    this.ePressed = false;
-                    this.qPressed = false;
-                    return;
-                }
-            }else{
-                this.conn.send(JSON.stringify({
-                    type: "deselect",
-                    id: this.curSelectedId
-                }));
-                this.ePressed = false;
-                this.qPressed = false;
-                return;
-            }
-
-            // CSG terrain operation
-            let box1 = new THREE.Box3();
-            box1.setFromObject(this.brush2);
-
-            for(let i = 0; i < this.chunks.length; i++) {
-                if (box1.intersectsBox(this.chunks[i].bbox)) {
-                    this.conn.send(JSON.stringify({
-                        type: "manifoldcsgoperation",
-                        index: i,
-                        originalChunk: this.brushToBase64(this.chunks[i]),
-                        brush: this.brushToBase64(this.brush2),
-                        operation: this.ePressed ? ADDITION : SUBTRACTION,
-                        brushPosition: {
-                            x: this.brush2.position.x,
-                            y: this.brush2.position.y,
-                            z: this.brush2.position.z
-                        },
-                        brushQuaternion: {
-                            x: this.brush2.quaternion.x,
-                            y: this.brush2.quaternion.y,
-                            z: this.brush2.quaternion.z,
-                            w: this.brush2.quaternion.w
-                        },
-                        brushScale: {
-                            x: this.brush2.scale.x,
-                            y: this.brush2.scale.y,
-                            z: this.brush2.scale.z
-                        }
-                    }));
-                }
-            }
-            this.ePressed = false;
-            this.qPressed = false;
-        }
-
-        // Interpolate physics bodies between snapshots (render one interval behind)
+        // Interpolate physics bodies
         let now = performance.now();
         for(let bodyId in this.physBodySnapshots) {
             let snap = this.physBodySnapshots[bodyId];
@@ -487,17 +524,34 @@ export default class Main {
             if(!mesh || !snap) continue;
             let duration = snap.target.time - snap.prev.time;
             if(duration <= 0) duration = this.physSnapshotInterval;
-            // t goes from 0 (at prev time) to 1 (at target time)
-            let t = (now - snap.prev.time) / duration;
-            t = Math.max(0, Math.min(t, 1.0));
+            let t = Math.max(0, Math.min((now - snap.prev.time) / duration, 1.0));
             mesh.position.lerpVectors(snap.prev.pos, snap.target.pos, t);
             mesh.quaternion.slerpQuaternions(snap.prev.quat, snap.target.quat, t);
+        }
+
+        // Update joint visuals (lines between attachment points on connected bodies)
+        let _offsetVec = new THREE.Vector3();
+        for(let jointId in this.jointVisuals) {
+            let jv = this.jointVisuals[jointId];
+            let meshA = this.physBodyMeshes[jv.data.bodyIdA];
+            let meshB = this.physBodyMeshes[jv.data.bodyIdB];
+            if(meshA && meshB) {
+                let positions = jv.line.geometry.attributes.position.array;
+                // Compute world-space attachment points: body position + local offset rotated by body quaternion
+                let oA = jv.data.localOffsetA || {x:0,y:0,z:0};
+                _offsetVec.set(oA.x, oA.y, oA.z).applyQuaternion(meshA.quaternion).add(meshA.position);
+                positions[0] = _offsetVec.x; positions[1] = _offsetVec.y; positions[2] = _offsetVec.z;
+                let oB = jv.data.localOffsetB || {x:0,y:0,z:0};
+                _offsetVec.set(oB.x, oB.y, oB.z).applyQuaternion(meshB.quaternion).add(meshB.position);
+                positions[3] = _offsetVec.x; positions[4] = _offsetVec.y; positions[5] = _offsetVec.z;
+                jv.line.geometry.attributes.position.needsUpdate = true;
+            }
         }
 
         this.world.renderPipeline.render();
         this.world.stats.update();
 
-        // Display server tick profiling
+        // Server tick display
         if(!this.serverTickDisplay) {
             this.serverTickDisplay = document.createElement('div');
             this.serverTickDisplay.style.cssText = 'position:fixed;top:0;right:0;padding:4px 8px;background:rgba(0,0,0,0.7);color:#0f0;font:12px monospace;z-index:10000;';
@@ -508,57 +562,29 @@ export default class Main {
         this.frameNum++;
     }
 
-    spawnPhysCube(){
-        this.conn.send(JSON.stringify({
-            type: "spawnphyscube",
-            position: {
-                x: this.brush2.position.x,
-                y: this.brush2.position.y,
-                z: this.brush2.position.z
-            },
-            halfExtent: 0.5
-        }));
-    }
+    spawnProp(propId) {
+        // Compute spawn position in front of camera
+        let spawnPos = new THREE.Vector3();
+        this.world.camera.getWorldDirection(spawnPos).normalize().multiplyScalar(6).add(this.player.position);
 
-    spawnModel(){
-        let url = this.simulationParams.modelURL.trim();
-        if(!url) return;
-
-        if(url === "reset"){
-            this.conn.send(JSON.stringify({ type: "reset" }));
-            return;
+        if(propId === 'cube') {
+            this.conn.send(JSON.stringify({
+                type: "spawnphyscube",
+                position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
+                halfExtent: 0.5
+            }));
+        } else {
+            this.conn.send(JSON.stringify({
+                type: "spawnprop",
+                propId: propId,
+                position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
+                quaternion: { x: 0, y: 0, z: 0, w: 1 }
+            }));
         }
-
-        this.conn.send(JSON.stringify({
-            type: "model",
-            id: ""+Math.floor(Math.random() * 1000000),
-            url: url,
-            position: {
-                x: this.brush2.position.x,
-                y: this.brush2.position.y,
-                z: this.brush2.position.z
-            },
-            quaternion: {
-                x: this.brush2.quaternion.x,
-                y: this.brush2.quaternion.y,
-                z: this.brush2.quaternion.z,
-                w: this.brush2.quaternion.w
-            },
-            scale: {
-                x: this.brush2.scale.x,
-                y: this.brush2.scale.y,
-                z: this.brush2.scale.z
-            },
-            selectedBy: ""
-        }));
     }
 
-    b64encode(input) {
-        return btoa(encodeURIComponent(input));
-    }
-    b64decode(input) {
-        return decodeURIComponent(atob(input));
-    }
+    b64encode(input) { return btoa(encodeURIComponent(input)); }
+    b64decode(input) { return decodeURIComponent(atob(input)); }
 
     brushToBase64(brush) {
         let compressedPositions = gzipSync(new Uint8Array(brush.geometry.attributes.position.array.buffer));
@@ -573,24 +599,31 @@ export default class Main {
             unbase64CompressedPositions[b] = binaryString.charCodeAt(b);
         }
         let decompressedPositions = new Float32Array(gunzipSync(unbase64CompressedPositions).buffer);
-        let newGeometry = this.chunks[chunkIndex].geometry.clone();
+        let numVerts = decompressedPositions.length / 3;
+        let newGeometry = new THREE.BufferGeometry();
         newGeometry.setAttribute('position', new THREE.BufferAttribute(decompressedPositions, 3));
-        newGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length / 3 * 2), 2));
+        newGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(numVerts * 2), 2));
         newGeometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length), 3));
-        newGeometry.index = null;
-        newGeometry.attributes.position.needsUpdate = true;
-        newGeometry.attributes.uv.needsUpdate = true;
-        newGeometry.attributes.normal.needsUpdate = true;
-        newGeometry.needsUpdate = true;
+        // Add sequential index to match BatchedMesh's indexed mode
+        let indices = new Uint32Array(numVerts);
+        for(let i = 0; i < numVerts; i++) indices[i] = i;
+        newGeometry.setIndex(new THREE.BufferAttribute(indices, 1));
         newGeometry.computeBoundingBox();
         newGeometry.computeBoundingSphere();
         newGeometry.computeVertexNormals();
-        newGeometry.boundsTree = null;
-        this.chunks[chunkIndex].geometry = newGeometry;
-        this.chunks[chunkIndex].prepareGeometry();
+
+        // Update the BatchedMesh geometry
+        let geoId = this.chunkGeoIds[chunkIndex];
+        this.terrainBatch.setGeometryAt(geoId, newGeometry);
+        // Recompute BVH for this geometry
+        this.terrainBatch.computeBoundsTree(geoId);
+
+        // Update the Brush copy for CSG encoding (non-indexed for position serialization)
+        let brushGeom = newGeometry.toNonIndexed();
+        this.chunkBrushes[chunkIndex].geometry = brushGeom;
+        this.chunkBrushes[chunkIndex].prepareGeometry();
     }
 
-    // Log Errors as <div>s over the main viewport
     fakeError(...args) {
         if (args.length > 0 && args[0]) { this.display(JSON.stringify(args[0])); }
         window.realConsoleError.apply(console, arguments);

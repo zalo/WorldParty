@@ -22,7 +22,15 @@ export class PlayerController extends THREE.Group {
                 maxNumberOfNipples: 2,
                 mode: 'dynamic',
                 size: 150,
-                color: 'gray'
+                color: 'gray',
+                catchDistance: 75,
+                fadeTime: 100
+            });
+            // Force cleanup stale joysticks periodically
+            this.nipple.on('removed', () => {
+                document.querySelectorAll('.back, .front').forEach(el => {
+                    if(!el.closest('[data-nipple]')) el.remove();
+                });
             });
         } else {
             this.controls = new PointerLockControls(camera, document.body);
@@ -100,7 +108,7 @@ export class PlayerController extends THREE.Group {
     }
 
     updatePlayer(delta) {
-        if (!this.chunks) return;
+        if (!this.terrainBatch) return;
 
         this.walkMovement.x = 0;
         this.walkMovement.y = 0;
@@ -206,49 +214,60 @@ export class PlayerController extends THREE.Group {
         globalBox.min.addScalar(- capsuleInfo.radius);
         globalBox.max.addScalar(capsuleInfo.radius);
 
-        for( let i = 0; i < this.chunks.length; i++ ) {
-            if (this.chunks[i].matrixWorld.dirty) {
-                this.chunks[i].updateMatrixWorld();
-            }
-            if(!this.chunks[i].geometry.boundsTree) { continue; }
-            if(!globalBox.intersectsBox(this.chunks[i].bbox)) {
-                continue;
-            }
+        // Collision against terrain BatchedMesh BVHs
+        // Geometry is in world space (identity matrix), so no transform needed
+        let boundsTrees = this.terrainBatch ? this.terrainBatch.boundsTrees : null;
+        if(boundsTrees) {
+            for( let i = 0; i < this.chunkGeoIds.length; i++ ) {
+                let geoId = this.chunkGeoIds[i];
+                let bvh = boundsTrees[geoId];
+                if(!bvh) continue;
+                if(!globalBox.intersectsBox(this.chunkBBoxes[i])) continue;
 
-            this.tempBox.makeEmpty();
-            this.tempMat.copy(this.chunks[i].matrixWorld).invert();
+                this.tempBox.makeEmpty();
+                this.tempBox.expandByPoint(this.tempSegment.start);
+                this.tempBox.expandByPoint(this.tempSegment.end);
+                this.tempBox.min.addScalar(- capsuleInfo.radius);
+                this.tempBox.max.addScalar(capsuleInfo.radius);
 
-            // Transform capsule into chunk local space
-            this.tempSegment.start.applyMatrix4(this.tempMat);
-            this.tempSegment.end  .applyMatrix4(this.tempMat);
+                bvh.shapecast({
+                    intersectsBounds: box => box.intersectsBox(this.tempBox),
+                    intersectsTriangle: tri => {
+                        const triPoint = this.tempVector;
+                        const capsulePoint = this.tempVector2;
 
-            this.tempBox.expandByPoint(this.tempSegment.start);
-            this.tempBox.expandByPoint(this.tempSegment.end);
-            this.tempBox.min.addScalar(- capsuleInfo.radius);
-            this.tempBox.max.addScalar(capsuleInfo.radius);
+                        const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
+                        if (distance < capsuleInfo.radius) {
+                            const depth = capsuleInfo.radius - distance;
+                            const direction = capsulePoint.sub(triPoint).normalize();
 
-            /** @type {MeshBVH} */
-            let bvh = this.chunks[i].geometry.boundsTree;
-            bvh.shapecast({
-                intersectsBounds: box => box.intersectsBox(this.tempBox),
-                intersectsTriangle: tri => {
-                    const triPoint = this.tempVector;
-                    const capsulePoint = this.tempVector2;
-
-                    const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
-                    if (distance < capsuleInfo.radius) {
-                        const depth = capsuleInfo.radius - distance;
-                        const direction = capsulePoint.sub(triPoint).normalize();
-
-                        this.tempSegment.start.addScaledVector(direction, depth);
-                        this.tempSegment.end.addScaledVector(direction, depth);
+                            this.tempSegment.start.addScaledVector(direction, depth);
+                            this.tempSegment.end.addScaledVector(direction, depth);
+                        }
                     }
-                }
-            });
+                });
+            }
+        }
 
-            // Transform back to world space
-            this.tempSegment.start.applyMatrix4(this.chunks[i].matrixWorld);
-            this.tempSegment.end.applyMatrix4(this.chunks[i].matrixWorld);
+        // Simple sphere collision against physics body meshes
+        if(this.physBodyMeshes) {
+            let playerCenter = this.tempSegment.start.clone();
+            playerCenter.y += 0.5; // capsule center
+            let playerRadius = capsuleInfo.radius + 0.1;
+            for(let bodyId in this.physBodyMeshes) {
+                let mesh = this.physBodyMeshes[bodyId];
+                if(!mesh) continue;
+                let bodyRadius = Math.max(mesh.scale.x, mesh.scale.y, mesh.scale.z) * 0.5;
+                let combinedRadius = playerRadius + bodyRadius;
+                let diff = playerCenter.clone().sub(mesh.position);
+                let dist = diff.length();
+                if(dist < combinedRadius && dist > 0.001) {
+                    let pushDir = diff.normalize();
+                    let pushAmount = combinedRadius - dist;
+                    this.tempSegment.start.addScaledVector(pushDir, pushAmount);
+                    this.tempSegment.end.addScaledVector(pushDir, pushAmount);
+                }
+            }
         }
 
         // Resolve final position from collision
