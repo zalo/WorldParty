@@ -201,7 +201,7 @@ class PartyServer {
     this.lastPhysTime = now;
     if(dt <= 0) return;
 
-    // Update player kinematic actors with velocity-based kinematic target
+    // Update player kinematic actors — compute velocity and project target forward
     for(let playerId in this.players) {
       let kin = this.playerKinematics[playerId];
       if(!kin) continue;
@@ -213,39 +213,48 @@ class PartyServer {
 
       // Compute velocity from position delta
       let prev = player._prevPhysPos || { x: newX, y: newY, z: newZ };
+      let vx = 0, vy = 0, vz = 0;
       if(dt > 0) {
-        let vx = (newX - prev.x) / dt;
-        let vy = (newY - prev.y) / dt;
-        let vz = (newZ - prev.z) / dt;
-        let speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
-
-        // Wake up sleeping bodies near a moving player
-        if(speed > 0.5) {
-          for(let b of this.physBodies) {
-            if(b.body.isSleeping()) {
-              let bpose = b.body.getGlobalPose();
-              let bp = bpose.get_p();
-              let dx = bp.get_x() - newX;
-              let dy = bp.get_y() - newY;
-              let dz = bp.get_z() - newZ;
-              let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-              if(dist < 3.0) {
-                b.body.wakeUp();
-              }
-            }
-          }
-        }
+        vx = (newX - prev.x) / dt;
+        vy = (newY - prev.y) / dt;
+        vz = (newZ - prev.z) / dt;
       }
       player._prevPhysPos = { x: newX, y: newY, z: newZ };
+      player._velocity = { x: vx, y: vy, z: vz };
+      let speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
 
-      this.pxTmpVec.set_x(newX);
-      this.pxTmpVec.set_y(newY);
-      this.pxTmpVec.set_z(newZ);
+      // Project kinematic target forward by one timestep using velocity
+      // This ensures PhysX sees the kinematic moving at the player's speed,
+      // transferring proper momentum to dynamic bodies on contact
+      let targetX = newX + vx * dt;
+      let targetY = newY + vy * dt;
+      let targetZ = newZ + vz * dt;
+
+      this.pxTmpVec.set_x(targetX);
+      this.pxTmpVec.set_y(targetY);
+      this.pxTmpVec.set_z(targetZ);
       this.pxTmpQuat.set_x(0); this.pxTmpQuat.set_y(0);
       this.pxTmpQuat.set_z(0); this.pxTmpQuat.set_w(1);
       this.pxTmpPose.set_p(this.pxTmpVec);
       this.pxTmpPose.set_q(this.pxTmpQuat);
       kin.setKinematicTarget(this.pxTmpPose);
+
+      // Wake up sleeping bodies near a moving player
+      if(speed > 0.5) {
+        for(let b of this.physBodies) {
+          if(b.body.isSleeping()) {
+            let bpose = b.body.getGlobalPose();
+            let bp = bpose.get_p();
+            let dx = bp.get_x() - newX;
+            let dy = bp.get_y() - newY;
+            let dz = bp.get_z() - newZ;
+            let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            if(dist < 3.0) {
+              b.body.wakeUp();
+            }
+          }
+        }
+      }
     }
 
     this.pxScene.simulate(dt);
@@ -801,7 +810,8 @@ class PartyServer {
     // Create a kinematic capsule for this player in the physics scene
     if(this.pxPhysics && this.pxScene) {
       let material = this.pxPhysics.createMaterial(0.5, 0.5, 0.0);
-      let capsuleGeom = new this.px.PxCapsuleGeometry(0.5, 0.5);
+      // Slightly larger than client capsule (0.5 radius) so players push objects
+      let capsuleGeom = new this.px.PxCapsuleGeometry(0.65, 0.6);
       let shapeFlags = new this.px.PxShapeFlags(
         this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
         this.px.PxShapeFlagEnum.eSIMULATION_SHAPE

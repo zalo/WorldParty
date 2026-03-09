@@ -8,7 +8,8 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 const { MeshoptDecoder } = await import( 'three/examples/jsm/libs/meshopt_decoder.module.js' );
 import { PlayerController } from './PlayerController.js';
 import { Brush, Evaluator } from 'three-bvh-csg';
-import { MeshBVH, computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { MeshBVH, computeBoundsTree, disposeBoundsTree, computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import PartySocket from "partysocket";
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { gzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
@@ -78,7 +79,9 @@ export default class Main {
         let bbox = new THREE.Box3( new THREE.Vector3( -5.0, -5.0, -5.0 ), new THREE.Vector3( 5.0, 5.0, 5.0 ) );
         this.defaultMaterial = new THREE.MeshStandardMaterial( { color: 0x808080, roughness: 0.5, metalness: 0.5 } );
 
-        // Install BatchedMesh BVH extension
+        // Install BVH extensions on geometry prototypes
+        THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+        THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
         THREE.BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
         THREE.BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
         THREE.BatchedMesh.prototype.raycast = acceleratedRaycast;
@@ -168,6 +171,18 @@ export default class Main {
         this.physBodySphereGeometry = new THREE.SphereGeometry(0.5, 16, 12);
         this.physBodyCylinderGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 16);
         this.physBodyConeGeometry = new THREE.ConeGeometry(0.5, 1, 16);
+
+        // BVH cache per prop type for player collision (propId/key -> MeshBVH)
+        this.propBVHCache = {};
+        // Pre-compute BVH for primitive geometries
+        this.physBodyGeometry.computeBoundsTree();
+        this.propBVHCache['cube'] = this.physBodyGeometry.boundsTree;
+        this.physBodySphereGeometry.computeBoundsTree();
+        this.propBVHCache['_sphere'] = this.physBodySphereGeometry.boundsTree;
+        this.physBodyCylinderGeometry.computeBoundsTree();
+        this.propBVHCache['_cylinder'] = this.physBodyCylinderGeometry.boundsTree;
+        this.physBodyConeGeometry.computeBoundsTree();
+        this.propBVHCache['_cone'] = this.physBodyConeGeometry.boundsTree;
         this.physBodyMaterial = new THREE.MeshStandardMaterial( { color: 0xdd8844, roughness: 0.4, metalness: 0.3 } );
         this.propColors = {
             cube: 0xdd8844, barrel: 0x8B4513, crate: 0xDEB887, plank: 0xCD853F,
@@ -331,8 +346,13 @@ export default class Main {
                     this.physBodiesParent.add(mesh);
                     this.physBodyMeshes[bodyId] = mesh;
 
+                    // Assign BVH for collision — primitives use cached BVH
+                    mesh.userData.collisionBVH = this.propBVHCache['cube'];
+                    mesh.userData.halfExtent = bd.halfExtent;
+
                     // Load GLTF model if available, replace placeholder
                     if(bd.propUrl) {
+                        let propCacheKey = bd.propId || bd.propUrl;
                         this.gltfLoader.load(bd.propUrl, (gltf) => {
                             let model = gltf.scene;
                             // Fit model to physics body size
@@ -351,12 +371,40 @@ export default class Main {
                             group.add(model);
                             group.castShadow = true;
                             group.receiveShadow = true;
-                            // Enable shadows on all children
                             model.traverse(c => { if(c.isMesh) { c.castShadow = true; c.receiveShadow = true; }});
+
+                            // Compute and cache BVH for this prop type
+                            if(!this.propBVHCache[propCacheKey]) {
+                                // Merge all child meshes into one geometry for BVH
+                                let geoms = [];
+                                model.updateMatrixWorld(true);
+                                model.traverse(c => {
+                                    if(c.isMesh && c.geometry) {
+                                        let g = c.geometry.clone();
+                                        g.applyMatrix4(c.matrixWorld);
+                                        if(!g.index) {
+                                            let idx = new Uint32Array(g.attributes.position.count);
+                                            for(let j = 0; j < idx.length; j++) idx[j] = j;
+                                            g.setIndex(new THREE.BufferAttribute(idx, 1));
+                                        }
+                                        geoms.push(g);
+                                    }
+                                });
+                                if(geoms.length > 0) {
+                                    let merged = mergeGeometries(geoms);
+                                    if(merged) {
+                                        merged.computeBoundsTree();
+                                        this.propBVHCache[propCacheKey] = merged.boundsTree;
+                                    }
+                                }
+                            }
+
+                            group.userData.collisionBVH = this.propBVHCache[propCacheKey] || null;
+                            group.userData.halfExtent = bd.halfExtent;
+
                             // Replace placeholder
                             this.physBodiesParent.remove(mesh);
                             this.physBodiesParent.add(group);
-                            // Copy current position/rotation from placeholder
                             group.position.copy(mesh.position);
                             group.quaternion.copy(mesh.quaternion);
                             this.physBodyMeshes[bodyId] = group;
@@ -563,15 +611,38 @@ export default class Main {
     }
 
     spawnProp(propId) {
-        // Compute spawn position in front of camera
+        // Raycast from camera to find a surface to place the prop on
+        this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.world.camera);
+
+        // Collect all collidable objects: terrain batch + physics body meshes
+        let targets = [this.terrainBatch];
+        for(let id in this.physBodyMeshes) {
+            if(this.physBodyMeshes[id]) targets.push(this.physBodyMeshes[id]);
+        }
+
+        let intersects = this.raycaster.intersectObjects(targets, true);
         let spawnPos = new THREE.Vector3();
-        this.world.camera.getWorldDirection(spawnPos).normalize().multiplyScalar(6).add(this.player.position);
+        let halfExtent = 0.5;
+
+        // Look up prop-specific half extent from registry
+        let propDefs = { cube: 0.5, barrel: 0.5, crate: 0.5, chest: 0.4, bench: 0.5, ball: 0.3, can: 0.15, pot: 0.3, tower: 0.6, board: 0.3, sword: 0.2 };
+        if(propDefs[propId] !== undefined) halfExtent = propDefs[propId];
+
+        if(intersects.length > 0) {
+            let hit = intersects[0];
+            let normal = hit.face ? hit.face.normal.clone().normalize() : new THREE.Vector3(0, 1, 0);
+            // Place prop at hit point, offset by half-extent along surface normal
+            spawnPos.copy(hit.point).addScaledVector(normal, halfExtent + 0.05);
+        } else {
+            // Fallback: place in front of camera
+            this.world.camera.getWorldDirection(spawnPos).normalize().multiplyScalar(6).add(this.player.position);
+        }
 
         if(propId === 'cube') {
             this.conn.send(JSON.stringify({
                 type: "spawnphyscube",
                 position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
-                halfExtent: 0.5
+                halfExtent: halfExtent
             }));
         } else {
             this.conn.send(JSON.stringify({

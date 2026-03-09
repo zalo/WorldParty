@@ -8,7 +8,7 @@
 		"esbuild": "^0.25.6",
 		"partysocket": "^1.1.4",
 		"three": "^0.183.2",
-		"three-bvh-csg": "^0.0.17",
+		"three-bvh-csg": "^0.0.18",
 		"three-mesh-bvh": "^0.9.9"
 	},
 	"devDependencies": {
