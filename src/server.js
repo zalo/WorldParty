@@ -632,10 +632,12 @@ class PartyServer {
     for(let [axis, boundary, nx, ny, nz] of faces) {
       if(nx < 0 || nx > 9 || ny < 0 || ny > 9 || nz < 0 || nz > 9) continue;
 
-      // Only count as grounded if adjacent chunk is unmodified default solid terrain
-      // (y < 5 and no stored manifold = original 10x10x10 solid block)
+      // Grounded if adjacent chunk has terrain — either unmodified default solid
+      // (y < 5, no stored manifold) or modified with a stored manifold.
+      // Only skip if adjacent is an empty air chunk (y >= 5 with no manifold).
       let ni = nx * 100 + ny * 10 + nz;
-      if(ny >= 5 || this.chunks[ni]) continue; // modified or air chunk — not reliable ground
+      let hasAdjacentTerrain = (ny < 5 && !this.chunks[ni]) || (this.chunks[ni] && this.chunks[ni].manifold);
+      if(!hasAdjacentTerrain) continue;
 
       // Does any vertex of the island touch this face?
       for(let i = 0; i < numVerts; i++) {
