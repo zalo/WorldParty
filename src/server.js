@@ -609,6 +609,45 @@ class PartyServer {
     return result;
   }
 
+  /** Check if a decomposed island is grounded — touching a chunk face where
+   *  the adjacent chunk has unmodified default solid terrain.
+   *  Islands touching solid ground stay as terrain; floating islands become physics bodies. */
+  isIslandGrounded(island, chunkIndex) {
+    let z0 = chunkIndex % 10, y0 = Math.floor(chunkIndex / 10) % 10, x0 = Math.floor(chunkIndex / 100);
+    let mesh = island.getMesh();
+    let verts = mesh.vertProperties;
+    let numVerts = verts.length / 3;
+    let eps = 0.15;
+
+    // 6 faces: [vertexAxis, boundaryValue, neighborX, neighborY, neighborZ]
+    let faces = [
+      [0, x0*10-50, x0-1, y0,   z0  ],  // -X
+      [0, x0*10-40, x0+1, y0,   z0  ],  // +X
+      [1, y0*10-50, x0,   y0-1, z0  ],  // -Y (bottom)
+      [1, y0*10-40, x0,   y0+1, z0  ],  // +Y (top)
+      [2, z0*10-50, x0,   y0,   z0-1],  // -Z
+      [2, z0*10-40, x0,   y0,   z0+1],  // +Z
+    ];
+
+    for(let [axis, boundary, nx, ny, nz] of faces) {
+      if(nx < 0 || nx > 9 || ny < 0 || ny > 9 || nz < 0 || nz > 9) continue;
+
+      // Only count as grounded if adjacent chunk is unmodified default solid terrain
+      // (y < 5 and no stored manifold = original 10x10x10 solid block)
+      let ni = nx * 100 + ny * 10 + nz;
+      if(ny >= 5 || this.chunks[ni]) continue; // modified or air chunk — not reliable ground
+
+      // Does any vertex of the island touch this face?
+      for(let i = 0; i < numVerts; i++) {
+        if(Math.abs(verts[i * 3 + axis] - boundary) < eps) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   /** Cook a triangle mesh with lazy SDF for dynamic fragment collision.
    *  Lazy SDF allocates the grid but computes voxel values on demand during
    *  collision detection, avoiding the expensive upfront bake. */
@@ -1084,104 +1123,67 @@ class PartyServer {
       manifoldA.delete();
       manifoldB.delete();
 
-      // --- Cross-chunk decomposition ---
-      // Union the modified chunk with all face-adjacent modified neighbors,
-      // decompose the union to find globally-disconnected pieces, then
-      // intersect each island back into per-chunk boundaries.
-      let ci = data.index;
-      let z0 = ci % 10, y0 = Math.floor(ci / 10) % 10, x0 = Math.floor(ci / 100);
-      let affectedIndices = [ci];
-      let affectedManifolds = [resultManifold];
-      let offsets = [[-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1]];
-      for(let [dx,dy,dz] of offsets) {
-        let nx = x0+dx, ny = y0+dy, nz = z0+dz;
-        if(nx<0||nx>9||ny<0||ny>9||nz<0||nz>9) continue;
-        let ni = nx*100 + ny*10 + nz;
-        if(this.chunks[ni] && this.chunks[ni].manifold) {
-          affectedIndices.push(ni);
-          affectedManifolds.push(this.chunks[ni].manifold);
-        }
-      }
-
-      // Union all affected chunks into one combined manifold
-      let combined = affectedManifolds[0];
-      let combinedIsNew = false;
-      for(let i = 1; i < affectedManifolds.length; i++) {
-        let next = combined.add(affectedManifolds[i]);
-        if(combinedIsNew) combined.delete();
-        combined = next;
-        combinedIsNew = true;
-      }
-
-      // Decompose the combined manifold to find globally-disconnected pieces
-      let islands = combined.decompose();
+      // Decompose this chunk into connected components
+      let islands = resultManifold.decompose();
 
       if(islands.length <= 1) {
-        // Single connected piece — no fragmentation needed
+        // Single connected piece — keep as terrain
         for(let i = 0; i < islands.length; i++) islands[i].delete();
-        if(combinedIsNew) combined.delete();
-        // Just update the modified chunk
-        this.chunks[ci].data = this.manifoldToBase64(resultManifold);
-        this.chunks[ci].manifold = resultManifold;
-        this.rebuildChunkPhysics(ci);
-        this.needsUpdate[""+ci] = true;
+        this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
+        this.chunks[data.index].manifold = resultManifold;
       } else {
-        // Multiple islands — sort by volume, split back into chunk boundaries
+        // Multiple islands — check which are grounded vs floating
         let islandInfo = [];
         for(let i = 0; i < islands.length; i++) {
           islandInfo.push({ idx: i, volume: islands[i].volume() });
         }
         islandInfo.sort((a, b) => b.volume - a.volume);
 
-        let fragmentCount = 0;
-        for(let c = 0; c < affectedIndices.length; c++) {
-          let aci = affectedIndices[c];
-          let az = aci%10, ay = Math.floor(aci/10)%10, ax = Math.floor(aci/100);
-          let cubeBounds = this.manifold.Manifold.cube([10,10,10], true).translate(
-            ax*10-45, ay*10-45, az*10-45
-          );
+        // Largest island is always terrain; smaller islands need a ground check
+        let terrainIslands = [islands[islandInfo[0].idx]];
+        let floatingIslands = [];
 
-          // Largest island clipped to this chunk's bounds → new chunk terrain
-          let chunkTerrain = null;
-          try {
-            chunkTerrain = islands[islandInfo[0].idx].intersect(cubeBounds);
-            if(chunkTerrain.volume() < 0.001) { chunkTerrain.delete(); chunkTerrain = null; }
-          } catch(e) { chunkTerrain = null; }
-
-          if(chunkTerrain) {
-            // Replace chunk manifold (delete old neighbor manifold if it's a neighbor)
-            if(c > 0 && this.chunks[aci] && this.chunks[aci].manifold) {
-              this.chunks[aci].manifold.delete();
-            }
-            this.chunks[aci].data = this.manifoldToBase64(chunkTerrain);
-            this.chunks[aci].manifold = chunkTerrain;
+        for(let j = 1; j < islandInfo.length; j++) {
+          let island = islands[islandInfo[j].idx];
+          if(islandInfo[j].volume < 0.01) {
+            island.delete(); // skip tiny slivers
+            continue;
           }
-
-          // Smaller islands clipped to this chunk's bounds → fragments
-          for(let j = 1; j < islandInfo.length; j++) {
-            if(islandInfo[j].volume < 0.01) continue;
-            let fragInChunk = null;
-            try {
-              fragInChunk = islands[islandInfo[j].idx].intersect(cubeBounds);
-              if(fragInChunk.volume() < 0.01) { fragInChunk.delete(); fragInChunk = null; }
-            } catch(e) { fragInChunk = null; }
-            if(fragInChunk) {
-              this.spawnChunkFragment(fragInChunk); // takes ownership
-              fragmentCount++;
-            }
+          if(this.isIslandGrounded(island, data.index)) {
+            terrainIslands.push(island);
+          } else {
+            floatingIslands.push(island);
           }
-
-          cubeBounds.delete();
-          this.rebuildChunkPhysics(aci);
-          this.needsUpdate[""+aci] = true;
         }
 
-        // Cleanup
-        for(let i = 0; i < islands.length; i++) islands[i].delete();
-        if(combinedIsNew) combined.delete();
+        // Union all grounded islands into the chunk terrain manifold
+        let terrainManifold = terrainIslands[0];
+        if(terrainIslands.length > 1) {
+          terrainManifold = terrainIslands[0].add(terrainIslands[1]);
+          terrainIslands[0].delete();
+          terrainIslands[1].delete();
+          for(let i = 2; i < terrainIslands.length; i++) {
+            let next = terrainManifold.add(terrainIslands[i]);
+            terrainManifold.delete();
+            terrainManifold = next;
+            terrainIslands[i].delete();
+          }
+        }
+
+        this.chunks[data.index].data = this.manifoldToBase64(terrainManifold);
+        this.chunks[data.index].manifold = terrainManifold;
+
+        // Physicalize floating fragments
+        for(let frag of floatingIslands) {
+          this.spawnChunkFragment(frag); // takes ownership and deletes
+        }
+
         resultManifold.delete();
-        console.log(`Cross-chunk decompose (${affectedIndices.length} chunks): ${islands.length} islands, ${fragmentCount} fragments spawned`);
+        console.log(`Decomposed chunk ${data.index}: ${islands.length} islands, ${terrainIslands.length} grounded, ${floatingIslands.length} floating`);
       }
+
+      this.rebuildChunkPhysics(data.index);
+      this.needsUpdate[""+data.index] = true;
     } else if(data.type === "model"){
       if(!this.models[data.id]){
         this.models[data.id] = {
