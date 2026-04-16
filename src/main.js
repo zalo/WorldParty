@@ -444,11 +444,14 @@ export default class Main {
                     snap.target.time = now + this.physSnapshotInterval;
                 }
 
-                // Highlight frozen bodies
-                if(bd.frozen && mesh.material) {
-                    mesh.material.color.setHex(0x8888ff);
-                } else if(mesh.material) {
-                    mesh.material.color.setHex(0xdd8844);
+                // Highlight frozen bodies (skip terrain fragments — they keep their own material)
+                if(!bd.meshData && mesh.material) {
+                    if(bd.frozen) {
+                        mesh.material.color.setHex(0x8888ff);
+                    } else {
+                        let color = this.propColors[bd.propId] || 0xdd8844;
+                        mesh.material.color.setHex(color);
+                    }
                 }
             }
         }
@@ -725,7 +728,8 @@ export default class Main {
         geometry.computeVertexNormals();
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
-        return new THREE.Mesh(geometry, this.defaultMaterial);
+        let mat = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.5 });
+        return new THREE.Mesh(geometry, mat);
     }
 
     fakeError(...args) {

@@ -770,6 +770,116 @@ class PartyServer {
     fragmentManifold.delete();
   }
 
+  /** Re-check face-adjacent modified chunks for cross-boundary disconnected pieces.
+   *  After a CSG op on chunkIndex, compose each neighbor's manifold with chunkIndex's
+   *  manifold temporarily, then decompose. Any island in the neighbor that is NOT
+   *  connected to the combined mass becomes a fragment. */
+  crossChunkDecompose(chunkIndex) {
+    let z0 = chunkIndex % 10;
+    let y0 = Math.floor(chunkIndex / 10) % 10;
+    let x0 = Math.floor(chunkIndex / 100);
+
+    // 6 face-adjacent neighbors
+    let neighbors = [
+      [x0-1,y0,z0],[x0+1,y0,z0],
+      [x0,y0-1,z0],[x0,y0+1,z0],
+      [x0,y0,z0-1],[x0,y0,z0+1]
+    ];
+
+    for(let [nx,ny,nz] of neighbors) {
+      if(nx < 0 || nx > 9 || ny < 0 || ny > 9 || nz < 0 || nz > 9) continue;
+      let ni = nx * 100 + ny * 10 + nz;
+      let neighbor = this.chunks[ni];
+      if(!neighbor || !neighbor.manifold) continue; // Only check CSG-modified neighbors
+
+      // Compose the neighbor with the current chunk to test global connectivity
+      let combined;
+      try {
+        combined = neighbor.manifold.add(this.chunks[chunkIndex].manifold);
+      } catch(e) {
+        continue; // Skip if compose fails
+      }
+      let combinedIslands = combined.decompose();
+      combined.delete();
+
+      // If the combined mesh is 1 island, the neighbor is still connected — skip
+      if(combinedIslands.length <= 1) {
+        for(let i = 0; i < combinedIslands.length; i++) combinedIslands[i].delete();
+        continue;
+      }
+
+      // Multiple islands when combined means there are disconnected pieces.
+      // Re-decompose the NEIGHBOR alone to find its local islands.
+      let neighborIslands = neighbor.manifold.decompose();
+      if(neighborIslands.length <= 1) {
+        // Neighbor is one piece locally, but globally disconnected from the current chunk.
+        // This means the entire neighbor piece is floating — but that's only true if it's
+        // not connected to other chunks either. Just check: does the neighbor island overlap
+        // with any combined island that does NOT contain the current chunk?
+
+        // Simpler approach: clip each combined island to the neighbor's bounds.
+        // If a combined island lives entirely within the neighbor's bounds and is not
+        // connected to the current chunk, it should be a fragment.
+        let nCube = this.manifold.Manifold.cube([10, 10, 10], true).translate(
+          nx * 10.0 - 45.0, ny * 10.0 - 45.0, nz * 10.0 - 45.0
+        );
+
+        // Sort combined islands by volume (largest = main terrain)
+        let cInfo = [];
+        for(let i = 0; i < combinedIslands.length; i++) {
+          cInfo.push({ idx: i, volume: combinedIslands[i].volume() });
+        }
+        cInfo.sort((a, b) => b.volume - a.volume);
+
+        // The largest combined island is the main connected terrain.
+        // Any smaller island, clipped to neighbor bounds, becomes a fragment.
+        let newNeighborManifold = null;
+        for(let j = 0; j < cInfo.length; j++) {
+          let clipped;
+          try {
+            clipped = combinedIslands[cInfo[j].idx].intersect(nCube);
+          } catch(e) {
+            combinedIslands[cInfo[j].idx].delete();
+            continue;
+          }
+          let clippedVol = clipped.volume();
+          if(clippedVol < 0.01) {
+            clipped.delete();
+            combinedIslands[cInfo[j].idx].delete();
+            continue;
+          }
+          if(j === 0) {
+            // Largest island's portion in this neighbor = new neighbor chunk
+            newNeighborManifold = clipped;
+          } else {
+            // Smaller islands clipped to neighbor bounds = fragments
+            this.spawnChunkFragment(clipped);
+          }
+          combinedIslands[cInfo[j].idx].delete();
+        }
+
+        nCube.delete();
+
+        if(newNeighborManifold) {
+          neighbor.data = this.manifoldToBase64(newNeighborManifold);
+          neighbor.manifold = newNeighborManifold;
+          this.rebuildChunkPhysics(ni);
+          this.needsUpdate[""+ni] = true;
+          console.log(`Cross-chunk decompose: updated neighbor chunk ${ni}`);
+        }
+
+        for(let i = 0; i < neighborIslands.length; i++) neighborIslands[i].delete();
+        continue;
+      }
+
+      // Neighbor already has multiple local islands — normal decompose handles it.
+      // But we should still run decompose on it since the current chunk changed.
+      // The neighbor's own CSG message will handle this, so skip.
+      for(let i = 0; i < neighborIslands.length; i++) neighborIslands[i].delete();
+      for(let i = 0; i < combinedIslands.length; i++) combinedIslands[i].delete();
+    }
+  }
+
   /** Rebuild the PhysX static triangle mesh collider for a given chunk index */
   rebuildChunkPhysics(chunkIndex) {
     if(!this.px || !this.pxScene || !this.chunks[chunkIndex]) return;
@@ -1124,6 +1234,13 @@ class PartyServer {
 
       this.rebuildChunkPhysics(data.index);
       this.needsUpdate[""+data.index] = true;
+
+      // Cross-chunk decomposition: re-check face-adjacent modified chunks.
+      // When a CSG brush straddles chunk boundaries, the adjacent chunk may
+      // have pieces that are now disconnected because terrain they were
+      // resting on (in this chunk) has been removed. Re-compose each
+      // adjacent chunk with this chunk to test global connectivity.
+      this.crossChunkDecompose(data.index);
     } else if(data.type === "model"){
       if(!this.models[data.id]){
         this.models[data.id] = {
