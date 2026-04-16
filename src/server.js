@@ -156,7 +156,7 @@ class PartyServer {
       let pose = b.body.getGlobalPose();
       let p = pose.get_p();
       let q = pose.get_q();
-      result[b.id] = {
+      let entry = {
         id: b.id,
         position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
         quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
@@ -165,6 +165,8 @@ class PartyServer {
         propUrl: b.propUrl || null,
         frozen: b.frozen || false
       };
+      if(b.meshData) entry.meshData = b.meshData;
+      result[b.id] = entry;
     }
     return result;
   }
@@ -178,7 +180,7 @@ class PartyServer {
         let pose = b.body.getGlobalPose();
         let p = pose.get_p();
         let q = pose.get_q();
-        result[b.id] = {
+        let entry = {
           id: b.id,
           position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
           quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
@@ -187,6 +189,8 @@ class PartyServer {
           propUrl: b.propUrl || null,
           frozen: b.frozen || false
         };
+        if(b.meshData) entry.meshData = b.meshData;
+        result[b.id] = entry;
         hasAny = true;
       }
     }
@@ -605,6 +609,167 @@ class PartyServer {
     return result;
   }
 
+  /** Cook a triangle mesh with lazy SDF for dynamic fragment collision.
+   *  Lazy SDF allocates the grid but computes voxel values on demand during
+   *  collision detection, avoiding the expensive upfront bake. */
+  cookTriangleMeshSDF(vertices, indices) {
+    let numVerts = vertices.length / 3;
+    let numTris = indices.length / 3;
+    if(numVerts < 4 || numTris < 1) return null;
+
+    // Compute bounding box for SDF grid spacing
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for(let i = 0; i < numVerts; i++) {
+      let x = vertices[i*3], y = vertices[i*3+1], z = vertices[i*3+2];
+      minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z);
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z);
+    }
+
+    let longestAxis = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+    if(longestAxis < 0.01) return null;
+    // ~24 voxels along longest axis — coarse enough for fast init
+    let spacing = longestAxis / 24;
+
+    let inputVerts = new this.px.PxArray_PxVec3(numVerts);
+    for(let i = 0; i < numVerts; i++) {
+      inputVerts.set(i, new this.px.PxVec3(vertices[i*3], vertices[i*3+1], vertices[i*3+2]));
+    }
+    let inputTris = new this.px.PxArray_PxU32(indices.length);
+    for(let i = 0; i < indices.length; i++) {
+      inputTris.set(i, indices[i]);
+    }
+
+    let pointsData = new this.px.PxBoundedData();
+    pointsData.set_count(numVerts);
+    pointsData.set_stride(12);
+    pointsData.set_data(inputVerts.begin());
+
+    let trisData = new this.px.PxBoundedData();
+    trisData.set_count(numTris);
+    trisData.set_stride(12);
+    trisData.set_data(inputTris.begin());
+
+    let desc = new this.px.PxTriangleMeshDesc();
+    desc.set_points(pointsData);
+    desc.set_triangles(trisData);
+
+    // Lazy SDF: dense grid, values computed on demand (no upfront baking)
+    let sdfDesc = new this.px.PxSDFDesc();
+    sdfDesc.set_spacing(spacing);
+    sdfDesc.set_subgridSize(0);                    // dense SDF (required for lazy mode)
+    sdfDesc.set_lazyEvaluation(true);              // skip baking — compute on demand
+    sdfDesc.set_numThreadsForSdfConstruction(1);   // WASM has no thread support
+    desc.set_sdfDesc(sdfDesc);
+
+    let triMesh = this.px.CreateTriangleMesh(this.pxCookingParams, desc);
+
+    // Cleanup temporary WASM objects
+    inputVerts.__destroy__();
+    inputTris.__destroy__();
+    pointsData.__destroy__();
+    trisData.__destroy__();
+    desc.__destroy__();
+    sdfDesc.__destroy__();
+
+    if(!triMesh) {
+      console.warn(`SDF cook failed for fragment (${numVerts} verts, ${numTris} tris)`);
+    } else {
+      console.log(`SDF lazy init: ${numTris} tris, spacing=${spacing.toFixed(2)}`);
+    }
+    return triMesh;
+  }
+
+  /** Spawn a dynamic rigid body from a disconnected terrain fragment manifold.
+   *  Uses lazy SDF triangle mesh collider, similar to PhysicsWorkshop props. */
+  spawnChunkFragment(fragmentManifold) {
+    if(!this.px || !this.pxScene) { fragmentManifold.delete(); return; }
+
+    let mesh = fragmentManifold.getMesh();
+    let vertProps = mesh.vertProperties; // Float32Array, 3 floats per vert
+    let triVerts = mesh.triVerts;        // Uint32Array, 3 indices per tri
+    let numVerts = vertProps.length / 3;
+    let numTris = triVerts.length / 3;
+
+    if(numVerts < 4 || numTris < 1) { fragmentManifold.delete(); return; }
+
+    // Compute centroid for body position
+    let cx = 0, cy = 0, cz = 0;
+    for(let i = 0; i < numVerts; i++) {
+      cx += vertProps[i*3];
+      cy += vertProps[i*3+1];
+      cz += vertProps[i*3+2];
+    }
+    cx /= numVerts;
+    cy /= numVerts;
+    cz /= numVerts;
+
+    // Local-space vertices (centred on centroid)
+    let localVerts = new Float32Array(vertProps.length);
+    for(let i = 0; i < numVerts; i++) {
+      localVerts[i*3]   = vertProps[i*3]   - cx;
+      localVerts[i*3+1] = vertProps[i*3+1] - cy;
+      localVerts[i*3+2] = vertProps[i*3+2] - cz;
+    }
+    let localIndices = new Uint32Array(triVerts);
+
+    // Cook SDF triangle mesh (lazy — no upfront bake)
+    let triMesh = this.cookTriangleMeshSDF(localVerts, localIndices);
+    if(!triMesh) {
+      console.warn('Failed to cook SDF for chunk fragment, skipping');
+      fragmentManifold.delete();
+      return;
+    }
+
+    // Create PhysX shape + dynamic body
+    let triGeom = new this.px.PxTriangleMeshGeometry(triMesh);
+    let sf = new this.px.PxShapeFlags(
+      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
+      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
+    );
+    let shape = this.pxPhysics.createShape(triGeom, this.pxMaterial, true, sf);
+    shape.setSimulationFilterData(this.pxFilterData);
+
+    let bv = new this.px.PxVec3(cx, cy, cz);
+    let bq = new this.px.PxQuat(0, 0, 0, 1);
+    let bpose = new this.px.PxTransform(bv, bq);
+    let body = this.pxPhysics.createRigidDynamic(bpose);
+    body.attachShape(shape);
+    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
+    this.pxScene.addActor(body);
+
+    // Encode local-space mesh for client replication (non-indexed triangle soup, gzip+base64)
+    let nonIndexedPositions = new Float32Array(numTris * 9);
+    for(let t = 0; t < numTris; t++) {
+      let i0 = localIndices[t*3], i1 = localIndices[t*3+1], i2 = localIndices[t*3+2];
+      nonIndexedPositions[t*9  ] = localVerts[i0*3];   nonIndexedPositions[t*9+1] = localVerts[i0*3+1]; nonIndexedPositions[t*9+2] = localVerts[i0*3+2];
+      nonIndexedPositions[t*9+3] = localVerts[i1*3];   nonIndexedPositions[t*9+4] = localVerts[i1*3+1]; nonIndexedPositions[t*9+5] = localVerts[i1*3+2];
+      nonIndexedPositions[t*9+6] = localVerts[i2*3];   nonIndexedPositions[t*9+7] = localVerts[i2*3+1]; nonIndexedPositions[t*9+8] = localVerts[i2*3+2];
+    }
+    let compressed = gzipSync(new Uint8Array(nonIndexedPositions.buffer));
+    let meshDataStr = this.b64encode(String.fromCharCode.apply(null, compressed));
+
+    // Bounding half-extent for client placeholder sizing
+    let halfX = 0, halfY = 0, halfZ = 0;
+    for(let i = 0; i < numVerts; i++) {
+      halfX = Math.max(halfX, Math.abs(localVerts[i*3]));
+      halfY = Math.max(halfY, Math.abs(localVerts[i*3+1]));
+      halfZ = Math.max(halfZ, Math.abs(localVerts[i*3+2]));
+    }
+    let halfExtent = Math.max(halfX, halfY, halfZ);
+
+    let id = "phys_" + (this.physBodyCounter++);
+    this.physBodies.push({
+      body, id, halfExtent,
+      meshData: meshDataStr,
+      isFragment: true
+    });
+    this.hasNewInfoToSend = true;
+    console.log(`Spawned chunk fragment ${id}: ${numVerts} verts, ${numTris} tris at (${cx.toFixed(1)}, ${cy.toFixed(1)}, ${cz.toFixed(1)})`);
+
+    fragmentManifold.delete();
+  }
+
   /** Rebuild the PhysX static triangle mesh collider for a given chunk index */
   rebuildChunkPhysics(chunkIndex) {
     if(!this.px || !this.pxScene || !this.chunks[chunkIndex]) return;
@@ -918,8 +1083,45 @@ class PartyServer {
 
       manifoldA.delete();
       manifoldB.delete();
-      this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
-      this.chunks[data.index].manifold = resultManifold;
+
+      // Decompose into connected components — disconnected pieces become physics fragments
+      let islands = resultManifold.decompose();
+
+      if(islands.length <= 1) {
+        // Single connected piece — keep as terrain chunk (existing behaviour)
+        // Delete decomposed copies and keep the original
+        for(let i = 0; i < islands.length; i++) islands[i].delete();
+        this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
+        this.chunks[data.index].manifold = resultManifold;
+      } else {
+        // Sort islands by volume (largest first)
+        let islandInfo = [];
+        for(let i = 0; i < islands.length; i++) {
+          islandInfo.push({ idx: i, volume: islands[i].volume() });
+        }
+        islandInfo.sort((a, b) => b.volume - a.volume);
+
+        // Largest piece stays as the static terrain chunk
+        let largestIdx = islandInfo[0].idx;
+        this.chunks[data.index].data = this.manifoldToBase64(islands[largestIdx]);
+        this.chunks[data.index].manifold = islands[largestIdx];
+
+        // Smaller pieces become dynamic rigid bodies with lazy SDF colliders
+        for(let j = 1; j < islandInfo.length; j++) {
+          let fragIdx = islandInfo[j].idx;
+          if(islandInfo[j].volume < 0.01) {
+            // Skip tiny slivers
+            islands[fragIdx].delete();
+            continue;
+          }
+          this.spawnChunkFragment(islands[fragIdx]);
+          // spawnChunkFragment takes ownership and deletes the manifold
+        }
+
+        resultManifold.delete();
+        console.log(`Decomposed chunk ${data.index}: ${islands.length} islands, ${islandInfo.length - 1} fragments spawned`);
+      }
+
       this.rebuildChunkPhysics(data.index);
       this.needsUpdate[""+data.index] = true;
     } else if(data.type === "model"){

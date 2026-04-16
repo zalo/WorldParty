@@ -335,6 +335,18 @@ export default class Main {
             for (let bodyId in data.physBodies) {
                 let bd = data.physBodies[bodyId];
                 if(!this.physBodyMeshes[bodyId]) {
+                  if(bd.meshData) {
+                    // Terrain fragment: create mesh from server-provided geometry
+                    let fragMesh = this.createFragmentMesh(bd.meshData);
+                    fragMesh.castShadow = true;
+                    fragMesh.receiveShadow = true;
+                    this.physBodiesParent.add(fragMesh);
+                    this.physBodyMeshes[bodyId] = fragMesh;
+                    // BVH for player collision
+                    fragMesh.geometry.computeBoundsTree();
+                    fragMesh.userData.collisionBVH = fragMesh.geometry.boundsTree;
+                    fragMesh.userData.halfExtent = bd.halfExtent;
+                  } else {
                     let s = bd.halfExtent * 2;
                     // Create placeholder mesh immediately
                     let color = this.propColors[bd.propId] || 0xdd8844;
@@ -410,6 +422,7 @@ export default class Main {
                             this.physBodyMeshes[bodyId] = group;
                         });
                     }
+                  }
                 }
                 let newPos = new THREE.Vector3(bd.position.x, bd.position.y, bd.position.z);
                 let newQuat = new THREE.Quaternion(bd.quaternion.x, bd.quaternion.y, bd.quaternion.z, bd.quaternion.w);
@@ -695,6 +708,26 @@ export default class Main {
         this.chunkBrushes[chunkIndex].prepareGeometry();
     }
 
+    /** Create a Three.js mesh from server-provided fragment geometry (gzip+base64 triangle soup) */
+    createFragmentMesh(meshData) {
+        let binaryString = this.b64decode(meshData.normalize("NFC"));
+        let compressed = new Uint8Array(binaryString.length);
+        for(let b = 0; b < binaryString.length; b++) {
+            compressed[b] = binaryString.charCodeAt(b);
+        }
+        let positions = new Float32Array(gunzipSync(compressed).buffer);
+        let numVerts = positions.length / 3;
+        let geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        let indices = new Uint32Array(numVerts);
+        for(let i = 0; i < numVerts; i++) indices[i] = i;
+        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+        geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+        return new THREE.Mesh(geometry, this.defaultMaterial);
+    }
+
     fakeError(...args) {
         if (args.length > 0 && args[0]) { this.display(JSON.stringify(args[0])); }
         window.realConsoleError.apply(console, arguments);
@@ -714,3 +747,4 @@ export default class Main {
 }
 
 var main = new Main();
+window._main = main; // Exposed for debugging/testing
