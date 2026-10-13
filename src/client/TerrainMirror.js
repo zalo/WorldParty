@@ -11,7 +11,7 @@
  *  nothing visible. Everything else costs nothing here. */
 import * as THREE from 'three/webgpu';
 import { decodeChunkMesh, EMPTY_VERSION } from '../net/codec.js';
-import { materialColor, DEFAULT_MATERIAL } from '../terrain/materials.js';
+import { materialColor, materialTable, DEFAULT_MATERIAL } from '../terrain/materials.js';
 import { CHUNK_SIZE, HALF, FACES, DEFAULT_WORLD, chunkCenter as gridCenter, chunkMin, chunksInBox, sanitizeWorld } from '../terrain/grid.js';
 
 export { CHUNK_SIZE };
@@ -26,6 +26,8 @@ export class TerrainMirror {
         this.scene = scene;
         this.material = material;
         this.world = DEFAULT_WORLD;
+        this.table = materialTable(this.world);
+        this.layers = new Map();     // material id -> texture array layer (see TerrainTextures)
         this.maxInstances = INITIAL_INSTANCES;
         this.rockMask = new Map();  // key -> faces of untouched rock to draw
         this.cullMask = new Map();  // key -> boundary faces of a held modified chunk to skip
@@ -58,7 +60,14 @@ export class TerrainMirror {
         if(!w) return;
         let changed = JSON.stringify(w) !== JSON.stringify(this.world);
         this.world = w;
+        this.table = materialTable(w);
         if(changed) this.onWorldChanged?.(w);
+    }
+
+    /** Texture layers became available (or changed): rebuild every held chunk's slot attribute. */
+    setTextureLayers(layers) {
+        this.layers = layers;
+        for(let key of this.meshes.keys()) this.rebuild(key);
     }
 
     /** World-space bounds of a chunk. */
@@ -159,8 +168,8 @@ export class TerrainMirror {
 
     /** A modified chunk's mesh minus the triangles lying flat on a boundary face in `hidden`. */
     culledGeometry(key, mesh, hidden) {
-        let { positions, indices, materials } = mesh;
-        if(!hidden) return this.buildGeometry(positions, indices, materials);
+        let { positions, indices, materials, uvs } = mesh;
+        if(!hidden) return this.buildGeometry(positions, indices, materials, uvs);
         let c = gridCenter(key);
         let center = [c.x, c.y, c.z];
         let numTris = indices.length / 3;
@@ -181,29 +190,38 @@ export class TerrainMirror {
             keepMat.push(materials ? materials[t] : DEFAULT_MATERIAL);
         }
         if(!keepIdx.length) return null;
-        return this.buildGeometry(positions, new Uint32Array(keepIdx), new Uint8Array(keepMat));
+        return this.buildGeometry(positions, new Uint32Array(keepIdx), new Uint8Array(keepMat), uvs);
     }
 
-    /** Expand an indexed mesh to flat triangles with a per-face material color.
-     *  (Per-face attributes need unshared vertices; a sequential index keeps the batch's indexed layout.) */
-    buildGeometry(positions, indices, materials) {
+    /** Expand an indexed mesh to flat triangles with per-face material colour, per-vertex UV and
+     *  texture slot (-1 = flat colour). Per-face attributes need unshared vertices; a sequential
+     *  index keeps the batch's indexed layout. */
+    buildGeometry(positions, indices, materials, uvs = null) {
         let numTris = indices.length / 3;
         let pos = new Float32Array(numTris * 9);
         let col = new Float32Array(numTris * 9);
+        let uv = new Float32Array(numTris * 6);
+        let slot = new Float32Array(numTris * 3);
         let idx = new Uint32Array(numTris * 3);
         let color = new THREE.Color();
         for(let t = 0; t < numTris; t++) {
-            color.setHex(materialColor(materials ? materials[t] : DEFAULT_MATERIAL));
+            let id = materials ? materials[t] : DEFAULT_MATERIAL;
+            color.setHex(materialColor(id, this.table));
+            let layer = this.layers.has(id) ? this.layers.get(id) : -1;
             for(let k = 0; k < 3; k++) {
-                let v = indices[t * 3 + k], o = t * 9 + k * 3;
+                let v = indices[t * 3 + k], o = t * 9 + k * 3, i = t * 3 + k;
                 pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
                 col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
-                idx[t * 3 + k] = t * 3 + k;
+                if(uvs) { uv[i * 2] = uvs[v * 2]; uv[i * 2 + 1] = uvs[v * 2 + 1]; }
+                slot[i] = layer;
+                idx[i] = i;
             }
         }
         let geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        geometry.setAttribute('slot', new THREE.BufferAttribute(slot, 1));
         geometry.setIndex(new THREE.BufferAttribute(idx, 1));
         geometry.computeVertexNormals();
         return geometry;

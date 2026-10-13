@@ -3,6 +3,8 @@
  *  string key "x,y,z". A world config bounds the grid and names the box of
  *  implicit rock; everything else unstored is air. Outside the bounds the
  *  underside is solid and the sides and top are open sky. */
+import { sanitizeMaterials } from './materials.js';
+
 export const CHUNK_SIZE = 10.0;
 export const HALF = CHUNK_SIZE / 2;
 
@@ -85,5 +87,7 @@ export function sanitizeWorld(w) {
     };
     let bounds = box(w && w.bounds);
     if(!bounds) return null;
-    return { bounds, rock: box(w.rock) };
+    let out = { bounds, rock: box(w.rock) };
+    if(Array.isArray(w.materials) && w.materials.length) out.materials = sanitizeMaterials(w.materials);
+    return out;
 }

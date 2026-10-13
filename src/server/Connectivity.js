@@ -92,6 +92,7 @@ export class Connectivity {
         this.cache = new Map();   // key -> summary of a stored chunk, tagged with its version
         this.uf = new UnionFind();
         this.touch = new Map();   // key -> [face] -> air island keys touching this chunk's solid across that face
+        this.keys = new Set();    // chunks covered by the last solve
     }
 
     get M() { return this.terrain.manifold.Manifold; }
@@ -107,7 +108,7 @@ export class Connectivity {
         if(cached) this.dispose(cached);
         let center = chunkCenter(key);
         let solid = c.manifold.decompose().map(m => this.island(m, center, true));
-        let cube = this.M.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(center.x, center.y, center.z);
+        let cube = this.terrain.withMaterial(this.M.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(center.x, center.y, center.z), 0);
         let airManifold = cube.subtract(c.manifold);
         cube.delete();
         let air = airManifold.decompose().map(m => { let isl = this.island(m, center, false); m.delete(); return isl; });
@@ -120,7 +121,10 @@ export class Connectivity {
     /** Face footprints of one island. Keeps the manifold alive when `keep` (solid islands may become fragments). */
     island(m, center, keep) {
         let mesh = m.getMesh();
-        let v = mesh.vertProperties, tri = mesh.triVerts;
+        let np = mesh.numProp, props = mesh.vertProperties, tri = mesh.triVerts;
+        // positions only (manifolds carry UVs as extra properties)
+        let v = new Float32Array((props.length / np) * 3);
+        for(let i = 0, n = props.length / np; i < n; i++) { v[i * 3] = props[i * np]; v[i * 3 + 1] = props[i * np + 1]; v[i * 3 + 2] = props[i * np + 2]; }
         let masks = new Array(6), touch = 0;
         let origin = [center.x - HALF, center.y - HALF, center.z - HALF];
         for(let f = 0; f < 6; f++) {
@@ -146,7 +150,7 @@ export class Connectivity {
 
     invalidate(key) { let c = this.cache.get(key); if(c) { this.dispose(c); this.cache.delete(key); } }
 
-    clear() { for(let c of this.cache.values()) this.dispose(c); this.cache.clear(); this.uf = new UnionFind(); this.touch = new Map(); }
+    clear() { for(let c of this.cache.values()) this.dispose(c); this.cache.clear(); this.uf = new UnionFind(); this.touch = new Map(); this.keys = new Set(); }
 
     // ---- global solve ------------------------------------------------------
 
@@ -234,6 +238,7 @@ export class Connectivity {
             if(!S.solid.length) continue;
             let faces = 0;
             let lists = this.touch.get(key);
+            if(!lists) continue; // not part of the last solve
             for(let f = 0; f < 6; f++) if(lists[f] && lists[f].some(active)) faces |= 1 << f;
             if(S.rock) { if(faces) out.set(key, { mask: faces }); continue; }
             let own = S.air.some((_, k) => active(airKey(key, k)));

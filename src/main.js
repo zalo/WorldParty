@@ -14,6 +14,8 @@ import PartySocket from "partysocket";
 import { World as EcsWorld } from './ecs/World.js';
 import { encodeSoup, unpackChunkFrame } from './net/codec.js';
 import { TerrainMirror } from './client/TerrainMirror.js';
+import { TerrainTextures } from './client/TerrainTextures.js';
+import { attribute, texture, uv, select, vertexColor, Fn } from 'three/tsl';
 import { getPropDef } from './props/PropRegistry.js';
 import { SceneCleanupSystem, SnapshotSystem, BodyRenderSystem, PlayerRenderSystem, JointRenderSystem, ModelRenderSystem } from './client/systems.js';
 
@@ -97,7 +99,7 @@ export default class Main {
         this.world.scene.add(this.physBodiesParent, this.modelsParent);
         this.ecs = new EcsWorld();
         this.ecs.addSystem(new SceneCleanupSystem(this.world.scene));
-        this.ecs.addSystem(new BodyRenderSystem(this.physBodiesParent, this.gltfLoader));
+        this.ecs.addSystem(new BodyRenderSystem(this.physBodiesParent, this.gltfLoader, () => this.terrain.table));
         this.ecs.addSystem(new ModelRenderSystem(this.modelsParent, this.gltfLoader));
         this.ecs.addSystem(new SnapshotSystem());
         this.ecs.addSystem(new PlayerRenderSystem(this.world.scene, this.world.camera, () => this.conn.id));
@@ -144,19 +146,35 @@ export default class Main {
     // ---- terrain mirror ---------------------------------------------------
 
     setupTerrain() {
-        this.defaultMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.7, metalness: 0.1, flatShading: true });
+        // Flat-colour materials use the per-face vertex colour; textured ones sample the world's
+        // texture array by the per-vertex layer index (`slot`, -1 = flat) with the chunk's UVs.
+        this.textures = new TerrainTextures();
+        this.defaultMaterial = new THREE.MeshStandardNodeMaterial({ roughness: 0.7, metalness: 0.1, flatShading: true });
+        const slot = attribute('slot', 'float');
+        const layer = texture(this.textures.texture, uv()).depth(slot.toInt());
+        this.defaultMaterial.colorNode = select(slot.lessThan(0.0), vertexColor(), layer.rgb);
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
+        this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);
         this.terrainBatch = this.terrain.batch; // raycast target for tools
+        this.onWorldChanged(this.terrain.world);
+    }
+
+    /** A world config arrived (or changed): refresh textures and anything sized by the bounds. */
+    onWorldChanged(world) {
+        this.textures.load(world).then(layers => this.terrain.setTextureLayers(layers));
+        this.probes?.setBounds(...this.probeBounds(world));
+    }
+
+    probeBounds(w) {
+        const CHUNK = 10;
+        return [new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK))];
     }
 
     /** Probe grid follows the world bounds and rebakes around every chunk change. */
     attachProbes(probes) {
-        const CHUNK = 10;
-        const bounds = (w) => ({ min: new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), max: new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK)) });
-        let b = bounds(this.terrain.world);
-        probes.setBounds(b.min, b.max);
-        this.terrain.onWorldChanged = (w) => { let nb = bounds(w); probes.setBounds(nb.min, nb.max); };
+        this.probes = probes;
+        probes.setBounds(...this.probeBounds(this.terrain.world));
         this.terrain.onChunkChanged = (key) => probes.markDirty(this.terrain.bbox(key));
     }
 
@@ -165,13 +183,22 @@ export default class Main {
         let manifest = await (await fetch(url)).json();
         const send = (msg) => this.conn.send(JSON.stringify(msg));
         send({ type: 'import_begin', world: manifest.world, name: manifest.name });
+        const LIMIT = 300000; // base64 chars per message, well under the 1 MiB WebSocket frame limit
         let batch = {}, size = 0, sent = 0;
         const flush = () => { if(size) { send({ type: 'import_chunks', chunks: batch }); batch = {}; size = 0; } };
         for(let key in manifest.chunks) {
-            batch[key] = manifest.chunks[key];
-            size += manifest.chunks[key].bytes.length;
+            let rec = manifest.chunks[key], b64 = rec.bytes;
             sent++;
-            if(size > 400000) flush();
+            if(b64.length > LIMIT) {
+                // one chunk per message, in pieces the server joins back
+                flush();
+                let parts = Math.ceil(b64.length / LIMIT);
+                for(let i = 0; i < parts; i++) send({ type: 'import_chunks', chunks: { [key]: { version: rec.version, part: i, parts, bytes: b64.slice(i * LIMIT, (i + 1) * LIMIT) } } });
+                continue;
+            }
+            batch[key] = rec;
+            size += b64.length;
+            if(size > LIMIT) flush();
         }
         flush();
         send({ type: 'import_end' });

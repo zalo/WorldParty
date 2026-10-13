@@ -20,11 +20,32 @@ import manMod from '../../assets/manifold-3d/manifold.wasm';
 import { decodeSoup, encodeChunkMesh, decodeChunkMesh, hashBytes, EMPTY_VERSION } from '../net/codec.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup } from '../net/codec.js';
-import { MATERIALS, DEFAULT_MATERIAL, clampMaterial } from '../terrain/materials.js';
+import { DEFAULT_MATERIAL, MAX_MATERIALS, clampMaterial, materialTable } from '../terrain/materials.js';
 
 import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
 export { CHUNK_SIZE, chunkCenter };
 const MAX_BRUSH_SCALE = 20;
+/** Properties per Manifold vertex: position xyz + uv. Every manifold the server touches uses this layout. */
+export const NUM_PROP = 5;
+
+/** Split a Manifold mesh's interleaved properties into positions and uvs (zeros if it has none). */
+export function splitProps(mesh) {
+    let n = mesh.numProp, v = mesh.vertProperties, nv = v.length / n;
+    let positions = new Float32Array(nv * 3), uvs = new Float32Array(nv * 2);
+    for(let i = 0; i < nv; i++) {
+        positions[i * 3] = v[i * n]; positions[i * 3 + 1] = v[i * n + 1]; positions[i * 3 + 2] = v[i * n + 2];
+        if(n >= 5) { uvs[i * 2] = v[i * n + 3]; uvs[i * 2 + 1] = v[i * n + 4]; }
+    }
+    return { positions, uvs };
+}
+export function interleaveProps(positions, uvs) {
+    let nv = positions.length / 3, out = new Float32Array(nv * NUM_PROP);
+    for(let i = 0; i < nv; i++) {
+        out[i * NUM_PROP] = positions[i * 3]; out[i * NUM_PROP + 1] = positions[i * 3 + 1]; out[i * NUM_PROP + 2] = positions[i * 3 + 2];
+        if(uvs) { out[i * NUM_PROP + 3] = uvs[i * 2]; out[i * NUM_PROP + 4] = uvs[i * 2 + 1]; }
+    }
+    return out;
+}
 const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
 
 export class Terrain {
@@ -47,8 +68,8 @@ export class Terrain {
             }
         });
         this.manifold.setup();
-        // One Manifold original ID per material; booleans report which original each output triangle came from.
-        this.materialBase = this.manifold.Manifold.reserveIDs(MATERIALS.length);
+        // One Manifold original ID per material slot; booleans report which original each output triangle came from.
+        this.materialBase = this.manifold.Manifold.reserveIDs(MAX_MATERIALS);
         for(let key in storedChunks) {
             let c = storedChunks[key];
             if(!isValidKey(key)) continue;
@@ -72,7 +93,16 @@ export class Terrain {
         let mesh = decodeChunkMesh(bytes);
         let c = this.chunks[key];
         if(c && c.manifold) c.manifold.delete();
-        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
+        let manifold;
+        try { manifold = this.meshToManifold(mesh.positions, mesh.indices, mesh.materials, mesh.uvs); }
+        catch(e) {
+            // A chunk that cannot be rebuilt as a solid must not take the room down; it becomes empty.
+            console.warn(`chunk ${key}: ${e.message}; dropped`);
+            this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
+            this.dirty.add(key);
+            return;
+        }
+        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold };
     }
 
     /** Every chunk that can carry solid: implicit rock plus everything stored. */
@@ -155,7 +185,7 @@ export class Terrain {
             brush = this.withMaterial(this.soupToManifold(msg.brush,
                 new THREE.Vector3(msg.position.x, msg.position.y, msg.position.z),
                 new THREE.Quaternion(msg.quaternion.x, msg.quaternion.y, msg.quaternion.z, msg.quaternion.w),
-                new THREE.Vector3(s.x, s.y, s.z)), clampMaterial(msg.material));
+                new THREE.Vector3(s.x, s.y, s.z)), clampMaterial(msg.material, materialTable(this.world).length));
         } catch(e) { console.warn('Rejected brush: ' + e.message); return; }
 
         let keys = [...new Set((msg.keys || []).filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))];
@@ -173,9 +203,9 @@ export class Terrain {
         else if(op === SUBTRACTION) result = current.subtract(brush);
         else result = current.intersect(brush);
 
-        // Clip to the chunk's bounds
+        // Clip to the chunk's bounds (the cube carries the default material and empty UVs like everything else)
         let c = chunkCenter(key);
-        let cube = this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z);
+        let cube = this.withMaterial(this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z), DEFAULT_MATERIAL);
         let clipped = result.intersect(cube);
         cube.delete(); result.delete();
         if(current && !this.chunks[key]) current.delete(); // materialized here; stored ones are deleted by setManifold
@@ -191,14 +221,15 @@ export class Terrain {
             return;
         }
         let mesh = c.manifold.getMesh();
-        c.bytes = encodeChunkMesh(new Float32Array(mesh.vertProperties), new Uint32Array(mesh.triVerts), this.triangleMaterials(mesh));
+        let { positions, uvs } = splitProps(mesh);
+        c.bytes = encodeChunkMesh(positions, new Uint32Array(mesh.triVerts), this.triangleMaterials(mesh), uvs);
         c.version = hashBytes(c.bytes);
     }
 
     /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */
     fragmentComponents(manifold) {
         let mesh = manifold.getMesh();
-        let v = mesh.vertProperties, tri = mesh.triVerts;
+        let v = splitProps(mesh).positions, tri = mesh.triVerts;
         let numVerts = v.length / 3, numTris = tri.length / 3;
         if(numVerts < 4 || numTris < 1) return null;
         let mats = this.triangleMaterials(mesh);
@@ -234,19 +265,21 @@ export class Terrain {
         if(!runIndex || !runIds) return mats;
         for(let r = 0; r < runIds.length; r++) {
             let id = runIds[r] - this.materialBase;
-            if(id < 0 || id >= MATERIALS.length) id = DEFAULT_MATERIAL;
+            if(id < 0 || id >= MAX_MATERIALS) id = DEFAULT_MATERIAL;
             let start = runIndex[r] / 3, end = (r + 1 < runIndex.length ? runIndex[r + 1] : mesh.triVerts.length) / 3;
             mats.fill(id, start, end);
         }
         return mats;
     }
 
-    /** Rebuild a manifold whose every triangle belongs to one material (one run). Takes ownership of `manifold`. */
+    /** Rebuild a manifold whose every triangle belongs to one material (one run), with NUM_PROP
+     *  properties per vertex (existing UVs kept, otherwise zero). Takes ownership of `manifold`. */
     withMaterial(manifold, material) {
         let m = manifold.getMesh();
+        let { positions, uvs } = splitProps(m);
         let mesh = new this.manifold.Mesh({
-            numProp: 3,
-            vertProperties: new Float32Array(m.vertProperties),
+            numProp: NUM_PROP,
+            vertProperties: interleaveProps(positions, uvs),
             triVerts: new Uint32Array(m.triVerts),
             runIndex: new Uint32Array([0, m.triVerts.length]),
             runOriginalID: new Uint32Array([this.materialBase + material]),
@@ -255,8 +288,8 @@ export class Terrain {
         return new this.manifold.Manifold(mesh);
     }
 
-    /** Manifold from an indexed mesh plus per-triangle materials, grouped into one run per material. */
-    meshToManifold(positions, indices, materials) {
+    /** Manifold from an indexed mesh plus per-triangle materials (grouped into one run per material) and per-vertex UVs. */
+    meshToManifold(positions, indices, materials, uvs = null) {
         let numTris = indices.length / 3;
         let order = Array.from({ length: numTris }, (_, i) => i);
         if(materials) order.sort((a, b) => materials[a] - materials[b] || a - b);
@@ -270,7 +303,10 @@ export class Terrain {
             triVerts[k * 3] = indices[t * 3]; triVerts[k * 3 + 1] = indices[t * 3 + 1]; triVerts[k * 3 + 2] = indices[t * 3 + 2];
         }
         runIndex.push(indices.length);
-        let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties: new Float32Array(positions), triVerts, runIndex: new Uint32Array(runIndex), runOriginalID: new Uint32Array(runIds) });
+        let mesh = new this.manifold.Mesh({ numProp: NUM_PROP, vertProperties: interleaveProps(positions, uvs), triVerts, runIndex: new Uint32Array(runIndex), runOriginalID: new Uint32Array(runIds) });
+        // Property vertices are split along UV seams and material boundaries; the merge vectors that
+        // make them one manifold are not stored, so rebuild them from coincident positions.
+        mesh.merge();
         return new this.manifold.Manifold(mesh);
     }
 

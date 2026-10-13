@@ -62,7 +62,8 @@ export class SnapshotSystem {
 
 /** Builds meshes for RigidBody entities (props, cubes, terrain fragments) and keeps a BVH for player collision. */
 export class BodyRenderSystem {
-    constructor(parent, gltfLoader) {
+    constructor(parent, gltfLoader, tableFn = null) {
+        this.tableFn = tableFn; // () => material table of the current world
         this.parent = parent;
         this.gltfLoader = gltfLoader;
         this.boxGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -117,7 +118,7 @@ export class BodyRenderSystem {
             let colors = new Float32Array(positions.length);
             let color = new THREE.Color();
             for(let t = 0; t < fragment.mats.length && t * 9 + 8 < colors.length; t++) {
-                color.setHex(materialColor(fragment.mats[t]));
+                color.setHex(materialColor(fragment.mats[t], this.tableFn ? this.tableFn() : undefined));
                 for(let k = 0; k < 3; k++) { let o = t * 9 + k * 3; colors[o] = color.r; colors[o + 1] = color.g; colors[o + 2] = color.b; }
             }
             geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));

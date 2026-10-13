@@ -18,6 +18,7 @@ const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
 const PERSIST_INTERVAL_MS = 5000;
 const STORAGE_BATCH = 128;          // Durable Object storage batch limit
+const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across chunkpart:<key>:<i> values (128 KiB value limit)
 
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
@@ -41,6 +42,7 @@ class PartyServer {
     this.activeRoots = new Set();
     this.colliderState = new Map(); // key -> 'box' | 'mesh:<version>'
     this.persistChunkDeletes = new Set();
+    this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
     this.ready = false;
     this.readyPromise = new Promise(res => { this.resolveReady = res; });
     this.globalPlayerCount = 0;
@@ -64,6 +66,8 @@ class PartyServer {
 
   async onStart() {
     let [storedChunks, storedEntities, storedWorld] = await Promise.all([this.loadPrefixed('chunk:'), this.loadPrefixed('ent:'), this.room.storage.get('world')]);
+    await this.joinChunkParts(storedChunks);
+
     // Legacy single-blob layout
     let legacyChunks = await this.room.storage.get("chunks");
     if(legacyChunks) { Object.assign(storedChunks, legacyChunks); await this.room.storage.delete("chunks"); }
@@ -104,6 +108,22 @@ class PartyServer {
     let map = await this.room.storage.list({ prefix });
     for(let [key, value] of map) out[key.slice(prefix.length)] = value;
     return out;
+  }
+
+  /** Chunk records whose bytes were split into parts get them joined back. */
+  async joinChunkParts(storedChunks) {
+    let parts = await this.room.storage.list({ prefix: 'chunkpart:' });
+    for(let k in storedChunks) {
+      let c = storedChunks[k];
+      if(!c || !c.parts) continue;
+      this.chunkParts.set(k, c.parts);
+      let total = 0, slices = [];
+      for(let i = 0; i < c.parts; i++) { let p = parts.get(`chunkpart:${k}:${i}`); if(!p) { slices = null; break; } slices.push(p); total += p.byteLength; }
+      if(!slices) { console.warn(`chunk ${k}: missing parts, dropped`); delete storedChunks[k]; continue; }
+      let bytes = new Uint8Array(total), o = 0;
+      for(let p of slices) { bytes.set(new Uint8Array(p.buffer || p, p.byteOffset || 0, p.byteLength), o); o += p.byteLength; }
+      storedChunks[k] = { key: k, version: c.version, bytes };
+    }
   }
 
   // ---- terrain connectivity ------------------------------------------------
@@ -150,6 +170,7 @@ class PartyServer {
 
   /** Recompute which hollows are active and what every chunk should materialize; queue the diff for clients. */
   refreshActivity(force = false) {
+    if(this.importing) return; // the world is being replaced; importEnd solves and refreshes once
     let occupied = this.occupiedChunks();
     let key = [...occupied].sort().join(';');
     if(!force && key === this.occupiedKey) return;
@@ -286,7 +307,18 @@ class PartyServer {
       if(s && Object.keys(s).length > 0) puts['ent:' + id] = s;
     }
     let deletes = [...this.persistRemoved].map(id => 'ent:' + id);
-    for(let key of this.persistChunks || []) { let c = this.terrain.serializeChunk(key); if(c) puts['chunk:' + key] = c; else deletes.push('chunk:' + key); }
+    for(let key of this.persistChunks || []) {
+      let c = this.terrain.serializeChunk(key);
+      let oldParts = this.chunkParts.get(key) || 0;
+      if(!c) { deletes.push('chunk:' + key); for(let i = 0; i < oldParts; i++) deletes.push(`chunkpart:${key}:${i}`); this.chunkParts.delete(key); continue; }
+      let n = c.bytes && c.bytes.length > STORAGE_PART ? Math.ceil(c.bytes.length / STORAGE_PART) : 0;
+      if(n) {
+        puts['chunk:' + key] = { key, version: c.version, parts: n };
+        for(let i = 0; i < n; i++) puts[`chunkpart:${key}:${i}`] = c.bytes.slice(i * STORAGE_PART, (i + 1) * STORAGE_PART);
+      } else puts['chunk:' + key] = c;
+      for(let i = n; i < oldParts; i++) deletes.push(`chunkpart:${key}:${i}`);
+      this.chunkParts.set(key, n);
+    }
     for(let key of this.persistChunkDeletes) deletes.push('chunk:' + key);
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
 
@@ -374,7 +406,8 @@ class PartyServer {
     this.terrain.clear();
     this.terrain.world = world;
     if(world === DEFAULT_WORLD) await this.room.storage.delete('world'); else await this.room.storage.put('world', world);
-    let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
+    let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'chunkpart:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
+    this.chunkParts = new Map();
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
     this.sentStates = new Map();
@@ -396,6 +429,7 @@ class PartyServer {
     let world = sanitizeWorld(data.world);
     if(!world) return;
     await this.clearWorld(world);
+    this.connectivity.solve();
     this.importing = true;
     this.room.broadcast(JSON.stringify({ type: "chat", sender: "server", message: `Importing world${data.name ? ' ' + String(data.name).slice(0, 40) : ''}...` }));
   }
@@ -403,11 +437,21 @@ class PartyServer {
   importChunks(data) {
     if(!this.importing || !data.chunks || typeof data.chunks !== 'object') return;
     let n = 0;
+    this.importPartial ||= new Map(); // key -> base64 pieces of a chunk too large for one message
     for(let key in data.chunks) {
       let c = data.chunks[key];
       if(!isValidKey(key) || !c || typeof c.bytes !== 'string') continue;
+      let b64 = c.bytes;
+      if(c.parts > 1) {
+        let acc = this.importPartial.get(key) || [];
+        acc[c.part | 0] = b64;
+        this.importPartial.set(key, acc);
+        if(acc.filter(Boolean).length < c.parts) continue;
+        b64 = acc.join('');
+        this.importPartial.delete(key);
+      }
       try {
-        let bytes = Uint8Array.from(atob(c.bytes), ch => ch.charCodeAt(0));
+        let bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
         this.terrain.loadChunk(key, bytes);
         this.markChunkPersist(key);
         n++;

@@ -32,7 +32,7 @@ import * as THREE from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { M } from '../assets/manifold-3d/manifold.js';
 import { encodeChunkMesh, hashBytes } from '../src/net/codec.js';
-import { MATERIALS, DEFAULT_MATERIAL } from '../src/terrain/materials.js';
+import { MATERIALS, DEFAULT_MATERIAL, MAX_MATERIALS } from '../src/terrain/materials.js';
 import { CHUNK_SIZE, key as chunkKey } from '../src/terrain/grid.js';
 
 // ---- args ------------------------------------------------------------------
@@ -79,12 +79,33 @@ function readGLB(path) {
         else for(let k = 0; k < a.count; k++) outArr.set(new T(bin.buffer, base + k * stride, n), k * n);
         return { array: outArr, n };
     }
-    let positions = [], materials = [];
-    let palette = (json.materials || []).map(m => {
+    let positions = [], uvs = [], materials = [];
+    // Every source material becomes a world material entry after the palette: exact base colour,
+    // and its base colour texture written out as a file next to the manifest.
+    const imageExt = (img) => ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' })[img.mimeType] || 'bin';
+    let entries = [], textureFiles = new Map();
+    let palette = (json.materials || []).map((m, i) => {
         let pbr = m.pbrMetallicRoughness || {};
         let c = pbr.baseColorFactor || [1, 1, 1, 1];
-        return pbr.baseColorTexture ? DEFAULT_MATERIAL : nearestMaterial(c[0], c[1], c[2]);
+        let color = (Math.round(linearToSrgb(c[0]) * 255) << 16) | (Math.round(linearToSrgb(c[1]) * 255) << 8) | Math.round(linearToSrgb(c[2]) * 255);
+        let texture = null;
+        let texInfo = pbr.baseColorTexture;
+        if(texInfo && json.textures && json.textures[texInfo.index] !== undefined) {
+            let tex = json.textures[texInfo.index];
+            let src = tex.source ?? (tex.extensions && tex.extensions.EXT_texture_webp && tex.extensions.EXT_texture_webp.source);
+            let img = src !== undefined ? json.images[src] : null;
+            if(img && img.bufferView !== undefined) {
+                if(!textureFiles.has(src)) {
+                    let bv = json.bufferViews[img.bufferView];
+                    textureFiles.set(src, { name: `tex${src}.${imageExt(img)}`, bytes: bin.subarray(bv.byteOffset || 0, (bv.byteOffset || 0) + bv.byteLength) });
+                }
+                texture = textureFiles.get(src).name;
+            }
+        }
+        entries.push({ name: m.name || `material ${i}`, color, texture });
+        return MATERIALS.length + i; // id in the world's material table
     });
+    if(entries.length > MAX_MATERIALS - MATERIALS.length) throw new Error(`too many materials (${entries.length})`);
     function walk(nodeIndex, parent) {
         let node = json.nodes[nodeIndex];
         let local = new THREE.Matrix4();
@@ -95,14 +116,16 @@ function readGLB(path) {
             for(let prim of json.meshes[node.mesh].primitives) {
                 if((prim.mode ?? 4) !== 4 || prim.attributes.POSITION === undefined) continue;
                 let pos = accessor(prim.attributes.POSITION).array;
+                let tex = prim.attributes.TEXCOORD_0 !== undefined ? accessor(prim.attributes.TEXCOORD_0).array : null;
                 let idx = prim.indices !== undefined ? accessor(prim.indices).array : Uint32Array.from({ length: pos.length / 3 }, (_, i) => i);
                 let mat = prim.material !== undefined ? palette[prim.material] : DEFAULT_MATERIAL;
                 let v = new THREE.Vector3();
                 for(let i = 0; i < idx.length; i += 3) {
                     for(let k = 0; k < 3; k++) {
-                        let p = idx[i + k] * 3;
+                        let p = idx[i + k] * 3, q = idx[i + k] * 2;
                         v.set(pos[p], pos[p + 1], pos[p + 2]).applyMatrix4(world);
                         positions.push(v.x, v.y, v.z);
+                        uvs.push(tex ? tex[q] : 0, tex ? tex[q + 1] : 0);
                     }
                     materials.push(mat);
                 }
@@ -112,16 +135,10 @@ function readGLB(path) {
     }
     let scene = json.scenes[json.scene || 0];
     for(let n of scene.nodes) walk(n, new THREE.Matrix4());
-    return { positions: new Float32Array(positions), materials: new Uint8Array(materials) };
+    return { positions: new Float32Array(positions), uvs: new Float32Array(uvs), materials: new Uint8Array(materials), entries, textureFiles };
 }
 
-const srgbToLinear = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-const paletteLinear = MATERIALS.map(m => [16, 8, 0].map(s => srgbToLinear(((m.color >> s) & 255) / 255)));
-function nearestMaterial(r, g, b) {
-    let best = DEFAULT_MATERIAL, bestD = Infinity;
-    paletteLinear.forEach((c, i) => { let d = (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2; if(d < bestD) { bestD = d; best = i; } });
-    return best;
-}
+const linearToSrgb = c => Math.min(1, Math.max(0, c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055));
 
 // ---- generalized winding number over a triangle soup -------------------------
 // Exact solid angles per triangle near the query point, a first-order dipole per cluster far
@@ -200,7 +217,7 @@ class WindingNumber {
 
 // ---- main ------------------------------------------------------------------
 let t0 = Date.now();
-let { positions, materials } = readGLB(file);
+let { positions, uvs: sourceUvs, materials, entries, textureFiles } = readGLB(file);
 let geom = new THREE.BufferGeometry();
 geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 geom.computeBoundingBox();
@@ -214,6 +231,15 @@ let bb = geom.boundingBox;
 console.log(`model: ${positions.length / 9} triangles, scale ${scale.toFixed(4)}, bounds ${bb.min.toArray().map(v => v.toFixed(1))} .. ${bb.max.toArray().map(v => v.toFixed(1))}`);
 
 let bvh = new MeshBVH(geom);
+/** UV of a point on source triangle `t` by barycentric interpolation of its corner UVs. */
+const _bary = new THREE.Vector3(), _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3();
+function uvAt(point, t) {
+    let p = positions, o = t * 9;
+    _a.set(p[o], p[o + 1], p[o + 2]); _b.set(p[o + 3], p[o + 4], p[o + 5]); _c.set(p[o + 6], p[o + 7], p[o + 8]);
+    THREE.Triangle.getBarycoord(point, _a, _b, _c, _bary);
+    let u = t * 6;
+    return [sourceUvs[u] * _bary.x + sourceUvs[u + 2] * _bary.y + sourceUvs[u + 4] * _bary.z, sourceUvs[u + 1] * _bary.x + sourceUvs[u + 3] * _bary.y + sourceUvs[u + 5] * _bary.z];
+}
 const winding = (mode === 'winding' || mode === 'both') ? new WindingNumber(positions) : null;
 if(winding) {
     // self-test on a unit cube with outward faces
@@ -276,8 +302,10 @@ for(let x = cmin[0]; x <= cmax[0]; x++) for(let y = cmin[1]; y <= cmax[1]; y++) 
     cube.delete();
     if(part.isEmpty()) { part.delete(); continue; }
     let mesh = part.getMesh();
-    let v = mesh.vertProperties, tri = mesh.triVerts;
-    let numTris = tri.length / 3;
+    let np = mesh.numProp, props = mesh.vertProperties, tri = mesh.triVerts;
+    let numTris = tri.length / 3, numVerts = props.length / np;
+    let v = new Float32Array(numVerts * 3);
+    for(let i = 0; i < numVerts; i++) { v[i * 3] = props[i * np]; v[i * 3 + 1] = props[i * np + 1]; v[i * 3 + 2] = props[i * np + 2]; }
     let mats = new Uint8Array(numTris);
     for(let t = 0; t < numTris; t++) {
         centroid.set(0, 0, 0);
@@ -286,7 +314,15 @@ for(let x = cmin[0]; x <= cmax[0]; x++) for(let y = cmin[1]; y <= cmax[1]; y++) 
         bvh.closestPointToPoint(centroid, target);
         mats[t] = materials[target.faceIndex] ?? DEFAULT_MATERIAL;
     }
-    let bytes = encodeChunkMesh(new Float32Array(v), new Uint32Array(tri), mats);
+    // UVs by projecting each vertex onto the nearest source triangle
+    let chunkUvs = new Float32Array(numVerts * 2);
+    for(let i = 0; i < numVerts; i++) {
+        pt.set(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+        bvh.closestPointToPoint(pt, target);
+        let [u, w] = uvAt(target.point, target.faceIndex);
+        chunkUvs[i * 2] = u; chunkUvs[i * 2 + 1] = w;
+    }
+    let bytes = encodeChunkMesh(new Float32Array(v), new Uint32Array(tri), mats, chunkUvs);
     chunks[chunkKey(x, y, z)] = { version: hashBytes(bytes), bytes: Buffer.from(bytes).toString('base64') };
     totalTris += numTris; maxTris = Math.max(maxTris, numTris); totalBytes += bytes.length;
     part.delete();
@@ -298,9 +334,18 @@ simp.delete();
 let margin = 1;
 let bounds = { min: [cmin[0] - margin, cmin[1] - (floor ? 2 : margin), cmin[2] - margin], max: [cmax[0] + margin, cmax[1] + 3, cmax[2] + margin] };
 let rock = floor ? { min: [bounds.min[0], bounds.min[1], bounds.min[2]], max: [bounds.max[0], lowestLayer, bounds.max[2]] } : null;
-let manifest = { name, world: { bounds, rock }, source: basename(file), options: { edge, shell, mode, scale, offset }, chunks, entities: [] };
 mkdirSync(dirname(out), { recursive: true });
+// Textures live in a folder named after the world next to the manifest; URLs are site-relative to it
+let texDir = resolve(dirname(out), name);
+let texUrlBase = '/' + out.replace(/\\/g, '/').replace(/^\.?\/?/, '').replace(/[^/]+$/, '') + name;
+if(textureFiles.size) {
+    mkdirSync(texDir, { recursive: true });
+    for(let [, f] of textureFiles) writeFileSync(resolve(texDir, f.name), f.bytes);
+    for(let e of entries) if(e.texture) e.texture = `${texUrlBase}/${e.texture}`;
+}
+let manifest = { name, world: { bounds, rock, materials: entries }, source: basename(file), options: { edge, shell, mode, scale, offset }, chunks, entities: [] };
 writeFileSync(out, JSON.stringify(manifest));
+console.log(`materials: ${entries.length} (${textureFiles.size} textures written to ${texDir})`);
 console.log(`chunks: ${Object.keys(chunks).length}, ${totalTris} triangles (max ${maxTris} per chunk), ${(totalBytes / 1024).toFixed(0)} KB of chunk bytes`);
 console.log(`world: bounds ${JSON.stringify(bounds)} rock ${JSON.stringify(rock)}`);
 console.log(`wrote ${out} in ${Date.now() - t0} ms`);
