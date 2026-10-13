@@ -88,6 +88,33 @@ replicate differently:
 - Storage key `chunk:<index>` holds `{index, version, bytes}`. Rooms saved
   in the old base64 soup format are migrated on load.
 
+### Only what can be seen is materialized
+
+`src/terrain/grid.js` is shared by both sides and answers, for any chunk,
+which of its six faces border something other than unmodified solid rock
+(`exposedFaces`). Beyond the grid, the underside counts as solid (players
+and bodies are reset at y=-100, so nothing can get there) and the sides and
+top count as air.
+
+- Unmodified rock chunks with no exposed face are fully buried. The client
+  gives them no geometry and the server gives them no collider. In a fresh
+  world 256 of the 500 solid chunks are buried.
+- Exposed rock contributes only its exposed faces, two triangles each,
+  instead of a full box: the untouched world renders 600 triangles rather
+  than 6000 and keeps 244 small BVHs rather than 500.
+- Modified chunks keep their decoded mesh client-side and drop the boundary
+  triangles that lie flat against rock, so a carved chunk's underside and
+  the sides facing untouched neighbours are never drawn. The stored manifold
+  is untouched by this; culling is a render-time view.
+- When a chunk changes state, its six neighbours are re-evaluated and
+  rebuilt only if their exposure mask changed. Carving into rock exposes the
+  rock behind it on both sides: the client grows faces, the server adds box
+  colliders (`ensureDefaultCollider`). Exposure only ever grows until a
+  `reset`.
+
+`TerrainMirror.stats()` reports loaded chunks, drawn triangles, rock and
+buried counts for diagnostics.
+
 ## Terrain materials
 
 Every triangle carries a material id (`src/terrain/materials.js`). The

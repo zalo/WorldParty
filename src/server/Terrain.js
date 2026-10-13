@@ -18,21 +18,10 @@ import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup } from '../net/codec.js';
 import { MATERIALS, DEFAULT_MATERIAL, clampMaterial } from '../terrain/materials.js';
 
-export const GRID = 10;
-export const CHUNK_SIZE = 10.0;
-export const SOLID_BELOW_Y = 5;
-export const CHUNK_COUNT = GRID * GRID * GRID;
+import { GRID, CHUNK_SIZE, SOLID_BELOW_Y, CHUNK_COUNT, chunkCoords, chunkCenter, isDefaultSolid, neighbour, exposedFaces } from '../terrain/grid.js';
+export { GRID, CHUNK_SIZE, SOLID_BELOW_Y, CHUNK_COUNT, chunkCoords, chunkCenter, isDefaultSolid };
 const MAX_BRUSH_SCALE = 20;
 const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
-
-export function chunkCoords(index) {
-    return { x: Math.floor(index / 100), y: Math.floor(index / 10) % 10, z: index % 10 };
-}
-export function chunkCenter(index) {
-    let c = chunkCoords(index);
-    return { x: c.x * CHUNK_SIZE - 45.0, y: c.y * CHUNK_SIZE - 45.0, z: c.z * CHUNK_SIZE - 45.0 };
-}
-export function isDefaultSolid(index) { return chunkCoords(index).y < SOLID_BELOW_Y; }
 
 export class Terrain {
     constructor() {
@@ -77,6 +66,29 @@ export class Terrain {
     hasTerrain(index) {
         let c = this.chunks[index];
         return c ? !!c.manifold : isDefaultSolid(index);
+    }
+
+    /** True if the chunk is untouched solid rock (no stored record, below the surface). */
+    isUnmodifiedSolid(index) { return !this.chunks[index] && isDefaultSolid(index); }
+
+    /** Bitmask of faces of an unmodified solid chunk that border anything other than
+     *  unmodified rock; 0 means fully buried, so nothing can touch it. */
+    exposure(index) { return exposedFaces(index, i => this.isUnmodifiedSolid(i)); }
+
+    /** Indices of unmodified solid chunks that are at least partly exposed. */
+    exposedDefaults() {
+        let out = [];
+        for(let index = 0; index < CHUNK_COUNT; index++) {
+            if(this.isUnmodifiedSolid(index) && this.exposure(index)) out.push(index);
+        }
+        return out;
+    }
+
+    /** Unmodified solid neighbours of a chunk (the ones a change here could expose). */
+    defaultNeighbours(index) {
+        let out = [];
+        for(let f = 0; f < 6; f++) { let n = neighbour(index, f); if(n >= 0 && this.isUnmodifiedSolid(n)) out.push(n); }
+        return out;
     }
 
     /** Current manifold for a chunk, materializing the implicit default. Caller must not delete it. */

@@ -32,7 +32,8 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 - **`src/World.js`** - Three.js WebGPU renderer, camera, lighting, SSGI + TRAA post-processing pipeline.
 - **`src/PlayerController.js`** - First-person capsule player with BVH collision against terrain and ECS body meshes. WASD + PointerLock on desktop, nipplejs joysticks on mobile.
-- **`src/server/Terrain.js`** - Sparse chunk map with Manifold CSG, island decomposition, and fragment extraction.
+- **`src/terrain/grid.js`** - Chunk grid constants, neighbour lookup, and face-exposure mask shared by server and client.
+- **`src/server/Terrain.js`** - Sparse chunk map with Manifold CSG, island decomposition, fragment extraction, and exposure queries.
 - **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems.
 - **`src/props/PropRegistry.js`** - Single source of truth for spawnable props (collider shape, size, GLTF url, menu entry).
 - **`src/tools/*`** - Garry's Mod style tools (physgun, CSG brush, rope, weld, hinge). Tools send messages; the server mutates entities.
@@ -41,7 +42,7 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 ### Terrain System
 
-The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk indices plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{index: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<index>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand.
+The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk indices plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{index: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<index>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand. Only visible terrain is materialized: `src/terrain/grid.js` (shared) computes which chunk faces border air or a modified chunk; buried rock gets no geometry and no server collider, exposed rock contributes just its exposed faces, and modified chunks drop boundary triangles that lie against rock. Neighbours are re-evaluated whenever a chunk changes.
 
 ### Networking Protocol
 

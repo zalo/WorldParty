@@ -8,7 +8,7 @@
 import { World } from './ecs/World.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
-import { Terrain, GRID, SOLID_BELOW_Y, CHUNK_COUNT, chunkCenter } from './server/Terrain.js';
+import { Terrain, CHUNK_COUNT, chunkCenter } from './server/Terrain.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { packChunkFrame } from './net/codec.js';
 
@@ -74,7 +74,7 @@ class PartyServer {
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(parseInt(k));
     this.ready = true;
     this.resolveReady();
-    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities`);
+    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
   }
 
   async loadPrefixed(prefix) {
@@ -84,15 +84,18 @@ class PartyServer {
     return out;
   }
 
+  /** Colliders for every stored chunk plus every unmodified solid chunk that is at least
+   *  partly exposed. Fully buried rock gets nothing: no body can reach it. */
   rebuildAllChunkColliders() {
     for(let index in this.physics.chunkActors) this.physics._removeChunkActor(index);
-    for(let x = 0; x < GRID; x++) for(let y = 0; y < SOLID_BELOW_Y; y++) for(let z = 0; z < GRID; z++) {
-      let index = x * 100 + y * 10 + z;
-      if(this.terrain.chunks[index]) continue;
-      let c = chunkCenter(index);
-      this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z);
-    }
+    for(let index of this.terrain.exposedDefaults()) this.ensureDefaultCollider(index);
     for(let index in this.terrain.chunks) this.physics.setChunkCollider(parseInt(index), this.terrain.chunkMesh(parseInt(index)));
+  }
+
+  ensureDefaultCollider(index) {
+    if(this.physics.chunkActors[index]) return;
+    let c = chunkCenter(index);
+    this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z);
   }
 
   /** @param {Connection} conn @param {ConnectionContext} ctx */
@@ -193,12 +196,16 @@ class PartyServer {
     for(let key in changed) {
       let index = parseInt(key);
       this.physics.setChunkCollider(index, this.terrain.chunkMesh(index));
+      // Rock next to a modified chunk may now be reachable through it
+      for(let n of this.terrain.defaultNeighbours(index)) this.ensureDefaultCollider(n);
       this.markChunkPersist(index);
       // Push the new bytes to everyone now; later joiners fetch by version over HTTP.
       let c = this.terrain.chunks[index];
       this.room.broadcast(packChunkFrame(index, c.version, c.bytes));
     }
     for(let comps of fragments) this.world.create(comps);
+    let n = Object.keys(changed).length;
+    if(n) console.log(`csg: ${n} chunk(s) changed, ${fragments.length} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<index>?v=<version> -> chunk bytes (204 if empty). */
