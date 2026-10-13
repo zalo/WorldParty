@@ -368,21 +368,65 @@ class PartyServer {
     if(g && g.by === playerId) this.world.remove(bodyId, 'Grabbed');
   }
 
-  async reset() {
+  /** Wipe terrain, entities and their storage; the world config becomes `world` (default: the sandbox). */
+  async clearWorld(world = DEFAULT_WORLD) {
     for(let id of [...this.world.ids()]) if(!this.world.has(id, 'Player')) this.world.destroy(id);
     this.terrain.clear();
-    this.terrain.world = DEFAULT_WORLD;
-    await this.room.storage.delete('world');
+    this.terrain.world = world;
+    if(world === DEFAULT_WORLD) await this.room.storage.delete('world'); else await this.room.storage.put('world', world);
     let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
     this.sentStates = new Map();
     this.connectivity.clear();
+  }
+
+  async reset() {
+    await this.clearWorld();
     this.connectivity.solve();
     this.refreshActivity(true);
     this.chunkDelta = null;
     this.room.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
+  }
+
+  // ---- world import (manifest from tools/import-world.mjs, uploaded by a client in batches) ----
+
+  async importBegin(data) {
+    let world = sanitizeWorld(data.world);
+    if(!world) return;
+    await this.clearWorld(world);
+    this.importing = true;
+    this.room.broadcast(JSON.stringify({ type: "chat", sender: "server", message: `Importing world${data.name ? ' ' + String(data.name).slice(0, 40) : ''}...` }));
+  }
+
+  importChunks(data) {
+    if(!this.importing || !data.chunks || typeof data.chunks !== 'object') return;
+    let n = 0;
+    for(let key in data.chunks) {
+      let c = data.chunks[key];
+      if(!isValidKey(key) || !c || typeof c.bytes !== 'string') continue;
+      try {
+        let bytes = Uint8Array.from(atob(c.bytes), ch => ch.charCodeAt(0));
+        this.terrain.loadChunk(key, bytes);
+        this.markChunkPersist(key);
+        n++;
+      } catch(e) { console.warn(`import: bad chunk ${key}: ${e.message}`); }
+    }
+    return n;
+  }
+
+  async importEnd() {
+    if(!this.importing) return;
+    this.importing = false;
+    let shed = this.settleTerrain();
+    for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
+    this.refreshActivity(true);
+    this.chunkDelta = null;
+    this.room.broadcast(JSON.stringify(this.fullUpdate()));
+    this.world.takeDirty();
+    await this.persist();
+    console.log(`import: ${Object.keys(this.terrain.chunks).length} chunks, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
   }
 
   // ---- messages -----------------------------------------------------------
@@ -463,6 +507,9 @@ class PartyServer {
       case "reset":
         await this.reset();
         break;
+      case "import_begin": await this.importBegin(data); break;
+      case "import_chunks": this.importChunks(data); break;
+      case "import_end": await this.importEnd(); break;
       default:
         console.error("Unknown message type: " + data.type);
     }

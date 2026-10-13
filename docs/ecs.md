@@ -153,3 +153,13 @@ bytes append one byte per triangle; the client expands chunks to flat
 triangles with a vertex color per face, and fragments carry `mats` in
 their `FragmentMesh` component. The CSG tool cycles materials with `R`
 (or the Material button on mobile).
+
+## Importing worlds
+
+`tools/import-world.mjs` (see CLAUDE.md) produces a manifest with a world
+config and chunk records in the same encoding the server stores. A client
+uploads it with `import_begin {world}` (clears the room and installs the
+config), batches of `import_chunks {chunks}` (each decoded straight into a
+stored chunk), and `import_end` (one connectivity solve, so any unsupported
+pieces of the model fall as fragments, then a full update). Nothing about
+the runtime knows it was imported: chunks are chunks.

@@ -51,6 +51,11 @@ export default class Main {
         this.conn = new PartySocket({ host: PARTYKIT_HOST, room: this.curRoom });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
+        // ?import=<manifest url> uploads a world (tools/import-world.mjs output) into the room once connected
+        if(this.queryParams.has("import")) {
+            let url = this.queryParams.get("import");
+            this.conn.addEventListener("open", () => this.importWorld(url).catch(e => console.error('importWorld failed: ' + e.message)), { once: true });
+        }
 
         this.serverTickMs = 0;
         this.world = new World(this, this.isMobile());
@@ -143,6 +148,25 @@ export default class Main {
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrainBatch = this.terrain.batch; // raycast target for tools
+    }
+
+    /** Upload a world manifest written by tools/import-world.mjs to the room, in batches under the message limit. */
+    async importWorld(url) {
+        let manifest = await (await fetch(url)).json();
+        const send = (msg) => this.conn.send(JSON.stringify(msg));
+        send({ type: 'import_begin', world: manifest.world, name: manifest.name });
+        let batch = {}, size = 0, sent = 0;
+        const flush = () => { if(size) { send({ type: 'import_chunks', chunks: batch }); batch = {}; size = 0; } };
+        for(let key in manifest.chunks) {
+            batch[key] = manifest.chunks[key];
+            size += manifest.chunks[key].bytes.length;
+            sent++;
+            if(size > 400000) flush();
+        }
+        flush();
+        send({ type: 'import_end' });
+        console.log(`importWorld: sent ${sent} chunks from ${url}`);
+        return sent;
     }
 
     /** Chunk bytes by content version over HTTP (cacheable, immutable per version). */

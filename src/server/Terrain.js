@@ -53,9 +53,7 @@ export class Terrain {
             let c = storedChunks[key];
             if(!isValidKey(key)) continue;
             if(c.bytes) {
-                let bytes = c.bytes instanceof Uint8Array ? c.bytes : new Uint8Array(c.bytes);
-                let mesh = decodeChunkMesh(bytes);
-                this.chunks[key] = { key, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
+                this.loadChunk(key, c.bytes, c.version);
             } else if(c.data) {
                 // Legacy gzip+base64 triangle soup
                 let manifold = this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL);
@@ -66,6 +64,15 @@ export class Terrain {
                 this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
             }
         }
+    }
+
+    /** Install a chunk from encoded bytes (storage or import); the version is the content hash. */
+    loadChunk(key, bytes, version = null) {
+        bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        let mesh = decodeChunkMesh(bytes);
+        let c = this.chunks[key];
+        if(c && c.manifold) c.manifold.delete();
+        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
     }
 
     /** Every chunk that can carry solid: implicit rock plus everything stored. */

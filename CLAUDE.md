@@ -13,7 +13,10 @@ npm install          # Install dependencies
 npm run dev          # Start PartyKit dev server with live reload (serves at localhost:1999)
 npm run build        # Bundle client with esbuild to ./dist/
 npm run deploy       # Deploy server + website to PartyKit cloud
+node tools/import-world.mjs model.glb --name castle --size 60   # GLB -> destructible world manifest in assets/worlds/
 ```
+
+Open `?room=<name>&import=/assets/worlds/castle.json` (or call `main.importWorld(url)`) to upload a manifest into a room; the room's terrain, entities and world config are replaced.
 
 Both `npm run dev` and `npm run deploy` serve the website via PartyKit (configured in `partykit.json` `serve` field). The client JS is bundled by PartyKit's built-in esbuild from `src/main.js` into `dist/`. `PARTYKIT_HOST` is injected as a global by the bundler.
 
@@ -45,9 +48,13 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 The world is a sparse grid of 10-unit chunks keyed `"x,y,z"` (chunk x covers [10x, 10x+10)). A per-room world config (`src/terrain/grid.js` `DEFAULT_WORLD`, stored under the `world` key, sent in full updates) gives the bounds and the box of implicit rock; the sandbox default is a 100 m cube centred on the origin, solid below y=0. Unstored chunks are implicit (rock inside that box, air elsewhere); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk keys plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, and then lets connectivity decide what is unsupported; unsupported solid becomes `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{key: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<x,y,z>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand. Grounding and loading are decided by `src/server/Connectivity.js`: solid and air islands per chunk, face footprints rasterized on a 16x16 grid, union-find across chunks. Unsupported solid becomes fragments (merged across chunks); terrain is only held and collided where it faces an air component containing a player or body, so buried rock and empty sealed caves cost nothing. Updates carry `chunks`/`rock`/`cull` maps and the client holds only what it is told to.
 
+### World Import
+
+`tools/import-world.mjs` turns any GLB into terrain without assuming watertight or consistently oriented input. It reads geometry and base colours with a minimal GLB parser, builds a three-mesh-bvh signed distance field (default `shell` mode: solid within 0.2 m of any surface, so walls get thickness; `signed` uses ray parity for closed meshes), marches it with `Manifold.levelSet`, simplifies, splits by exact chunk-cube intersection, picks each triangle's material from the nearest source triangle, and writes `{world, chunks: {key: {version, bytes}}}`. With the default floor, the model's base sits on implicit rock. The client uploads manifests in `import_begin` / `import_chunks` / `import_end` messages.
+
 ### Networking Protocol
 
-JSON over WebSocket. Client → server: `player`, `csg`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks` (`{key: version|null}`), `rock` (`{key: faceMask}`), `cull` (`{key: faceMask}`), `serverTickMs`, plus binary chunk frames.
+JSON over WebSocket. Client → server: `player`, `csg`, `import_begin/chunks/end`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks` (`{key: version|null}`), `rock` (`{key: faceMask}`), `cull` (`{key: faceMask}`), `serverTickMs`, plus binary chunk frames.
 
 ## Key Dependencies
 
