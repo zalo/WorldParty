@@ -50,7 +50,12 @@ export default class Main {
             window.history.replaceState({}, "", `${window.location.pathname}?${this.queryParams.toString()}`);
         }
 
-        this.conn = new PartySocket({ host: PARTYKIT_HOST, room: this.curRoom });
+        // Reach the server through whatever served this page (a reverse proxy may add a path
+        // prefix); the bundler's PARTYKIT_HOST is only the fallback for non-http origins.
+        let proxied = /^https?:$/.test(window.location.protocol);
+        this.basePath = proxied ? window.location.pathname.replace(/\/[^/]*$/, '') : '';
+        this.serverHost = proxied ? window.location.host : PARTYKIT_HOST;
+        this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
         // ?import=<manifest url> uploads a world (tools/import-world.mjs output) into the room once connected
@@ -209,7 +214,7 @@ export default class Main {
     /** Chunk bytes by content version over HTTP (cacheable, immutable per version). */
     async fetchChunk(key, version) {
         let protocol = location.protocol === 'https:' ? 'https:' : 'http:';
-        let res = await fetch(`${protocol}//${PARTYKIT_HOST}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${key}?v=${version}`);
+        let res = await fetch(`${protocol}//${this.serverHost}${this.basePath}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${key}?v=${version}`);
         if(res.status === 204) return null;
         if(!res.ok) throw new Error('HTTP ' + res.status);
         return new Uint8Array(await res.arrayBuffer());
