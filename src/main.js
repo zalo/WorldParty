@@ -161,7 +161,7 @@ export default class Main {
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);
-        this.terrainBatch = this.terrain.batch; // raycast target for tools
+        this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk)
         this.onWorldChanged(this.terrain.world);
     }
 

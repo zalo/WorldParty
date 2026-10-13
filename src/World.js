@@ -86,7 +86,9 @@ export default class World {
 
         // SSGI pass with temporal filtering enabled
         this.giPass = ssgi( scenePassColor, scenePassDepth, sceneNormal, this.camera );
-        this.giPass.useTemporalFiltering = true;
+        // Debug toggles: ?traa=0 skips the temporal AA, ?gi=0 skips SSGI, ?probes=0 skips the probe grid
+        let flags = mainObject.queryParams || new URLSearchParams();
+        this.giPass.useTemporalFiltering = flags.get('gitemporal') !== '0';
         if(this.isMobile) {
             this.giPass.sliceCount.value = 1;
             this.giPass.stepCount.value = 8;
@@ -99,12 +101,12 @@ export default class World {
         const ao = this.giPass.getAONode();
 
         // Composite: direct lighting * AO + diffuse * GI
-        const compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
+        const compositePass = flags.get('gi') === '0' ? scenePassColor : vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
 
         // TRAA: temporal resolve anti-aliasing using velocity buffer
         const traaPass = traa( compositePass, scenePassDepth, scenePassVelocity, this.camera );
 
-        this.renderPipeline.outputNode = traaPass;
+        this.renderPipeline.outputNode = flags.get('traa') === '0' ? compositePass : traaPass;
 
         this._onWindowResize();
         this._setupSky(mainObject);

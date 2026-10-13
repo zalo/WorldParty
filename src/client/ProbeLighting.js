@@ -9,7 +9,9 @@ export class ProbeLighting {
 
     static supported(renderer) { return !!(renderer.backend && renderer.backend.isWebGPUBackend); }
 
-    constructor(renderer, scene, { spacing = 5, maxProbes = 24000, perFrame = 32, cubemapSize = 8 } = {}) {
+    // LightProbeGrid bakes into render targets one row (or one slice) per probe, so the probe count
+    // must stay under the device's 2D texture limit (8192 on most adapters) with room to spare.
+    constructor(renderer, scene, { spacing = 5, maxProbes = 4096, perFrame = 8, cubemapSize = 8 } = {}) {
         this.renderer = renderer;
         this.scene = scene;
         this.spacing = spacing;
@@ -29,10 +31,10 @@ export class ProbeLighting {
         this.min.copy(min); this.max.copy(max);
         let size = new THREE.Vector3().subVectors(max, min);
         let counts = [size.x, size.y, size.z].map(s => Math.max(2, Math.ceil(s / this.spacing) + 1));
-        // Cap the probe count by coarsening uniformly
-        let total = counts[0] * counts[1] * counts[2];
-        if(total > this.maxProbes) {
-            let f = Math.cbrt(this.maxProbes / total);
+        // Cap the probe count by coarsening uniformly until it fits
+        let limit = Math.min(this.maxProbes, (this.renderer.backend?.device?.limits?.maxTextureDimension2D || 8192) - 256);
+        for(let guard = 0; counts[0] * counts[1] * counts[2] > limit && guard < 32; guard++) {
+            let f = Math.cbrt(limit / (counts[0] * counts[1] * counts[2]));
             counts = counts.map(c => Math.max(2, Math.floor(c * f)));
         }
         this.grid = new LightProbeGrid(size.x, size.y, size.z, counts[0], counts[1], counts[2]);

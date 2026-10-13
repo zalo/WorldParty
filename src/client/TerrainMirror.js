@@ -1,6 +1,7 @@
-/** Client terrain mirror: one BatchedMesh holding every held chunk's mesh,
- *  grown on demand instead of reserved up front, with a BVH per chunk for
- *  player collision and a version per chunk for content-addressed fetching.
+/** Client terrain mirror: one Mesh per held chunk under a single Group (a
+ *  few hundred draw calls at most, and no shared-buffer bookkeeping to get
+ *  wrong), with a BVH per chunk for player collision and a version per
+ *  chunk for content-addressed fetching.
  *
  *  Chunks are keyed "x,y,z" over a sparse world (see terrain/grid.js); the
  *  world config arrives with the first full update. The server decides what
@@ -15,8 +16,6 @@ import { materialColor, materialTable, DEFAULT_MATERIAL } from '../terrain/mater
 import { CHUNK_SIZE, HALF, FACES, DEFAULT_WORLD, chunkCenter as gridCenter, chunkMin, chunksInBox, sanitizeWorld } from '../terrain/grid.js';
 
 export { CHUNK_SIZE };
-const INITIAL_VERTS = 1 << 16;
-const INITIAL_INSTANCES = 1024;
 const PLANE_EPS = 1e-3;
 
 export function chunkCenter(key) { let c = gridCenter(key); return new THREE.Vector3(c.x, c.y, c.z); }
@@ -28,7 +27,6 @@ export class TerrainMirror {
         this.world = DEFAULT_WORLD;
         this.table = materialTable(this.world);
         this.layers = new Map();     // material id -> texture array layer (see TerrainTextures)
-        this.maxInstances = INITIAL_INSTANCES;
         this.rockMask = new Map();  // key -> faces of untouched rock to draw
         this.cullMask = new Map();  // key -> boundary faces of a held modified chunk to skip
         this.versions = new Map();  // key -> version of each held modified chunk
@@ -38,20 +36,10 @@ export class TerrainMirror {
         this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
         this.onChunkChanged = null; // (key) => void, after a chunk's geometry is rebuilt
         this.onWorldChanged = null; // (world) => void, after a new world config is adopted
-        this.createBatch();
-    }
-
-    createBatch() {
-        this.batch = new THREE.BatchedMesh(this.maxInstances, INITIAL_VERTS, INITIAL_VERTS * 3, this.material);
-        this.batch.perObjectFrustumCulled = true;
-        this.batch.castShadow = true;
-        this.batch.receiveShadow = true;
-        this.scene.add(this.batch);
-        this.geoIds = new Map();
-        this.instIds = new Map();
-        this.reservedV = new Map();
-        this.reservedI = new Map();
-        this.wastedVerts = 0;
+        this.group = new THREE.Group();
+        this.group.name = 'terrain';
+        this.scene.add(this.group);
+        this.objects = new Map();   // key -> Mesh
     }
 
     /** Adopt the server's world config (bounds, implicit rock). */
@@ -229,87 +217,39 @@ export class TerrainMirror {
 
     /** Resource summary for diagnostics. */
     stats() {
-        let tris = 0;
-        for(let geoId of this.geoIds.values()) tris += this.batch._geometryInfo[geoId].indexCount / 3;
-        return { chunks: this.geoIds.size, tris, rock: this.rockMask.size, held: this.meshes.size, pending: this.pending.size,
-                 vertexCapacity: this.batch._maxVertexCount, vertexUsed: this.batch._nextVertexStart, maxInstances: this.maxInstances };
+        let tris = 0, verts = 0;
+        for(let mesh of this.objects.values()) { tris += mesh.geometry.index.count / 3; verts += mesh.geometry.attributes.position.count; }
+        return { chunks: this.objects.size, tris, verts, rock: this.rockMask.size, held: this.meshes.size, pending: this.pending.size };
     }
 
     /** BVH for a chunk, or null if it has no geometry. */
     bvh(key) {
-        let geoId = this.geoIds.get(key);
-        return geoId !== undefined && this.batch.boundsTrees ? this.batch.boundsTrees[geoId] : null;
+        let mesh = this.objects.get(key);
+        return mesh ? mesh.geometry.boundsTree : null;
     }
 
-    // ---- batch management ---------------------------------------------------
+    // ---- scene objects ------------------------------------------------------
 
     setGeometry(key, geometry) {
-        let geoId = this.geoIds.get(key);
+        let mesh = this.objects.get(key);
         if(!geometry) {
-            if(geoId !== undefined) this.release(key);
+            if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
             return;
         }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
-        let nv = geometry.attributes.position.count, ni = geometry.index.count;
-        if(geoId !== undefined && nv <= this.reservedV.get(key) && ni <= this.reservedI.get(key)) {
-            this.batch.setGeometryAt(geoId, geometry);
-            this.batch.computeBoundsTree(geoId);
+        geometry.computeBoundsTree();
+        if(mesh) {
+            mesh.geometry.dispose();
+            mesh.geometry = geometry;
             return;
         }
-        if(geoId !== undefined) this.release(key);
-        if(this.geoIds.size >= this.maxInstances) { this.growInstances(); }
-        let rv = Math.max(nv, Math.ceil(nv * 1.5)), ri = Math.max(ni, Math.ceil(ni * 1.5));
-        this.ensureCapacity(rv, ri);
-        geoId = this.batch.addGeometry(geometry, rv, ri);
-        this.geoIds.set(key, geoId);
-        let instId = this.batch.addInstance(geoId);
-        this.instIds.set(key, instId);
-        this.batch.setMatrixAt(instId, new THREE.Matrix4());
-        this.reservedV.set(key, rv);
-        this.reservedI.set(key, ri);
-        this.batch.computeBoundsTree(geoId);
-    }
-
-    release(key) {
-        let geoId = this.geoIds.get(key);
-        this.batch.deleteGeometry(geoId); // also deletes its instance
-        if(this.batch.boundsTrees) this.batch.boundsTrees[geoId] = null;
-        this.wastedVerts += this.reservedV.get(key);
-        this.geoIds.delete(key);
-        this.instIds.delete(key);
-        this.reservedV.delete(key);
-        this.reservedI.delete(key);
-        // Compact once dead ranges dominate; BVHs reference buffer ranges, so rebuild them all.
-        if(this.wastedVerts > this.batch._nextVertexStart / 2 && this.wastedVerts > 4096) {
-            this.batch.optimize();
-            this.wastedVerts = 0;
-            this.batch.disposeBoundsTree();
-            this.batch.computeBoundsTree();
-        }
-    }
-
-    ensureCapacity(nv, ni) {
-        let b = this.batch;
-        let maxV = b._maxVertexCount, maxI = b._maxIndexCount;
-        let needV = b._nextVertexStart + nv, needI = b._nextIndexStart + ni;
-        if(needV <= maxV && needI <= maxI) return;
-        while(maxV < needV) maxV *= 2;
-        while(maxI < needI) maxI *= 2;
-        b.setGeometrySize(maxV, maxI);
-        // The underlying buffers were replaced; rebuild every BVH against the new arrays.
-        b.disposeBoundsTree();
-        b.computeBoundsTree();
-    }
-
-    /** BatchedMesh cannot grow its instance table: build a bigger one and refill it from our state. */
-    growInstances() {
-        let old = this.batch;
-        this.scene.remove(old);
-        old.disposeBoundsTree?.();
-        old.dispose();
-        this.maxInstances *= 2;
-        this.createBatch();
-        for(let key of new Set([...this.rockMask.keys(), ...this.meshes.keys()])) this.rebuild(key);
+        mesh = new THREE.Mesh(geometry, this.material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.matrixAutoUpdate = false;
+        mesh.userData.chunkKey = key;
+        this.group.add(mesh);
+        this.objects.set(key, mesh);
     }
 }
