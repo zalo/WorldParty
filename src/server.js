@@ -1,1389 +1,311 @@
 /* eslint-env browser */
-
 // @ts-check
 /** @typedef {import("partykit/server").Room} Room */
 /** @typedef {import("partykit/server").Server} Server */
 /** @typedef {import("partykit/server").Connection} Connection */
 /** @typedef {import("partykit/server").ConnectionContext} ConnectionContext */
 
-import * as THREE from 'three';
-import { mergeVertices, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { ADDITION, INTERSECTION, SUBTRACTION, Brush, Evaluator } from 'three-bvh-csg';
-import { gzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
+import { World } from './ecs/World.js';
+import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
+import { Physics } from './server/Physics.js';
+import { Terrain, GRID, SOLID_BELOW_Y, chunkCenter } from './server/Terrain.js';
+import { getPropDef } from './props/PropRegistry.js';
 
-import { M } from '../assets/manifold-3d/manifold.js';
-import manMod from '../assets/manifold-3d/manifold.wasm';
-/** @typedef {import("../assets/manifold-3d/manifold.js").Manifold} Manifold */
-/** @typedef {import("../assets/manifold-3d/manifold.js").ManifoldToplevel} ManifoldToplevel */
-/** @typedef {import("../assets/manifold-3d/manifold.js").Mesh} Mesh */
-/** @typedef {import("../assets/manifold-3d/manifold.js").Vec3} Vec3 */
+const TICK_MS = 1000 / 30;
+const FULL_UPDATE_EVERY = 300;      // ticks (10s)
+const PERSIST_INTERVAL_MS = 5000;
+const STORAGE_BATCH = 128;          // Durable Object storage batch limit
 
-import PhysXInit from '../assets/physx/physx-js-webidl.mjs';
-import physxWasm from '../assets/physx/physx-js-webidl.wasm';
-import { PROP_HULLS } from './props/PropHulls.js';
+const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
-const PHYS_CUBE_COUNT = 12;
-const PHYS_CUBE_HALF = 0.5;
-
-// shape: 'box'|'sphere'|'capsule'|'hulls' — analytic shapes are faster and more accurate
-const PROP_DEFS = {
-  barrel:  { half: 0.5, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/barrel/model.gltf" },
-  crate:   { half: 0.5, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/sci-fi-crate/model.gltf" },
-  chest:   { half: 0.4, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/chest/model.gltf" },
-  bench:   { half: 0.5, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/bench/model.gltf" },
-  ball:    { half: 0.3, shape: 'sphere',  url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/cannon-ball/model.gltf" },
-  can:     { half: 0.15,shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/soda-can/model.gltf" },
-  pot:     { half: 0.3, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/pot/model.gltf" },
-  tower:   { half: 0.6, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/tower/model.gltf" },
-  board:   { half: 0.3, shape: 'box',     url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/cutting-board/model.gltf" },
-  sword:   { half: 0.2, shape: 'hulls',   url: "https://raw.githubusercontent.com/pmndrs/market-assets/main/files/models/sword/model.gltf" },
-};
+const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
+const vec3 = (v, d = { x: 0, y: 0, z: 0 }) => v ? { x: num(v.x, d.x), y: num(v.y, d.y), z: num(v.z, d.z) } : { ...d };
+const quat = (q) => q ? { x: num(q.x), y: num(q.y), z: num(q.z), w: num(q.w, 1) } : { x: 0, y: 0, z: 0, w: 1 };
 
 /** @implements {Server} */
 class PartyServer {
   /** @param {Room} room */
   constructor(room) {
-    this.playerColors = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80", "#FF80FF"];
-
-    /** @type {Room} */
     this.room = room;
-
-    /** @type {Record<string, { name: string, id:string, position: { x: number, y: number, z: number }, color:string | null}>} */
-    this.players = {};
-    /** @type {Record<number, { index:number, data: string, manifold: Manifold | null}>} */
-    this.chunks = {};
-    /** @type {Record<string, { id:string, url: string, position: { x: number, y: number, z: number }, quaternion: { x: number, y: number, z: number, w: number }, scale: { x: number, y: number, z: number }, selectedBy: string }> } */
-    this.models = {};
+    this.world = new World();
+    this.physics = new Physics();
+    this.terrain = new Terrain();
+    this.ready = false;
     this.globalPlayerCount = 0;
-
-    /** @type {Record<string, boolean>} */
-    this.needsUpdate = {};
-
-    // PhysX state
-    this.px = null;
-    this.pxScene = null;
-    this.pxPhysics = null;
-    this.pxCookingParams = null;
-    this.pxMaterial = null;
-    /** @type {Array<{body: any, id: string, sleeping: boolean}>} */
-    this.physBodies = [];
-    /** @type {Record<string, any>} */
-    this.playerKinematics = {};
-    /** @type {Record<number, any>} - Static physics actors for chunk terrain */
-    this.chunkPhysActors = {};
-    /** @type {Record<string, {id:string, type:string, bodyIdA:string, bodyIdB:string, pxJoint:any}>} */
-    this.joints = {};
-    this.jointCounter = 0;
-    this.lastPhysTime = Date.now();
-
-    this.updateCounter = 0;
-    this.hasNewInfoToSend = false;
+    this.tickCount = 0;
     this.serverTickMs = 0;
-    this.interval = setInterval(() => {
-      let tickStart = Date.now();
+    this.anyAwake = false;
 
-      // Step physics
-      this.stepPhysics();
+    // Persistence queue: entity ids whose persisted components changed
+    this.persistQueue = new Set();
+    this.persistRemoved = new Set();
+    this.world.on('set', (id, name) => { if(PERSISTED.has(name) && !this.world.has(id, 'Player')) this.persistQueue.add(id); });
+    this.world.on('remove', (id, name) => { if(PERSISTED.has(name) && !this.world.has(id, 'Player')) this.persistQueue.add(id); });
+    this.world.on('destroy', (id) => { this.persistQueue.delete(id); this.persistRemoved.add(id); });
+    this.lastPersist = Date.now();
 
-      if(!this.hasNewInfoToSend) return;
-
-      // Physics bodies only at 15Hz (every other tick of the 30Hz loop)
-      let includePhys = (this.updateCounter % 2 === 0);
-
-      if(this.updateCounter % 300 === 0){
-        let msg = {
-          type: "fullupdate",
-          players: this.players,
-          chunks: this.getSerializableChunks(),
-          models: this.models,
-          physBodies: this.getPhysBodiesState(),
-          joints: this.getJointsState(),
-          serverTickMs: this.serverTickMs
-        };
-        this.room.broadcast(JSON.stringify(msg));
-      } else {
-        let partialUpdate = { type: "partialupdate", players: {}, chunks: {}, models: {}, serverTickMs: this.serverTickMs };
-        for(let player in this.players){
-          if(this.needsUpdate[player]){
-            partialUpdate.players[player] = this.players[player];
-            this.needsUpdate[player] = false;
-          }
-        }
-        for(let chunkIndex in this.chunks){
-          if(this.needsUpdate[""+chunkIndex]){
-            partialUpdate.chunks[chunkIndex] = { index: this.chunks[chunkIndex].index, data: this.chunks[chunkIndex].data };
-            this.needsUpdate[""+chunkIndex] = false;
-          }
-        }
-
-        for(let modelId in this.models){
-          if(this.needsUpdate[""+modelId]){
-            partialUpdate.models[modelId] = this.models[modelId];
-            this.needsUpdate[""+modelId] = false;
-          }
-        }
-
-        // Only include awake physics bodies at 15Hz
-        if(includePhys) {
-          let awakePhysBodies = this.getAwakePhysBodiesState();
-          if(awakePhysBodies) {
-            partialUpdate.physBodies = awakePhysBodies;
-          }
-        }
-
-        this.room.broadcast(JSON.stringify(partialUpdate));
-      }
-      this.updateCounter += 1;
-      this.hasNewInfoToSend = false;
-
-      this.serverTickMs = Date.now() - tickStart;
-    }, 1000/30);
+    this.physics.attach(this.world);
+    this.interval = setInterval(() => this.tick(), TICK_MS);
   }
 
-  /** Strip non-serializable manifold objects from chunks for storage/broadcast */
-  getSerializableChunks() {
-    let result = {};
-    for(let key in this.chunks) {
-      result[key] = { index: this.chunks[key].index, data: this.chunks[key].data };
+  // ---- lifecycle ----------------------------------------------------------
+
+  async onStart() {
+    let [storedChunks, storedEntities] = await Promise.all([this.loadPrefixed('chunk:'), this.loadPrefixed('ent:')]);
+    // Legacy single-blob layout
+    let legacyChunks = await this.room.storage.get("chunks");
+    if(legacyChunks) { Object.assign(storedChunks, legacyChunks); await this.room.storage.delete("chunks"); }
+
+    await this.terrain.init(storedChunks);
+    await this.physics.init();
+    this.rebuildAllChunkColliders();
+
+    let maxId = 0;
+    for(let id in storedEntities) {
+      this.world.create(id, storedEntities[id]);
+      let m = /^e(\d+)$/.exec(id); if(m) maxId = Math.max(maxId, parseInt(m[1]));
     }
-    return result;
+    this.world.nextId = maxId + 1;
+    this.world.takeDirty(); // loaded state is not "changed"
+    this.persistQueue.clear(); this.persistRemoved.clear();
+    if(legacyChunks) for(let k in storedChunks) this.terrain.dirty.add(parseInt(k)); // migrate to per-chunk keys
+    this.ready = true;
+    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities`);
   }
 
-  /** Get all physics body states (for full updates) */
-  getPhysBodiesState() {
-    let result = {};
-    for(let b of this.physBodies) {
-      let pose = b.body.getGlobalPose();
-      let p = pose.get_p();
-      let q = pose.get_q();
-      let entry = {
-        id: b.id,
-        position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
-        quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
-        halfExtent: b.halfExtent || PHYS_CUBE_HALF,
-        propId: b.propId || null,
-        propUrl: b.propUrl || null,
-        frozen: b.frozen || false
-      };
-      if(b.meshData) entry.meshData = b.meshData;
-      result[b.id] = entry;
+  async loadPrefixed(prefix) {
+    let out = {};
+    let map = await this.room.storage.list({ prefix });
+    for(let [key, value] of map) out[key.slice(prefix.length)] = value;
+    return out;
+  }
+
+  rebuildAllChunkColliders() {
+    for(let index in this.physics.chunkActors) this.physics._removeChunkActor(index);
+    for(let x = 0; x < GRID; x++) for(let y = 0; y < SOLID_BELOW_Y; y++) for(let z = 0; z < GRID; z++) {
+      let index = x * 100 + y * 10 + z;
+      if(this.terrain.chunks[index]) continue;
+      let c = chunkCenter(index);
+      this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z);
     }
-    return result;
+    for(let index in this.terrain.chunks) this.physics.setChunkCollider(parseInt(index), this.terrain.chunkPositions(parseInt(index)));
   }
 
-  /** Get only awake physics body states (for partial updates), returns null if all sleeping */
-  getAwakePhysBodiesState() {
-    let result = {};
-    let hasAny = false;
-    for(let b of this.physBodies) {
-      if(!b.body.isSleeping() || b.frozen) {
-        let pose = b.body.getGlobalPose();
-        let p = pose.get_p();
-        let q = pose.get_q();
-        let entry = {
-          id: b.id,
-          position: { x: p.get_x(), y: p.get_y(), z: p.get_z() },
-          quaternion: { x: q.get_x(), y: q.get_y(), z: q.get_z(), w: q.get_w() },
-          halfExtent: b.halfExtent || PHYS_CUBE_HALF,
-          propId: b.propId || null,
-          propUrl: b.propUrl || null,
-          frozen: b.frozen || false
-        };
-        if(b.meshData) entry.meshData = b.meshData;
-        result[b.id] = entry;
-        hasAny = true;
-      }
+  /** @param {Connection} conn @param {ConnectionContext} ctx */
+  onConnect(conn, ctx) {
+    this.globalPlayerCount += 1;
+    this.world.create(conn.id, {
+      Player: Player({ name: "Player " + this.globalPlayerCount, color: PLAYER_COLORS[this.globalPlayerCount % PLAYER_COLORS.length] }),
+      Transform: Transform(),
+    });
+    conn.send(JSON.stringify(this.fullUpdate()));
+    console.log(`Connected: ${conn.id} room: ${this.room.id} url: ${new URL(ctx.request.url).pathname}`);
+  }
+
+  /** @param {Connection} conn */
+  async onDisconnect(conn) {
+    if(!this.world.has(conn.id)) return;
+    // Drop anything this player was holding, then the player itself
+    for(let [id, g] of this.world.each('Grabbed')) if(g.by === conn.id) this.world.remove(id, 'Grabbed');
+    this.world.destroy(conn.id);
+    await this.persist();
+  }
+  onClose(conn) { this.onDisconnect(conn); }
+  onError(conn, error) { console.error(error); this.onDisconnect(conn); }
+
+  // ---- tick ---------------------------------------------------------------
+
+  tick() {
+    if(!this.ready) return;
+    let start = Date.now();
+    let players = this.world.query('Player').size;
+
+    // Nothing to simulate: no players and everything asleep
+    if(players === 0 && !this.anyAwake && !this.world.hasDirty() && this.terrain.dirty.size === 0) {
+      this.physics.lastTime = start;
+      return;
     }
-    return hasAny ? result : null;
-  }
 
-  stepPhysics() {
-    if(!this.pxScene) return;
+    this.anyAwake = this.physics.update(this.world, TICK_MS / 1000);
+    this.tickCount++;
 
-    let now = Date.now();
-    let dt = Math.min((now - this.lastPhysTime) / 1000, 0.05);
-    this.lastPhysTime = now;
-    if(dt <= 0) return;
-
-    // Update player kinematic actors — compute velocity and project target forward
-    for(let playerId in this.players) {
-      let kin = this.playerKinematics[playerId];
-      if(!kin) continue;
-      let player = this.players[playerId];
-      let pos = player.position;
-      let newX = pos.x;
-      let newY = pos.y + 1.0;
-      let newZ = pos.z;
-
-      // Compute velocity from position delta
-      let prev = player._prevPhysPos || { x: newX, y: newY, z: newZ };
-      let vx = 0, vy = 0, vz = 0;
-      if(dt > 0) {
-        vx = (newX - prev.x) / dt;
-        vy = (newY - prev.y) / dt;
-        vz = (newZ - prev.z) / dt;
-      }
-      player._prevPhysPos = { x: newX, y: newY, z: newZ };
-      player._velocity = { x: vx, y: vy, z: vz };
-      let speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
-
-      // Project kinematic target forward by one timestep using velocity
-      // This ensures PhysX sees the kinematic moving at the player's speed,
-      // transferring proper momentum to dynamic bodies on contact
-      let targetX = newX + vx * dt;
-      let targetY = newY + vy * dt;
-      let targetZ = newZ + vz * dt;
-
-      this.pxTmpVec.set_x(targetX);
-      this.pxTmpVec.set_y(targetY);
-      this.pxTmpVec.set_z(targetZ);
-      this.pxTmpQuat.set_x(0); this.pxTmpQuat.set_y(0);
-      this.pxTmpQuat.set_z(0); this.pxTmpQuat.set_w(1);
-      this.pxTmpPose.set_p(this.pxTmpVec);
-      this.pxTmpPose.set_q(this.pxTmpQuat);
-      kin.setKinematicTarget(this.pxTmpPose);
-
-      // Wake up sleeping bodies near a moving player
-      if(speed > 0.5) {
-        for(let b of this.physBodies) {
-          if(b.body.isSleeping()) {
-            let bpose = b.body.getGlobalPose();
-            let bp = bpose.get_p();
-            let dx = bp.get_x() - newX;
-            let dy = bp.get_y() - newY;
-            let dz = bp.get_z() - newZ;
-            let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-            if(dist < 3.0) {
-              b.body.wakeUp();
-            }
-          }
-        }
+    if(players > 0) {
+      if(this.tickCount % FULL_UPDATE_EVERY === 0) {
+        this.room.broadcast(JSON.stringify(this.fullUpdate()));
+        this.world.takeDirty(); this.terrain.takeDirty();
+      } else if(this.world.hasDirty() || this.terrain.dirty.size > 0) {
+        let { entities, removed } = this.world.takeDirty();
+        this.room.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: this.terrain.takeDirty(), serverTickMs: this.serverTickMs }));
       }
     }
 
-    this.pxScene.simulate(dt);
-    this.pxScene.fetchResults(true);
+    if(start - this.lastPersist > PERSIST_INTERVAL_MS) this.persist();
+    this.serverTickMs = Date.now() - start;
+  }
 
-    // Check if any body is awake — if so, mark update needed
-    for(let b of this.physBodies) {
-      if(!b.body.isSleeping()) {
-        this.hasNewInfoToSend = true;
-        break;
-      }
+  fullUpdate() {
+    return { type: "fullupdate", entities: this.world.serialize(), removed: [], chunks: this.terrain.serialize(), serverTickMs: this.serverTickMs };
+  }
+
+  // ---- persistence (per-entity / per-chunk keys) --------------------------
+
+  async persist() {
+    this.lastPersist = Date.now();
+    let puts = {};
+    for(let id of this.persistQueue) {
+      if(!this.world.has(id) || this.world.has(id, 'Player')) continue;
+      let s = this.world.serializeEntity(id, (_, name) => PERSISTED.has(name));
+      if(s && Object.keys(s).length > 0) puts['ent:' + id] = s;
     }
-  }
+    let deletes = [...this.persistRemoved].map(id => 'ent:' + id);
+    for(let index of this.persistChunks || []) puts['chunk:' + index] = { index, data: this.terrain.chunks[index].data };
+    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set();
 
-  /** Spawn a physics cube at the given position */
-  spawnPhysCube(x, y, z, half) {
-    if(!this.px || !this.pxScene) return null;
-    let boxGeom = new this.px.PxBoxGeometry(half, half, half);
-    let bv = new this.px.PxVec3(x, y, z);
-    let bq = new this.px.PxQuat(0, 0, 0, 1);
-    let bpose = new this.px.PxTransform(bv, bq);
-    let shapeFlags = new this.px.PxShapeFlags(
-      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-    );
-    let boxShape = this.pxPhysics.createShape(boxGeom, this.pxMaterial, true, shapeFlags);
-    boxShape.setSimulationFilterData(this.pxFilterData);
-    let box = this.pxPhysics.createRigidDynamic(bpose);
-    box.attachShape(boxShape);
-    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(box, 500.0);
-    this.pxScene.addActor(box);
-    let id = "phys_" + (this.physBodyCounter++);
-    this.physBodies.push({ body: box, id: id, halfExtent: half });
-    this.hasNewInfoToSend = true;
-    console.log(`Spawned phys cube ${id} at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}) half=${half}`);
-    return id;
-  }
-
-  /** Spawn a prop with CoACD convex hull colliders */
-  spawnPropWithHulls(x, y, z, half, hulls, propId, propUrl) {
-    if(!this.px || !this.pxScene) return null;
-    let scale = half * 2; // hulls are normalized to unit size
-
-    let bv = new this.px.PxVec3(x, y, z);
-    let bq = new this.px.PxQuat(0, 0, 0, 1);
-    let bpose = new this.px.PxTransform(bv, bq);
-    let body = this.pxPhysics.createRigidDynamic(bpose);
-
-    let attachedAny = false;
-    for(let hull of hulls) {
-      let verts = hull.vertices;
-      if(!verts || verts.length < 4) continue;
-
-      // Create PxArray with scaled vertices
-      let pxVerts = new this.px.PxArray_PxVec3(verts.length);
-      for(let i = 0; i < verts.length; i++) {
-        let v = new this.px.PxVec3(verts[i][0] * scale, verts[i][1] * scale, verts[i][2] * scale);
-        pxVerts.set(i, v);
-      }
-
-      let desc = new this.px.PxConvexMeshDesc();
-      desc.points.set_count(verts.length);
-      desc.points.set_stride(12);
-      desc.points.set_data(pxVerts.begin());
-      desc.flags.raise(this.px.PxConvexFlagEnum.eCOMPUTE_CONVEX);
-
-      let convexMesh = this.px.CreateConvexMesh(this.pxCookingParams, desc);
-      if(!convexMesh) {
-        console.warn(`Failed to cook convex hull for ${propId}`);
-        continue;
-      }
-
-      let convexGeom = new this.px.PxConvexMeshGeometry(convexMesh);
-      let sf = new this.px.PxShapeFlags(
-        this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-        this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-      );
-      let shape = this.pxPhysics.createShape(convexGeom, this.pxMaterial, true, sf);
-      shape.setSimulationFilterData(this.pxFilterData);
-      body.attachShape(shape);
-      attachedAny = true;
+    let keys = Object.keys(puts);
+    for(let i = 0; i < keys.length; i += STORAGE_BATCH) {
+      let batch = {};
+      for(let k of keys.slice(i, i + STORAGE_BATCH)) batch[k] = puts[k];
+      await this.room.storage.put(batch);
     }
-
-    if(!attachedAny) {
-      // Fallback to box if all hulls failed
-      let boxGeom = new this.px.PxBoxGeometry(half, half, half);
-      let sf = new this.px.PxShapeFlags(
-        this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-        this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-      );
-      let shape = this.pxPhysics.createShape(boxGeom, this.pxMaterial, true, sf);
-      shape.setSimulationFilterData(this.pxFilterData);
-      body.attachShape(shape);
-    }
-
-    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
-    this.pxScene.addActor(body);
-    let id = "phys_" + (this.physBodyCounter++);
-    this.physBodies.push({ body, id, halfExtent: half, propId, propUrl: propUrl || null });
-    this.hasNewInfoToSend = true;
-    console.log(`Spawned prop ${propId} (${id}) with ${hulls.length} convex hulls at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
-    return id;
+    for(let i = 0; i < deletes.length; i += STORAGE_BATCH) await this.room.storage.delete(deletes.slice(i, i + STORAGE_BATCH));
   }
 
-  /** Spawn a prop with the appropriate collider type based on PROP_DEFS.shape */
-  spawnPropBody(x, y, z, def, propId) {
-    if(!this.px || !this.pxScene) return null;
-    let half = def.half;
+  markChunkPersist(index) { (this.persistChunks ||= new Set()).add(index); }
 
-    let bv = new this.px.PxVec3(x, y, z);
-    let bq = new this.px.PxQuat(0, 0, 0, 1);
-    let bpose = new this.px.PxTransform(bv, bq);
-    let body = this.pxPhysics.createRigidDynamic(bpose);
+  // ---- gameplay helpers ---------------------------------------------------
 
-    let sf = new this.px.PxShapeFlags(
-      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-    );
-
-    let shape = null;
-    if(def.shape === 'sphere') {
-      let geom = new this.px.PxSphereGeometry(half);
-      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
-    } else if(def.shape === 'capsule') {
-      // PhysX capsule: radius + halfHeight along X axis
-      let geom = new this.px.PxCapsuleGeometry(half * 0.6, half * 0.4);
-      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
-    } else if(def.shape === 'hulls') {
-      let hulls = PROP_HULLS[propId];
-      if(hulls && hulls.length > 0) {
-        let id = this.spawnPropWithHulls(x, y, z, half, hulls, propId, def.url);
-        return id; // spawnPropWithHulls handles everything
-      }
-      // Fallback to box
-      let geom = new this.px.PxBoxGeometry(half, half, half);
-      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
-    } else {
-      // Default: box
-      let geom = new this.px.PxBoxGeometry(half, half, half);
-      shape = this.pxPhysics.createShape(geom, this.pxMaterial, true, sf);
-    }
-
-    if(shape) {
-      shape.setSimulationFilterData(this.pxFilterData);
-      body.attachShape(shape);
-    }
-
-    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
-    this.pxScene.addActor(body);
-    let id = "phys_" + (this.physBodyCounter++);
-    this.physBodies.push({ body, id, halfExtent: half, propId, propUrl: def.url || null });
-    this.hasNewInfoToSend = true;
-    console.log(`Spawned ${def.shape || 'box'} prop ${propId} (${id}) at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
-    return id;
+  spawnProp(propId, position, quaternion) {
+    let def = getPropDef(propId);
+    return this.world.create({
+      Transform: Transform({ position, quaternion }),
+      RigidBody: RigidBody({ shape: def.shape, halfExtent: def.halfExtent, propId: def.id }),
+      Prop: Prop({ propId: def.id, url: def.url }),
+    });
   }
 
-  // --- PhysGun: D6 joint with spring drives (keeps body dynamic for collisions) ---
-
-  physGunGrab(playerId, bodyId) {
-    if(!this.px || !this.pxScene) return;
-    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
-    if(!bodyEntry || bodyEntry.grabbedBy) return;
-
-    let body = bodyEntry.body;
-    body.wakeUp();
-
-    // Create an anchor (invisible kinematic body at the object's current position)
-    let pose = body.getGlobalPose();
-    let anchorPose = new this.px.PxTransform(pose.get_p(), pose.get_q());
-    let anchor = this.pxPhysics.createRigidDynamic(anchorPose);
-    anchor.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
-    let sf = new this.px.PxShapeFlags(0); // No collision shape needed
-    this.pxScene.addActor(anchor);
-
-    // Create D6 joint between anchor and body with spring drives
-    let identityPose = new this.px.PxTransform(this.px.PxIDENTITYEnum.PxIdentity);
-    let joint = this.px.D6JointCreate(this.pxPhysics, anchor, identityPose, body, identityPose);
-
-    // Free all axes, driven by springs
-    joint.setMotion(this.px.PxD6AxisEnum.eX, this.px.PxD6MotionEnum.eFREE);
-    joint.setMotion(this.px.PxD6AxisEnum.eY, this.px.PxD6MotionEnum.eFREE);
-    joint.setMotion(this.px.PxD6AxisEnum.eZ, this.px.PxD6MotionEnum.eFREE);
-    joint.setMotion(this.px.PxD6AxisEnum.eTWIST, this.px.PxD6MotionEnum.eFREE);
-    joint.setMotion(this.px.PxD6AxisEnum.eSWING1, this.px.PxD6MotionEnum.eFREE);
-    joint.setMotion(this.px.PxD6AxisEnum.eSWING2, this.px.PxD6MotionEnum.eFREE);
-
-    // Strong position + rotation spring drives
-    let linearDrive = new this.px.PxD6JointDrive(5000, 500, Infinity, true);
-    joint.setDrive(this.px.PxD6DriveEnum.eX, linearDrive);
-    joint.setDrive(this.px.PxD6DriveEnum.eY, linearDrive);
-    joint.setDrive(this.px.PxD6DriveEnum.eZ, linearDrive);
-
-    let angularDrive = new this.px.PxD6JointDrive(3000, 300, Infinity, true);
-    joint.setDrive(this.px.PxD6DriveEnum.eSLERP, angularDrive);
-
-    bodyEntry.grabbedBy = playerId;
-    bodyEntry.grabJoint = joint;
-    bodyEntry.grabAnchor = anchor;
-    this.hasNewInfoToSend = true;
-    console.log(`PhysGun grab: ${bodyId} by ${playerId}`);
+  applyCsg(data) {
+    let index = num(data.index, -1) | 0;
+    if(index < 0 || index >= GRID * GRID * GRID) return;
+    let fragments = this.terrain.applyCsg({ ...data, index });
+    this.physics.setChunkCollider(index, this.terrain.chunkPositions(index));
+    this.markChunkPersist(index);
+    for(let comps of fragments) this.world.create(comps);
   }
-
-  physGunMove(playerId, bodyId, targetPos, targetQuat) {
-    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
-    if(!bodyEntry || bodyEntry.grabbedBy !== playerId || !bodyEntry.grabAnchor) return;
-
-    // Move the kinematic anchor to the target pose
-    this.pxTmpVec.set_x(targetPos.x);
-    this.pxTmpVec.set_y(targetPos.y);
-    this.pxTmpVec.set_z(targetPos.z);
-    this.pxTmpQuat.set_x(targetQuat.x);
-    this.pxTmpQuat.set_y(targetQuat.y);
-    this.pxTmpQuat.set_z(targetQuat.z);
-    this.pxTmpQuat.set_w(targetQuat.w);
-    this.pxTmpPose.set_p(this.pxTmpVec);
-    this.pxTmpPose.set_q(this.pxTmpQuat);
-    bodyEntry.grabAnchor.setKinematicTarget(this.pxTmpPose);
-
-    bodyEntry.body.wakeUp();
-    this.hasNewInfoToSend = true;
-  }
-
-  physGunRelease(playerId, bodyId) {
-    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
-    if(!bodyEntry || bodyEntry.grabbedBy !== playerId) return;
-
-    if(bodyEntry.grabJoint) bodyEntry.grabJoint.release();
-    if(bodyEntry.grabAnchor) {
-      this.pxScene.removeActor(bodyEntry.grabAnchor);
-    }
-    bodyEntry.grabJoint = null;
-    bodyEntry.grabAnchor = null;
-    bodyEntry.grabbedBy = null;
-    bodyEntry.body.wakeUp();
-    this.hasNewInfoToSend = true;
-    console.log(`PhysGun release: ${bodyId}`);
-  }
-
-  physGunFreeze(bodyId) {
-    let bodyEntry = this.physBodies.find(b => b.id === bodyId);
-    if(!bodyEntry) return;
-
-    // Release grab if held
-    if(bodyEntry.grabJoint) bodyEntry.grabJoint.release();
-    if(bodyEntry.grabAnchor) this.pxScene.removeActor(bodyEntry.grabAnchor);
-    bodyEntry.grabJoint = null;
-    bodyEntry.grabAnchor = null;
-    bodyEntry.grabbedBy = null;
-
-    // Toggle frozen state
-    bodyEntry.frozen = !bodyEntry.frozen;
-    if(bodyEntry.frozen) {
-      bodyEntry.body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
-    } else {
-      bodyEntry.body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, false);
-      bodyEntry.body.wakeUp();
-    }
-    this.hasNewInfoToSend = true;
-    console.log(`PhysGun ${bodyEntry.frozen ? 'freeze' : 'unfreeze'}: ${bodyId}`);
-  }
-
-  // --- Constraint Tools ---
 
   createJoint(data) {
-    if(!this.px || !this.pxScene) return;
-    let bodyA = this.physBodies.find(b => b.id === data.bodyIdA);
-    let bodyB = this.physBodies.find(b => b.id === data.bodyIdB);
-    if(!bodyA || !bodyB) return;
-
-    // Compute local frames from world positions
-    let poseA = bodyA.body.getGlobalPose();
-    let poseB = bodyB.body.getGlobalPose();
-
-    // World pos to local frame (simplified: just offset, no rotation transform)
-    let wpA = data.worldPosA;
-    let wpB = data.worldPosB;
-    let pA = poseA.get_p();
-    let pB = poseB.get_p();
-
-    let localA = new this.px.PxVec3(wpA.x - pA.get_x(), wpA.y - pA.get_y(), wpA.z - pA.get_z());
-    let localB = new this.px.PxVec3(wpB.x - pB.get_x(), wpB.y - pB.get_y(), wpB.z - pB.get_z());
-    let q = new this.px.PxQuat(0, 0, 0, 1);
-    let frameA = new this.px.PxTransform(localA, q);
-    let frameB = new this.px.PxTransform(localB, q);
-
-    let pxJoint = null;
-    let jointId = "joint_" + (this.jointCounter++);
-
-    if(data.jointType === "rope") {
-      pxJoint = this.px.DistanceJointCreate(this.pxPhysics, bodyA.body, frameA, bodyB.body, frameB);
-      if(pxJoint) {
-        let dist = Math.sqrt(
-          (wpA.x-wpB.x)**2 + (wpA.y-wpB.y)**2 + (wpA.z-wpB.z)**2
-        );
-        pxJoint.setMaxDistance(Math.max(dist, 0.5));
-        pxJoint.setDistanceJointFlag(this.px.PxDistanceJointFlagEnum.eMAX_DISTANCE_ENABLED, true);
-        pxJoint.setStiffness(100);
-        pxJoint.setDamping(10);
-        pxJoint.setDistanceJointFlag(this.px.PxDistanceJointFlagEnum.eSPRING_ENABLED, true);
-      }
-    } else if(data.jointType === "weld") {
-      pxJoint = this.px.FixedJointCreate(this.pxPhysics, bodyA.body, frameA, bodyB.body, frameB);
-      if(pxJoint) {
-        pxJoint.setBreakForce(100000, 100000);
-      }
-    } else if(data.jointType === "hinge") {
-      // For hinge, orient frame along the provided axis
-      let axis = data.axis || { x: 0, y: 1, z: 0 };
-      let axisVec = new this.px.PxVec3(axis.x, axis.y, axis.z);
-      let hingeQ = new this.px.PxQuat(0, axisVec);
-      let hingeFrameA = new this.px.PxTransform(localA, hingeQ);
-      let hingeFrameB = new this.px.PxTransform(localB, hingeQ);
-      pxJoint = this.px.RevoluteJointCreate(this.pxPhysics, bodyA.body, hingeFrameA, bodyB.body, hingeFrameB);
-    }
-
-    if(pxJoint) {
-      // Store local offsets for visual rendering
-      let lA = { x: wpA.x - pA.get_x(), y: wpA.y - pA.get_y(), z: wpA.z - pA.get_z() };
-      let lB = { x: wpB.x - pB.get_x(), y: wpB.y - pB.get_y(), z: wpB.z - pB.get_z() };
-      this.joints[jointId] = {
-        id: jointId, type: data.jointType,
-        bodyIdA: data.bodyIdA, bodyIdB: data.bodyIdB,
-        localOffsetA: lA, localOffsetB: lB,
-        pxJoint: pxJoint
-      };
-      bodyA.body.wakeUp();
-      bodyB.body.wakeUp();
-      this.hasNewInfoToSend = true;
-      console.log(`Created ${data.jointType} joint ${jointId} between ${data.bodyIdA} and ${data.bodyIdB}`);
-    }
-  }
-
-  removeJoint(jointId) {
-    let joint = this.joints[jointId];
-    if(!joint) return;
-    if(joint.pxJoint) joint.pxJoint.release();
-    delete this.joints[jointId];
-    this.hasNewInfoToSend = true;
-  }
-
-  /** Get serializable joint state for broadcasting */
-  getJointsState() {
-    let result = {};
-    for(let id in this.joints) {
-      let j = this.joints[id];
-      result[id] = { id: j.id, type: j.type, bodyIdA: j.bodyIdA, bodyIdB: j.bodyIdB, localOffsetA: j.localOffsetA, localOffsetB: j.localOffsetB };
-    }
-    return result;
-  }
-
-  /** Check if a decomposed island is grounded — touching a chunk face where
-   *  the adjacent chunk has unmodified default solid terrain.
-   *  Islands touching solid ground stay as terrain; floating islands become physics bodies. */
-  isIslandGrounded(island, chunkIndex) {
-    let z0 = chunkIndex % 10, y0 = Math.floor(chunkIndex / 10) % 10, x0 = Math.floor(chunkIndex / 100);
-    let mesh = island.getMesh();
-    let verts = mesh.vertProperties;
-    let numVerts = verts.length / 3;
-    let eps = 0.15;
-
-    // 6 faces: [vertexAxis, boundaryValue, neighborX, neighborY, neighborZ]
-    let faces = [
-      [0, x0*10-50, x0-1, y0,   z0  ],  // -X
-      [0, x0*10-40, x0+1, y0,   z0  ],  // +X
-      [1, y0*10-50, x0,   y0-1, z0  ],  // -Y (bottom)
-      [1, y0*10-40, x0,   y0+1, z0  ],  // +Y (top)
-      [2, z0*10-50, x0,   y0,   z0-1],  // -Z
-      [2, z0*10-40, x0,   y0,   z0+1],  // +Z
-    ];
-
-    for(let [axis, boundary, nx, ny, nz] of faces) {
-      if(nx < 0 || nx > 9 || ny < 0 || ny > 9 || nz < 0 || nz > 9) continue;
-
-      // Grounded if adjacent chunk has terrain — either unmodified default solid
-      // (y < 5, no stored manifold) or modified with a stored manifold.
-      // Only skip if adjacent is an empty air chunk (y >= 5 with no manifold).
-      let ni = nx * 100 + ny * 10 + nz;
-      let hasAdjacentTerrain = (ny < 5 && !this.chunks[ni]) || (this.chunks[ni] && this.chunks[ni].manifold);
-      if(!hasAdjacentTerrain) continue;
-
-      // Does any vertex of the island touch this face?
-      for(let i = 0; i < numVerts; i++) {
-        if(Math.abs(verts[i * 3 + axis] - boundary) < eps) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /** Cook a triangle mesh with lazy SDF for dynamic fragment collision.
-   *  Lazy SDF allocates the grid but computes voxel values on demand during
-   *  collision detection, avoiding the expensive upfront bake. */
-  cookTriangleMeshSDF(vertices, indices) {
-    let numVerts = vertices.length / 3;
-    let numTris = indices.length / 3;
-    if(numVerts < 4 || numTris < 1) return null;
-
-    // Compute bounding box for SDF grid spacing
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for(let i = 0; i < numVerts; i++) {
-      let x = vertices[i*3], y = vertices[i*3+1], z = vertices[i*3+2];
-      minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z);
-      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z);
-    }
-
-    let longestAxis = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
-    if(longestAxis < 0.01) return null;
-    // ~24 voxels along longest axis — coarse enough for fast init
-    let spacing = longestAxis / 24;
-
-    let inputVerts = new this.px.PxArray_PxVec3(numVerts);
-    for(let i = 0; i < numVerts; i++) {
-      inputVerts.set(i, new this.px.PxVec3(vertices[i*3], vertices[i*3+1], vertices[i*3+2]));
-    }
-    let inputTris = new this.px.PxArray_PxU32(indices.length);
-    for(let i = 0; i < indices.length; i++) {
-      inputTris.set(i, indices[i]);
-    }
-
-    let pointsData = new this.px.PxBoundedData();
-    pointsData.set_count(numVerts);
-    pointsData.set_stride(12);
-    pointsData.set_data(inputVerts.begin());
-
-    let trisData = new this.px.PxBoundedData();
-    trisData.set_count(numTris);
-    trisData.set_stride(12);
-    trisData.set_data(inputTris.begin());
-
-    let desc = new this.px.PxTriangleMeshDesc();
-    desc.set_points(pointsData);
-    desc.set_triangles(trisData);
-
-    // Lazy SDF: dense grid, values computed on demand (no upfront baking)
-    let sdfDesc = new this.px.PxSDFDesc();
-    sdfDesc.set_spacing(spacing);
-    sdfDesc.set_subgridSize(0);                    // dense SDF (required for lazy mode)
-    sdfDesc.set_lazyEvaluation(true);              // skip baking — compute on demand
-    sdfDesc.set_numThreadsForSdfConstruction(1);   // WASM has no thread support
-    desc.set_sdfDesc(sdfDesc);
-
-    let triMesh = this.px.CreateTriangleMesh(this.pxCookingParams, desc);
-
-    // Cleanup temporary WASM objects
-    inputVerts.__destroy__();
-    inputTris.__destroy__();
-    pointsData.__destroy__();
-    trisData.__destroy__();
-    desc.__destroy__();
-    sdfDesc.__destroy__();
-
-    if(!triMesh) {
-      console.warn(`SDF cook failed for fragment (${numVerts} verts, ${numTris} tris)`);
-    } else {
-      console.log(`SDF lazy init: ${numTris} tris, spacing=${spacing.toFixed(2)}`);
-    }
-    return triMesh;
-  }
-
-  /** Spawn a dynamic rigid body from a disconnected terrain fragment manifold.
-   *  Uses lazy SDF triangle mesh collider, similar to PhysicsWorkshop props. */
-  spawnChunkFragment(fragmentManifold) {
-    if(!this.px || !this.pxScene) { fragmentManifold.delete(); return; }
-
-    let mesh = fragmentManifold.getMesh();
-    let vertProps = mesh.vertProperties; // Float32Array, 3 floats per vert
-    let triVerts = mesh.triVerts;        // Uint32Array, 3 indices per tri
-    let numVerts = vertProps.length / 3;
-    let numTris = triVerts.length / 3;
-
-    if(numVerts < 4 || numTris < 1) { fragmentManifold.delete(); return; }
-
-    // Compute centroid for body position
-    let cx = 0, cy = 0, cz = 0;
-    for(let i = 0; i < numVerts; i++) {
-      cx += vertProps[i*3];
-      cy += vertProps[i*3+1];
-      cz += vertProps[i*3+2];
-    }
-    cx /= numVerts;
-    cy /= numVerts;
-    cz /= numVerts;
-
-    // Local-space vertices (centred on centroid)
-    let localVerts = new Float32Array(vertProps.length);
-    for(let i = 0; i < numVerts; i++) {
-      localVerts[i*3]   = vertProps[i*3]   - cx;
-      localVerts[i*3+1] = vertProps[i*3+1] - cy;
-      localVerts[i*3+2] = vertProps[i*3+2] - cz;
-    }
-    let localIndices = new Uint32Array(triVerts);
-
-    // Cook SDF triangle mesh (lazy — no upfront bake)
-    let triMesh = this.cookTriangleMeshSDF(localVerts, localIndices);
-    if(!triMesh) {
-      console.warn('Failed to cook SDF for chunk fragment, skipping');
-      fragmentManifold.delete();
-      return;
-    }
-
-    // Create PhysX shape + dynamic body
-    let triGeom = new this.px.PxTriangleMeshGeometry(triMesh);
-    let sf = new this.px.PxShapeFlags(
-      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-    );
-    let shape = this.pxPhysics.createShape(triGeom, this.pxMaterial, true, sf);
-    shape.setSimulationFilterData(this.pxFilterData);
-
-    let bv = new this.px.PxVec3(cx, cy, cz);
-    let bq = new this.px.PxQuat(0, 0, 0, 1);
-    let bpose = new this.px.PxTransform(bv, bq);
-    let body = this.pxPhysics.createRigidDynamic(bpose);
-    body.attachShape(shape);
-    this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, 500.0);
-    this.pxScene.addActor(body);
-
-    // Encode local-space mesh for client replication (non-indexed triangle soup, gzip+base64)
-    let nonIndexedPositions = new Float32Array(numTris * 9);
-    for(let t = 0; t < numTris; t++) {
-      let i0 = localIndices[t*3], i1 = localIndices[t*3+1], i2 = localIndices[t*3+2];
-      nonIndexedPositions[t*9  ] = localVerts[i0*3];   nonIndexedPositions[t*9+1] = localVerts[i0*3+1]; nonIndexedPositions[t*9+2] = localVerts[i0*3+2];
-      nonIndexedPositions[t*9+3] = localVerts[i1*3];   nonIndexedPositions[t*9+4] = localVerts[i1*3+1]; nonIndexedPositions[t*9+5] = localVerts[i1*3+2];
-      nonIndexedPositions[t*9+6] = localVerts[i2*3];   nonIndexedPositions[t*9+7] = localVerts[i2*3+1]; nonIndexedPositions[t*9+8] = localVerts[i2*3+2];
-    }
-    let compressed = gzipSync(new Uint8Array(nonIndexedPositions.buffer));
-    let meshDataStr = this.b64encode(String.fromCharCode.apply(null, compressed));
-
-    // Bounding half-extent for client placeholder sizing
-    let halfX = 0, halfY = 0, halfZ = 0;
-    for(let i = 0; i < numVerts; i++) {
-      halfX = Math.max(halfX, Math.abs(localVerts[i*3]));
-      halfY = Math.max(halfY, Math.abs(localVerts[i*3+1]));
-      halfZ = Math.max(halfZ, Math.abs(localVerts[i*3+2]));
-    }
-    let halfExtent = Math.max(halfX, halfY, halfZ);
-
-    let id = "phys_" + (this.physBodyCounter++);
-    this.physBodies.push({
-      body, id, halfExtent,
-      meshData: meshDataStr,
-      isFragment: true
+    let w = this.world;
+    let a = data.bodyIdA, b = data.bodyIdB;
+    if(!w.has(a, 'RigidBody') || !w.has(b, 'RigidBody') || a === b) return;
+    let pA = w.get(a, 'Transform').position, pB = w.get(b, 'Transform').position;
+    let wA = vec3(data.worldPosA, pA), wB = vec3(data.worldPosB, pB);
+    w.create({
+      Joint: Joint({
+        type: data.jointType, bodyA: a, bodyB: b,
+        localOffsetA: { x: wA.x - pA.x, y: wA.y - pA.y, z: wA.z - pA.z },
+        localOffsetB: { x: wB.x - pB.x, y: wB.y - pB.y, z: wB.z - pB.z },
+        axis: data.axis ? vec3(data.axis, { x: 0, y: 1, z: 0 }) : null,
+      })
     });
-    this.hasNewInfoToSend = true;
-    console.log(`Spawned chunk fragment ${id}: ${numVerts} verts, ${numTris} tris at (${cx.toFixed(1)}, ${cy.toFixed(1)}, ${cz.toFixed(1)})`);
-
-    fragmentManifold.delete();
   }
 
-  /** Rebuild the PhysX static triangle mesh collider for a given chunk index */
-  rebuildChunkPhysics(chunkIndex) {
-    if(!this.px || !this.pxScene || !this.chunks[chunkIndex]) return;
-
-    // Remove old actor if it exists
-    if(this.chunkPhysActors[chunkIndex]) {
-      this.pxScene.removeActor(this.chunkPhysActors[chunkIndex]);
-      this.chunkPhysActors[chunkIndex] = null;
-    }
-
-    // Decode the chunk geometry
-    let base64String = this.chunks[chunkIndex].data;
-    let binaryString = this.b64decode(base64String.normalize("NFC"));
-    let compressed = new Uint8Array(binaryString.length);
-    for(let b = 0; b < binaryString.length; b++) {
-      compressed[b] = binaryString.charCodeAt(b);
-    }
-    let positions = new Float32Array(gunzipSync(compressed).buffer);
-
-    // Non-indexed triangle soup: every 3 floats = 1 vertex, every 3 vertices = 1 triangle
-    let numVerts = positions.length / 3;
-    let numTris = numVerts / 3;
-    if(numTris < 1) return;
-
-    // Use PhysX array types for proper WASM memory alignment
-    let pxVerts = new this.px.PxArray_PxVec3(numVerts);
-    for(let i = 0; i < numVerts; i++) {
-      let v = new this.px.PxVec3(positions[i*3], positions[i*3+1], positions[i*3+2]);
-      pxVerts.set(i, v);
-    }
-
-    let pxIndices = new this.px.PxArray_PxU32(numTris * 3);
-    for(let i = 0; i < numTris * 3; i++) {
-      pxIndices.set(i, i);
-    }
-
-    // Set up triangle mesh descriptor using .begin() for proper WASM pointers
-    let desc = new this.px.PxTriangleMeshDesc();
-    desc.points.set_count(numVerts);
-    desc.points.set_stride(12); // sizeof(PxVec3) = 3 * 4 bytes
-    desc.points.set_data(pxVerts.begin());
-    desc.triangles.set_count(numTris);
-    desc.triangles.set_stride(12); // 3 * sizeof(PxU32) = 3 * 4 bytes
-    desc.triangles.set_data(pxIndices.begin());
-
-    if(!desc.isValid()) {
-      console.warn(`Invalid triangle mesh desc for chunk ${chunkIndex} (${numVerts} verts, ${numTris} tris)`);
-      return;
-    }
-
-    // Cook the triangle mesh
-    let triMesh = this.px.CreateTriangleMesh(this.pxCookingParams, desc);
-
-    if(!triMesh) {
-      console.warn(`Failed to cook triangle mesh for chunk ${chunkIndex} (${numVerts} verts, ${numTris} tris)`);
-      return;
-    }
-
-    // Create static actor with the triangle mesh (own transform, not shared)
-    let triMeshGeom = new this.px.PxTriangleMeshGeometry(triMesh);
-    let triShapeFlags = new this.px.PxShapeFlags(
-      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-    );
-    let shape = this.pxPhysics.createShape(triMeshGeom, this.pxMaterial, true, triShapeFlags);
-    shape.setSimulationFilterData(this.pxFilterData);
-    let poseVec = new this.px.PxVec3(0, 0, 0);
-    let poseQuat = new this.px.PxQuat(0, 0, 0, 1);
-    let pose = new this.px.PxTransform(poseVec, poseQuat);
-    let actor = this.pxPhysics.createRigidStatic(pose);
-    actor.attachShape(shape);
-    this.pxScene.addActor(actor);
-    this.chunkPhysActors[chunkIndex] = actor;
-    console.log(`Rebuilt chunk ${chunkIndex} physics: ${numVerts} verts, ${numTris} tris cooked OK`);
-
-    // Wake up any nearby physics bodies so they react to the new terrain
-    for(let b of this.physBodies) {
-      if(b.body.isSleeping()) {
-        b.body.wakeUp();
-      }
-    }
+  releaseHold(playerId, bodyId) {
+    let g = this.world.get(bodyId, 'Grabbed');
+    if(g && g.by === playerId) this.world.remove(bodyId, 'Grabbed');
   }
 
-  async onStart(){
-    let storedChunks = await this.room.storage.get("chunks") || {};
-    let storedModels = await this.room.storage.get("models") || {};
-    this.models = storedModels;
-
-    /** @type {ManifoldToplevel} */
-    this.manifold = await M({
-      instantiateWasm: (imports, callback) => {
-        const instance = new WebAssembly.Instance(manMod, imports);
-        callback(instance);
-        return instance.exports;
-      }
-    });
-    this.manifold.setup();
-
-    for(let chunk in storedChunks) {
-      this.chunks[chunk] = {
-        index: storedChunks[chunk].index,
-        data: storedChunks[chunk].data,
-        manifold: this.base64ToManifold(storedChunks[chunk].data)
-      };
-    }
-
-    // Initialize PhysX
-    this.px = await PhysXInit({
-      instantiateWasm: (imports, callback) => {
-        const instance = new WebAssembly.Instance(physxWasm, imports);
-        callback(instance);
-        return instance.exports;
-      }
-    });
-
-    let version = this.px.PHYSICS_VERSION;
-    let allocator = new this.px.PxDefaultAllocator();
-    let errorCb = new this.px.PxDefaultErrorCallback();
-    let foundation = this.px.CreateFoundation(version, allocator, errorCb);
-
-    let tolerances = new this.px.PxTolerancesScale();
-    this.pxPhysics = this.px.CreatePhysics(version, foundation, tolerances);
-
-    let tmpVec = new this.px.PxVec3(0, -9.81, 0);
-    let sceneDesc = new this.px.PxSceneDesc(tolerances);
-    sceneDesc.set_gravity(tmpVec);
-    sceneDesc.set_cpuDispatcher(this.px.DefaultCpuDispatcherCreate(0));
-    sceneDesc.set_filterShader(this.px.DefaultFilterShader());
-    this.pxScene = this.pxPhysics.createScene(sceneDesc);
-
-    this.pxMaterial = this.pxPhysics.createMaterial(0.5, 0.5, 0.6);
-    this.pxCookingParams = new this.px.PxCookingParams(tolerances);
-    this.pxShapeFlags = new this.px.PxShapeFlags(
-      this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-      this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-    );
-
-    // Filter data required by DefaultFilterShader for collision to work
-    this.pxFilterData = new this.px.PxFilterData(1, 1, 0, 0);
-
-    // Reusable temp PhysX objects to avoid per-frame allocation leaks
-    this.pxTmpVec = new this.px.PxVec3(0, 0, 0);
-    this.pxTmpQuat = new this.px.PxQuat(0, 0, 0, 1);
-    this.pxTmpPose = new this.px.PxTransform(this.pxTmpVec, this.pxTmpQuat);
-    this.physBodyCounter = 0;
-
-    // Second temp vec for velocity calculations
-    this.pxTmpVec2 = new this.px.PxVec3(0, 0, 0);
-
-    // Build default terrain colliders: chunks at y<5 are solid 10-unit boxes
-    // Each actor gets its own PxTransform to avoid shared-reference issues
-    let defaultChunkGeom = new this.px.PxBoxGeometry(5.0, 5.0, 5.0);
-    for(let x = 0; x < 10; x++) {
-      for(let y = 0; y < 5; y++) {
-        for(let z = 0; z < 10; z++) {
-          let chunkIndex = x * 100 + y * 10 + z;
-          if(this.chunks[chunkIndex]) continue;
-          let cv = new this.px.PxVec3(x * 10.0 - 45.0, y * 10.0 - 45.0, z * 10.0 - 45.0);
-          let cq = new this.px.PxQuat(0, 0, 0, 1);
-          let cpose = new this.px.PxTransform(cv, cq);
-          let sf = new this.px.PxShapeFlags(
-            this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-            this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-          );
-          let shape = this.pxPhysics.createShape(defaultChunkGeom, this.pxMaterial, true, sf);
-          shape.setSimulationFilterData(this.pxFilterData);
-          let actor = this.pxPhysics.createRigidStatic(cpose);
-          actor.attachShape(shape);
-          this.pxScene.addActor(actor);
-          this.chunkPhysActors[chunkIndex] = actor;
-        }
-      }
-    }
-
-    // Build triangle mesh colliders for CSG-modified chunks
-    for(let chunkIndex in this.chunks) {
-      this.rebuildChunkPhysics(parseInt(chunkIndex));
-    }
-
-    console.log(`PhysX initialized with 500 terrain chunk colliders`);
+  async reset() {
+    for(let id of [...this.world.ids()]) if(!this.world.has(id, 'Player')) this.world.destroy(id);
+    this.terrain.clear();
+    let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
+    for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
+    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set();
+    this.rebuildAllChunkColliders();
+    this.room.broadcast(JSON.stringify(this.fullUpdate()));
+    this.world.takeDirty();
   }
 
-  /**
-   * @param {Connection} conn - The connection object.
-   * @param {ConnectionContext} ctx - The context object. */
-  onConnect(conn, ctx) {
-    console.log(
-      `Connected:
-       id: ${conn.id}
-       room: ${this.room.id}
-       url: ${new URL(ctx.request.url).pathname}`
-    );
+  // ---- messages -----------------------------------------------------------
 
-    this.globalPlayerCount += 1;
-    this.players[conn.id] = {
-      name: "Player " + this.globalPlayerCount,
-      color: this.playerColors[this.globalPlayerCount % this.playerColors.length],
-      id: conn.id,
-      position: { x: 0, y: 0, z: 0 }
-    };
-    this.needsUpdate[conn.id] = true;
-
-    // Create a kinematic capsule for this player in the physics scene
-    if(this.pxPhysics && this.pxScene) {
-      let material = this.pxPhysics.createMaterial(0.5, 0.5, 0.0);
-      // Slightly larger than client capsule (0.5 radius) so players push objects
-      let capsuleGeom = new this.px.PxCapsuleGeometry(0.65, 0.6);
-      let shapeFlags = new this.px.PxShapeFlags(
-        this.px.PxShapeFlagEnum.eSCENE_QUERY_SHAPE |
-        this.px.PxShapeFlagEnum.eSIMULATION_SHAPE
-      );
-      let shape = this.pxPhysics.createShape(capsuleGeom, material, true, shapeFlags);
-      shape.setSimulationFilterData(this.pxFilterData);
-      let pv = new this.px.PxVec3(0, 1, 0);
-      let pq = new this.px.PxQuat(0, 0, 0, 1);
-      let pose = new this.px.PxTransform(pv, pq);
-      let kinBody = this.pxPhysics.createRigidDynamic(pose);
-      kinBody.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
-      kinBody.attachShape(shape);
-      this.pxScene.addActor(kinBody);
-      this.playerKinematics[conn.id] = kinBody;
-    }
-
-    this.room.broadcast(JSON.stringify({
-      type: "fullupdate",
-      players: this.players,
-      chunks: this.getSerializableChunks(),
-      models: this.models,
-      physBodies: this.getPhysBodiesState()
-    }));
-  }
-
-  /**
-   * @param {string} message
-   * @param {Connection} sender */
+  /** @param {string} message @param {Connection} sender */
   async onMessage(message, sender) {
-    if(!message.startsWith("{")) return;
+    if(!this.ready || !message.startsWith("{")) return;
+    let data; try { data = JSON.parse(message); } catch { return; }
+    let w = this.world;
+    let me = sender.id;
 
-    let data = JSON.parse(message);
-    if(data.type === "player"){
-      this.players[sender.id].position.x = data.position.x;
-      this.players[sender.id].position.y = data.position.y;
-      this.players[sender.id].position.z = data.position.z;
-      this.needsUpdate[sender.id] = true;
-    } else if(data.type === "chunk"){
-      if(!this.chunks[data.index]){
-        this.chunks[data.index] = { index: data.index, data: data.data, manifold: null };
-      } else {
-        this.chunks[data.index].data = data.data;
+    switch(data.type) {
+      case "player": {
+        let tf = w.get(me, 'Transform'); if(!tf) break;
+        let p = vec3(data.position, tf.position);
+        tf.position.x = p.x; tf.position.y = p.y; tf.position.z = p.z;
+        w.touch(me, 'Transform');
+        break;
       }
-      this.needsUpdate[""+data.index] = true;
-    } else if(data.type === "csgoperation") {
-      if(!this.chunks[data.index]){
-        if(!data.originalChunk){ console.error("Received csgoperation without originalChunk for fresh index: " + data.index); return; }
-        this.chunks[data.index] = { index: data.index, data: data.originalChunk, manifold: null };
+      case "name":
+        if(w.has(me, 'Player')) w.set(me, 'Player', { name: String(data.name || 'Player').slice(0, 32) });
+        break;
+
+      case "manifoldcsgoperation":
+        this.applyCsg(data);
+        break;
+
+      case "spawnphyscube":
+        this.spawnProp('cube', vec3(data.position, { x: 0, y: 5, z: 0 }), quat(null));
+        break;
+      case "spawnprop":
+        this.spawnProp(String(data.propId || 'crate'), vec3(data.position, { x: 0, y: 5, z: 0 }), quat(data.quaternion));
+        break;
+
+      case "physgun_grab":
+        if(w.has(data.bodyId, 'RigidBody') && !w.has(data.bodyId, 'Grabbed')) w.add(data.bodyId, 'Grabbed', Grabbed({ by: me }));
+        break;
+      case "physgun_move": {
+        let g = w.get(data.bodyId, 'Grabbed');
+        if(g && g.by === me) w.add(data.bodyId, '$GrabTarget', { pos: vec3(data.targetPos), quat: quat(data.targetQuat) });
+        break;
       }
-
-      let scene         = new THREE.Scene();
-      let originalChunk = this.base64ToBrush(this.chunks[data.index].data);
-      let brush         = this.base64ToBrush(data.brush);
-      scene.add(originalChunk);
-      scene.add(brush);
-      brush.position  .set(
-        data.brushPosition.x + ((Math.random()-0.5)*0.0001),
-        data.brushPosition.y + ((Math.random()-0.5)*0.0001),
-        data.brushPosition.z + ((Math.random()-0.5)*0.0001));
-      brush.quaternion.set(
-        data.brushQuaternion.x + ((Math.random()-0.5)*0.0001),
-        data.brushQuaternion.y + ((Math.random()-0.5)*0.0001),
-        data.brushQuaternion.z + ((Math.random()-0.5)*0.0001),
-        data.brushQuaternion.w + ((Math.random()-0.5)*0.0001));
-      brush.scale     .set(data.brushScale.x, data.brushScale.y, data.brushScale.z);
-      brush.updateMatrixWorld(true);
-      this.chunks[data.index].data = this.brushToBase64(new Evaluator().evaluate( originalChunk, brush, parseInt(data.operation)));
-      this.rebuildChunkPhysics(data.index);
-      this.needsUpdate[""+data.index] = true;
-    } else if(data.type === "manifoldcsgoperation") {
-      if(!this.chunks[data.index] || !this.chunks[data.index].manifold){
-        if(!data.originalChunk){ console.error("Received csgoperation without originalChunk for fresh index: " + data.index); return; }
-        this.chunks[data.index] = { index: data.index, data: data.originalChunk, manifold: this.base64ToManifold(data.originalChunk) };
-      }
-
-      let manifoldA = this.chunks[data.index].manifold;
-      let manifoldB = this.base64ToManifold(data.brush,
-        new THREE.Vector3(data.brushPosition.x, data.brushPosition.y, data.brushPosition.z),
-        new THREE.Quaternion(data.brushQuaternion.x, data.brushQuaternion.y, data.brushQuaternion.z, data.brushQuaternion.w),
-        new THREE.Vector3(data.brushScale.x, data.brushScale.y, data.brushScale.z));
-
-      let operation = parseInt(data.operation);
-      let resultManifold = null;
-      if(operation === ADDITION){
-        resultManifold = manifoldA.add(manifoldB);
-      } else if(operation === INTERSECTION){
-        resultManifold = manifoldA.intersect(manifoldB);
-      } else if(operation === SUBTRACTION){
-        resultManifold = manifoldA.subtract(manifoldB);
-      } else {
-        console.error("Unknown manifold operation: " + operation);
+      case "physgun_release":
+        this.releaseHold(me, data.bodyId);
+        break;
+      case "physgun_freeze": {
+        let rb = w.get(data.bodyId, 'RigidBody'); if(!rb) break;
+        if(w.has(data.bodyId, 'Grabbed')) w.remove(data.bodyId, 'Grabbed');
+        this.physics.setFrozen(w, data.bodyId, !rb.frozen);
+        break;
       }
 
-      let z = data.index % 10;
-      let y = Math.floor(data.index / 10) % 10;
-      let x = Math.floor(data.index / 100);
-      let cubeManifold = this.manifold.Manifold.cube([10, 10, 10], true).translate(
-        x * 10.0 - 45.0,
-        y * 10.0 - 45.0,
-        z * 10.0 - 45.0
-      );
-      resultManifold = resultManifold.intersect(cubeManifold);
-      cubeManifold.delete();
+      case "createjoint":
+        this.createJoint(data);
+        break;
+      case "removejoint":
+        if(w.has(data.jointId, 'Joint')) w.destroy(data.jointId);
+        break;
+      case "deletebody":
+        if(w.has(data.bodyId, 'RigidBody')) w.destroy(data.bodyId);
+        break;
 
-      manifoldA.delete();
-      manifoldB.delete();
-
-      // Decompose this chunk into connected components
-      let islands = resultManifold.decompose();
-
-      if(islands.length <= 1) {
-        // Single connected piece — keep as terrain
-        for(let i = 0; i < islands.length; i++) islands[i].delete();
-        this.chunks[data.index].data = this.manifoldToBase64(resultManifold);
-        this.chunks[data.index].manifold = resultManifold;
-      } else {
-        // Multiple islands — check which are grounded vs floating
-        let islandInfo = [];
-        for(let i = 0; i < islands.length; i++) {
-          islandInfo.push({ idx: i, volume: islands[i].volume() });
-        }
-        islandInfo.sort((a, b) => b.volume - a.volume);
-
-        // Largest island is always terrain; smaller islands need a ground check
-        let terrainIslands = [islands[islandInfo[0].idx]];
-        let floatingIslands = [];
-
-        for(let j = 1; j < islandInfo.length; j++) {
-          let island = islands[islandInfo[j].idx];
-          if(islandInfo[j].volume < 0.01) {
-            island.delete(); // skip tiny slivers
-            continue;
-          }
-          if(this.isIslandGrounded(island, data.index)) {
-            terrainIslands.push(island);
-          } else {
-            floatingIslands.push(island);
-          }
-        }
-
-        // Union all grounded islands into the chunk terrain manifold
-        let terrainManifold = terrainIslands[0];
-        if(terrainIslands.length > 1) {
-          terrainManifold = terrainIslands[0].add(terrainIslands[1]);
-          terrainIslands[0].delete();
-          terrainIslands[1].delete();
-          for(let i = 2; i < terrainIslands.length; i++) {
-            let next = terrainManifold.add(terrainIslands[i]);
-            terrainManifold.delete();
-            terrainManifold = next;
-            terrainIslands[i].delete();
-          }
-        }
-
-        this.chunks[data.index].data = this.manifoldToBase64(terrainManifold);
-        this.chunks[data.index].manifold = terrainManifold;
-
-        // Physicalize floating fragments
-        for(let frag of floatingIslands) {
-          this.spawnChunkFragment(frag); // takes ownership and deletes
-        }
-
-        resultManifold.delete();
-        console.log(`Decomposed chunk ${data.index}: ${islands.length} islands, ${terrainIslands.length} grounded, ${floatingIslands.length} floating`);
+      // Legacy static models placed by URL
+      case "model": {
+        let id = String(data.id);
+        let tf = { position: vec3(data.position), quaternion: quat(data.quaternion), scale: vec3(data.scale, { x: 1, y: 1, z: 1 }) };
+        if(!w.has(id)) w.create(id, { Model: Model({ url: String(data.url || ''), selectedBy: data.selectedBy || "" }), Transform: Transform(tf) });
+        else { w.set(id, 'Transform', tf); if(data.url) w.set(id, 'Model', { url: String(data.url) }); }
+        break;
       }
+      case "select":   if(w.has(data.id, 'Model')) w.set(String(data.id), 'Model', { selectedBy: me }); break;
+      case "deselect": if(w.has(data.id, 'Model')) w.set(String(data.id), 'Model', { selectedBy: "" }); break;
+      case "deletemodel": if(w.has(data.id, 'Model')) w.destroy(String(data.id)); break;
 
-      this.rebuildChunkPhysics(data.index);
-      this.needsUpdate[""+data.index] = true;
-    } else if(data.type === "model"){
-      if(!this.models[data.id]){
-        this.models[data.id] = {
-          id: data.id,
-          url: data.url,
-          position: data.position,
-          quaternion: data.quaternion,
-          scale: data.scale,
-          selectedBy: data.selectedBy || ""
-        };
-      }else{
-        Object.assign(this.models[data.id], data);
-      }
-      this.needsUpdate[""+data.id] = true;
-    } else if(data.type === "name"){
-      this.players[sender.id].name = data.name;
-      this.needsUpdate[sender.id] = true;
-    } else if(data.type === "select"){
-      if(this.models[""+data.id]) {
-        this.models[""+data.id].selectedBy = sender.id;
-        this.needsUpdate[""+data.id] = true;
-      }
-    } else if(data.type === "deselect"){
-      if(this.models[""+data.id]) {
-        this.models[""+data.id].selectedBy = "";
-        this.needsUpdate[""+data.id] = true;
-      }
-    } else if(data.type === "deletemodel"){
-      if(this.models[""+data.id]) {
-        delete this.models[""+data.id];
-        this.room.broadcast(JSON.stringify({
-          type: "fullupdate",
-          players: this.players,
-          chunks: this.getSerializableChunks(),
-          models: this.models,
-          physBodies: this.getPhysBodiesState()
-        }));
-      }
-    } else if(data.type === "spawnphyscube"){
-      let pos = data.position || { x: 0, y: 5, z: 0 };
-      let half = data.halfExtent || PHYS_CUBE_HALF;
-      this.spawnPhysCube(pos.x, pos.y, pos.z, half);
-    } else if(data.type === "spawnprop"){
-      let pos = data.position || { x: 0, y: 5, z: 0 };
-      let propId = data.propId || "crate";
-      let def = PROP_DEFS[propId] || { half: PHYS_CUBE_HALF, shape: 'box' };
-      let id = this.spawnPropBody(pos.x, pos.y, pos.z, def, propId);
-    } else if(data.type === "physgun_grab"){
-      this.physGunGrab(sender.id, data.bodyId);
-    } else if(data.type === "physgun_move"){
-      this.physGunMove(sender.id, data.bodyId, data.targetPos, data.targetQuat);
-    } else if(data.type === "physgun_release"){
-      this.physGunRelease(sender.id, data.bodyId);
-    } else if(data.type === "physgun_freeze"){
-      this.physGunFreeze(data.bodyId);
-    } else if(data.type === "createjoint"){
-      this.createJoint(data);
-    } else if(data.type === "removejoint"){
-      this.removeJoint(data.jointId);
-    } else if(data.type === "chat"){
-      this.room.broadcast(JSON.stringify({
-        type: "chat",
-        sender: sender.id,
-        message: data.message,
-      }));
-    } else if(data.type === "reset"){
-        await this.room.storage.delete("chunks");
-        await this.room.storage.delete("models");
-        for(let chunk in this.chunks) {
-          if(this.chunks[chunk].manifold) this.chunks[chunk].manifold.delete();
-        }
-        this.chunks = {};
-        this.models = {};
-        this.room.broadcast(JSON.stringify({
-          type: "fullupdate",
-          players: this.players,
-          chunks: this.chunks,
-          models: this.models,
-          physBodies: this.getPhysBodiesState()
-        }));
-    } else {
-      console.error("Unknown message type: " + message);
+      case "chat":
+        this.room.broadcast(JSON.stringify({ type: "chat", sender: me, message: String(data.message || '').slice(0, 500) }));
+        break;
+      case "reset":
+        await this.reset();
+        break;
+      default:
+        console.error("Unknown message type: " + data.type);
     }
-
-    this.hasNewInfoToSend = true;
   }
-
-  base64ToBrush(base64String) {
-    let binaryString = this.b64decode(base64String.normalize("NFC"));
-    let unbase64CompressedPositions = new Uint8Array(binaryString.length);
-    for (let b = 0; b < binaryString.length; b++) {
-        unbase64CompressedPositions[b] = binaryString.charCodeAt(b);
-    }
-    let decompressedPositions = new Float32Array(gunzipSync(unbase64CompressedPositions).buffer);
-    let newGeometry = new THREE.BufferGeometry();
-    newGeometry.setAttribute('position', new THREE.BufferAttribute(decompressedPositions, 3));
-    newGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length / 3 * 2), 2));
-    newGeometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(decompressedPositions.length), 3));
-    newGeometry.index = null;
-    return new Brush(newGeometry);
-  }
-
-  base64ToManifold(base64String, position = new THREE.Vector3(0, 0, 0), quaternion = new THREE.Quaternion(0, 0, 0, 1), scale = new THREE.Vector3(1, 1, 1)) {
-    let binaryString = this.b64decode(base64String.normalize("NFC"));
-    let unbase64CompressedPositions = new Uint8Array(binaryString.length);
-    for (let b = 0; b < binaryString.length; b++) {
-        unbase64CompressedPositions[b] = binaryString.charCodeAt(b);
-    }
-    let decompressedPositions = new Float32Array(gunzipSync(unbase64CompressedPositions).buffer);
-    let newGeometry = new THREE.BufferGeometry();
-    newGeometry.setAttribute('position', new THREE.BufferAttribute(decompressedPositions, 3));
-    newGeometry.index = null;
-    let geometry = mergeVertices(newGeometry, 1e-4);
-    let positions = geometry.attributes.position.array;
-    let index    = geometry.index.array;
-
-    let matrix = new THREE.Matrix4().compose(position, quaternion, scale);
-
-    let transformedPosition = new Float32Array(positions.length);
-    for (let i = 0; i < positions.length; i += 3) {
-        let vertex = new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]);
-        vertex.applyMatrix4(matrix);
-        transformedPosition[i    ] = vertex.x;
-        transformedPosition[i + 1] = vertex.y;
-        transformedPosition[i + 2] = vertex.z;
-    }
-
-    let vertProperties = new Float32Array(transformedPosition.length);
-    vertProperties.set(transformedPosition);
-
-    let triVerts = new Uint32Array(index.length);
-    triVerts.set(index);
-
-    let meshOptions = {
-        numProp: 3,
-        vertProperties: vertProperties,
-        triVerts: triVerts
-    };
-
-    let mesh = new this.manifold.Mesh(meshOptions);
-    let outputManifold = new this.manifold.Manifold(mesh);
-    outputManifold.simplify(0.1);
-    return outputManifold;
-  }
-
-  b64encode(input) { return btoa(encodeURIComponent(input)); }
-  b64decode(input) { return decodeURIComponent(atob(input)); }
-
-  brushToBase64(brush) {
-    let compressedPositions = gzipSync(new Uint8Array(brush.geometry.attributes.position.array.buffer));
-    let toReturn = this.b64encode(String.fromCharCode.apply(null, compressedPositions));
-    return toReturn.normalize("NFC");
-  }
-
-  /** @param {Manifold} manifold - The manifold object. */
-  manifoldToBase64(manifold) {
-    let mesh = manifold.getMesh();
-    let newGeometry = new THREE.BufferGeometry();
-    newGeometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
-    newGeometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
-    let nonIndexedGeometry = newGeometry.toNonIndexed();
-    let compressedPositions = gzipSync(new Uint8Array(nonIndexedGeometry.attributes.position.array.buffer));
-    let toReturn = this.b64encode(String.fromCharCode.apply(null, compressedPositions));
-    return toReturn.normalize("NFC");
-  }
-
-  /** @param {Connection} conn - The connection object. */
-  async onDisconnect(conn){
-    if(!this.players[conn.id]) return;
-
-    delete this.players[conn.id];
-    delete this.needsUpdate[conn.id];
-
-    // Remove player kinematic from physics scene
-    if(this.playerKinematics[conn.id] && this.pxScene) {
-      this.pxScene.removeActor(this.playerKinematics[conn.id]);
-      delete this.playerKinematics[conn.id];
-    }
-
-    await this.room.storage.put("chunks", this.getSerializableChunks());
-    await this.room.storage.put("models", this.models);
-    console.log("Wrote the world state to KV storage");
-
-    this.room.broadcast(JSON.stringify({
-      type: "fullupdate",
-      players: this.players,
-      chunks: this.getSerializableChunks(),
-      models: this.models,
-      physBodies: this.getPhysBodiesState()
-    }));
-  }
-
-  /** @param {Connection} conn - The connection object. */
-  onClose(conn){ this.onDisconnect(conn); }
-  /**
-   * @param {Connection} conn - The connection object.
-   * @param {Error} error - The error object. */
-  onError(conn, error){ console.error(error); this.onDisconnect(conn); }
 }
 
 export default PartyServer;

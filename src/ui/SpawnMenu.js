@@ -122,8 +122,6 @@ export class SpawnMenu {
         this.propsContent = document.createElement('div');
         this.propsContent.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px;';
 
-        let cubeBtn = this.createPropButton('cube', 'Physics Cube', '📦');
-        this.propsContent.appendChild(cubeBtn);
         PROPS.forEach(prop => {
             let btn = this.createPropButton(prop.id, prop.name, prop.icon || '📦');
             this.propsContent.appendChild(btn);

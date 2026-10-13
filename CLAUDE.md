@@ -21,29 +21,30 @@ Both `npm run dev` and `npm run deploy` serve the website via PartyKit (configur
 
 ### Client-Server Split
 
-- **`src/server.js`** - PartyKit server (runs on Cloudflare Workers). Manages authoritative game state: players, chunks (voxel terrain), and models. Broadcasts updates at 30Hz with partial/full update distinction. Persists chunks and models to PartyKit durable storage on disconnect. Non-serializable WASM manifold objects are stripped before storage via `getSerializableChunks()`.
-- **`src/main.js`** - Client entry point. `Main` class handles the game loop, CSG brush placement, model spawning, and WebSocket communication via PartySocket. Connects via `PARTYKIT_HOST` (injected by bundler).
+- **`src/server.js`** - PartyKit server (runs on Cloudflare Workers). Owns the authoritative ECS world, PhysX simulation, and terrain. Ticks at 30Hz, broadcasting `partialupdate` (dirty components only) and a `fullupdate` every 10s. Persists entities and chunks under per-key storage (`ent:<id>`, `chunk:<index>`) every 5s and on disconnect.
+- **`src/main.js`** - Client entry point. Mirrors the server's entities into a local ECS world, runs render/interpolation systems, hosts the local `PlayerController`, terrain `BatchedMesh`, tools, and spawn menu. Connects via `PARTYKIT_HOST` (injected by bundler).
+
+### Entity Component System
+
+See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id + plain-JSON components; names starting with `$` are transient runtime handles (PhysX actors, three.js meshes) that each host rebuilds. Server systems live in `src/server/Physics.js`, client systems in `src/client/systems.js`. Spawning, loading from storage, and (future) migrating between Durable Objects are all "create the entity, let systems materialize it".
 
 ### Key Modules
 
-- **`src/World.js`** - Three.js scene setup: renderer, camera, lighting, post-processing pipeline (EffectComposer with SSILVB ambient occlusion pass).
-- **`src/PlayerController.js`** - First-person player with capsule-vs-BVH collision. Features coyote time for jumping, walk animation bounce, camera-relative movement. WASD + PointerLock on desktop, dual nipplejs joysticks on mobile.
-- **`src/SSILVBPass.js` / `src/SSILVBShader.js`** - Custom screen-space indirect lighting post-processing effect.
+- **`src/World.js`** - Three.js WebGPU renderer, camera, lighting, SSGI + TRAA post-processing pipeline.
+- **`src/PlayerController.js`** - First-person capsule player with BVH collision against terrain and ECS body meshes. WASD + PointerLock on desktop, nipplejs joysticks on mobile.
+- **`src/server/Terrain.js`** - Sparse chunk map with Manifold CSG, island decomposition, and fragment extraction.
+- **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems.
+- **`src/props/PropRegistry.js`** - Single source of truth for spawnable props (collider shape, size, GLTF url, menu entry).
+- **`src/tools/*`** - Garry's Mod style tools (physgun, CSG brush, rope, weld, hinge). Tools send messages; the server mutates entities.
+- **`src/net/codec.js`** - gzip+base64 triangle soup codec shared by both sides.
 
 ### Terrain System
 
-The world is a 10x10x10 grid of chunks (1000 total). Each chunk is a `Brush` from three-bvh-csg. Terrain modifications use CSG operations:
-- **Client** sends the brush geometry (gzip + base64 encoded) and transform to the server
-- **Server** performs CSG via Manifold (WASM, in `assets/manifold-3d/`) for robust boolean operations, then broadcasts the result
-- Chunks are indexed as `x*100 + y*10 + z`, each covering a 10-unit cube
-
-### Model System
-
-Models are spawned by providing a GLB URL. The server stores model state (position, quaternion, scale, selectedBy) and broadcasts to all clients. Models are loaded client-side via GLTFLoader with meshopt decoder. Players can select/deselect models and move them with the CSG brush.
+The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored. Edits send the brush geometry and transform plus the original chunk soup; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders.
 
 ### Networking Protocol
 
-Messages are JSON over WebSocket. Key message types: `player` (position), `model` (create/update), `select`/`deselect` (model interaction), `deletemodel`, `manifoldcsgoperation` (terrain edit), `reset`, `chat`. Server sends `fullupdate` every 10 seconds and `partialupdate` at 30Hz for changed entities.
+JSON over WebSocket. Client → server: `player`, `manifoldcsgoperation`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks`, `serverTickMs`.
 
 ## Key Dependencies
 

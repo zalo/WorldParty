@@ -249,31 +249,23 @@ export class PlayerController extends THREE.Group {
             }
         }
 
-        // Capsule-vs-BVH collision against physics body meshes
-        if(this.physBodyMeshes) {
-            for(let bodyId in this.physBodyMeshes) {
-                let mesh = this.physBodyMeshes[bodyId];
-                if(!mesh || !mesh.visible) continue;
-
+        // Capsule-vs-BVH collision against replicated physics bodies (ECS $Mesh with a BVH)
+        if(this.ecs) {
+            for(let [, m] of this.ecs.each('$Mesh', 'RigidBody')) {
+                let mesh = m.object;
                 let bvh = mesh.userData.collisionBVH;
-                if(!bvh) continue;
-
+                if(!bvh || !mesh.visible) continue;
                 let halfExt = mesh.userData.halfExtent || 0.5;
 
                 // Broadphase: sphere distance check
                 let segCenter = this.tempSegment.start.clone().add(this.tempSegment.end).multiplyScalar(0.5);
-                let toBod = new THREE.Vector3().copy(mesh.position).sub(segCenter);
-                if(toBod.length() > halfExt * 3 + capsuleInfo.radius + 1.0) continue;
+                if(mesh.position.distanceTo(segCenter) > halfExt * 3 + capsuleInfo.radius + 1.0) continue;
 
-                // Transform capsule into the body's local space
-                // The BVH is in unit geometry space; the mesh has scale applied
-                let invMat = new THREE.Matrix4().compose(
-                    mesh.position, mesh.quaternion, mesh.scale
-                ).invert();
-
+                // Transform capsule into the body's local space (BVH is in unit geometry space)
+                let worldMat = new THREE.Matrix4().compose(mesh.position, mesh.quaternion, mesh.scale);
+                let invMat = worldMat.clone().invert();
                 let localStart = this.tempSegment.start.clone().applyMatrix4(invMat);
                 let localEnd = this.tempSegment.end.clone().applyMatrix4(invMat);
-                // Scale the capsule radius into local space
                 let localRadius = capsuleInfo.radius / mesh.scale.x; // assume uniform scale
 
                 this.tempBox.makeEmpty();
@@ -285,7 +277,6 @@ export class PlayerController extends THREE.Group {
                 let localSeg = new THREE.Line3(localStart, localEnd);
                 let triPoint = new THREE.Vector3();
                 let capsulePoint = new THREE.Vector3();
-
                 bvh.shapecast({
                     intersectsBounds: box => box.intersectsBox(this.tempBox),
                     intersectsTriangle: tri => {
@@ -298,11 +289,6 @@ export class PlayerController extends THREE.Group {
                         }
                     }
                 });
-
-                // Transform back to world space
-                let worldMat = new THREE.Matrix4().compose(
-                    mesh.position, mesh.quaternion, mesh.scale
-                );
                 this.tempSegment.start.copy(localSeg.start).applyMatrix4(worldMat);
                 this.tempSegment.end.copy(localSeg.end).applyMatrix4(worldMat);
             }

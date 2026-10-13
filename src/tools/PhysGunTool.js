@@ -52,11 +52,11 @@ export class PhysGunTool extends BaseTool {
         if(intersects.length > 0) {
             let hit = intersects[0];
             // Find which body this mesh belongs to
-            let bodyId = this.findBodyIdFromMesh(main, hit.object);
+            let bodyId = main.bodyIdFromObject(hit.object);
             if(bodyId) {
                 this.grabbedBodyId = bodyId;
                 this.holdDistance = hit.distance;
-                this.holdRotation.copy(main.physBodyMeshes[bodyId].quaternion);
+                this.holdRotation.copy(main.meshFor(bodyId).quaternion);
                 main.conn.send(JSON.stringify({ type: "physgun_grab", bodyId: bodyId }));
                 this.beam.visible = true;
             }
@@ -98,7 +98,7 @@ export class PhysGunTool extends BaseTool {
             let positions = this.beam.geometry.attributes.position.array;
             let handPos = main.world.camera.position;
             positions[0] = handPos.x; positions[1] = handPos.y - 0.3; positions[2] = handPos.z;
-            let meshPos = main.physBodyMeshes[this.grabbedBodyId]?.position;
+            let meshPos = main.meshFor(this.grabbedBodyId)?.position;
             if(meshPos) {
                 positions[3] = meshPos.x; positions[4] = meshPos.y; positions[5] = meshPos.z;
             }
@@ -106,22 +106,4 @@ export class PhysGunTool extends BaseTool {
         }
     }
 
-    findBodyIdFromMesh(main, object) {
-        // Walk up parent chain to find a mesh that matches a physics body
-        let current = object;
-        while(current) {
-            for(let bodyId in main.physBodyMeshes) {
-                if(main.physBodyMeshes[bodyId] === current) return bodyId;
-            }
-            current = current.parent;
-        }
-        // Also check by direct child match for GLB-loaded props
-        for(let bodyId in main.physBodyMeshes) {
-            let mesh = main.physBodyMeshes[bodyId];
-            if(mesh && (mesh === object || mesh.getObjectById(object.id))) {
-                return bodyId;
-            }
-        }
-        return null;
-    }
 }

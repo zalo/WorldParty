@@ -36,7 +36,7 @@ export class RopeTool extends BaseTool {
         if(intersects.length === 0) return;
 
         let hit = intersects[0];
-        let bodyId = this.findBodyId(main, hit.object);
+        let bodyId = main.bodyIdFromObject(hit.object);
         if(!bodyId) return;
 
         let worldPos = hit.point;
@@ -67,18 +67,4 @@ export class RopeTool extends BaseTool {
         if(this.indicator) this.indicator.visible = false;
     }
 
-    findBodyId(main, object) {
-        let current = object;
-        while(current) {
-            for(let bodyId in main.physBodyMeshes) {
-                if(main.physBodyMeshes[bodyId] === current) return bodyId;
-            }
-            current = current.parent;
-        }
-        for(let bodyId in main.physBodyMeshes) {
-            let mesh = main.physBodyMeshes[bodyId];
-            if(mesh && (mesh === object || mesh.getObjectById(object.id))) return bodyId;
-        }
-        return null;
-    }
 }
