@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec3, vec4, directionToColor, colorToDirection, sample } from 'three/tsl';
+import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec4, packNormalToRGB, unpackRGBToNormal, sample } from 'three/tsl';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
@@ -72,7 +72,7 @@ export default class World {
         scenePass.setMRT( mrt( {
             output: output,
             diffuseColor: diffuseColor,
-            normal: directionToColor( normalView ),
+            normal: packNormalToRGB( normalView ),
             velocity: velocity
         } ) );
 
@@ -89,7 +89,7 @@ export default class World {
         normalTexture.type = THREE.UnsignedByteType;
 
         const sceneNormal = sample( ( uv ) => {
-            return colorToDirection( scenePassNormal.sample( uv ) );
+            return unpackRGBToNormal( scenePassNormal.sample( uv ) );
         } );
 
         // SSGI pass with temporal filtering enabled
@@ -103,11 +103,11 @@ export default class World {
             this.giPass.stepCount.value = 8;
         }
 
-        const gi = this.giPass.rgb;
-        const ao = this.giPass.a;
+        const gi = this.giPass.getGINode();
+        const ao = this.giPass.getAONode();
 
         // Composite: direct lighting * AO + diffuse * GI
-        const compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi ) ), scenePassColor.a );
+        const compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
 
         // TRAA: temporal resolve anti-aliasing using velocity buffer
         const traaPass = traa( compositePass, scenePassDepth, scenePassVelocity, this.camera );
