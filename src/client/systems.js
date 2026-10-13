@@ -7,6 +7,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { decodeSoup } from '../net/codec.js';
 import { getPropDef } from '../props/PropRegistry.js';
+import { materialColor } from '../terrain/materials.js';
 
 const SNAPSHOT_INTERVAL_MS = 1000 / 15;
 const FROZEN_COLOR = 0x8888ff;
@@ -112,11 +113,20 @@ export class BodyRenderSystem {
         let indices = new Uint32Array(positions.length / 3);
         for(let i = 0; i < indices.length; i++) indices[i] = i;
         geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+        if(fragment.mats) {
+            let colors = new Float32Array(positions.length);
+            let color = new THREE.Color();
+            for(let t = 0; t < fragment.mats.length && t * 9 + 8 < colors.length; t++) {
+                color.setHex(materialColor(fragment.mats[t]));
+                for(let k = 0; k < 3; k++) { let o = t * 9 + k * 3; colors[o] = color.r; colors[o + 1] = color.g; colors[o + 2] = color.b; }
+            }
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        }
         geometry.computeVertexNormals();
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
-        let mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.5 }));
+        let mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: !!fragment.mats, roughness: 0.7, metalness: 0.1, flatShading: true }));
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.collisionBVH = geometry.boundsTree;
         return mesh;

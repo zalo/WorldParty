@@ -127,6 +127,8 @@ export default class Main {
                 if(idx < this.tools.length) this.spawnMenu.selectTool(idx);
             }
             if(e.code === 'KeyQ') this.spawnMenu.toggle();
+            let tool = this.spawnMenu.getCurrentTool();
+            if(tool.onKey) tool.onKey(this, e.code);
         });
 
         this.frameNum = 0;
@@ -137,7 +139,7 @@ export default class Main {
     // ---- terrain mirror ---------------------------------------------------
 
     setupTerrain() {
-        this.defaultMaterial = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.5, flatShading: true });
+        this.defaultMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.7, metalness: 0.1, flatShading: true });
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrainBatch = this.terrain.batch; // raycast target for tools

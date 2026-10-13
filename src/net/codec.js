@@ -25,26 +25,33 @@ export function decodeSoup(base64String) {
     return new Float32Array(gunzipSync(compressed).buffer);
 }
 
-/** @param {Float32Array} positions @param {Uint32Array} indices @returns {Uint8Array} */
-export function encodeChunkMesh(positions, indices) {
-    let raw = new Uint8Array(8 + positions.byteLength + indices.byteLength);
+/** @param {Float32Array} positions @param {Uint32Array} indices @param {Uint8Array} [materials] one id per triangle @returns {Uint8Array} */
+export function encodeChunkMesh(positions, indices, materials = null) {
+    let numTris = indices.length / 3;
+    let raw = new Uint8Array(8 + positions.byteLength + indices.byteLength + (materials ? numTris : 0));
     let dv = new DataView(raw.buffer);
     dv.setUint32(0, positions.length / 3, true);
     dv.setUint32(4, indices.length, true);
     raw.set(new Uint8Array(positions.buffer, positions.byteOffset, positions.byteLength), 8);
     raw.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength), 8 + positions.byteLength);
+    if(materials) raw.set(materials.subarray(0, numTris), 8 + positions.byteLength + indices.byteLength);
     return gzipSync(raw);
 }
 
-/** @param {Uint8Array} bytes @returns {{positions: Float32Array, indices: Uint32Array}} */
+/** @param {Uint8Array} bytes @returns {{positions: Float32Array, indices: Uint32Array, materials: Uint8Array}} */
 export function decodeChunkMesh(bytes) {
     let raw = gunzipSync(bytes);
     let dv = new DataView(raw.buffer, raw.byteOffset);
     let nv = dv.getUint32(0, true), ni = dv.getUint32(4, true);
+    let o = raw.byteOffset + 8;
     // Copy out so the typed arrays are aligned and independently owned
-    let positions = new Float32Array(raw.buffer.slice(raw.byteOffset + 8, raw.byteOffset + 8 + nv * 12));
-    let indices = new Uint32Array(raw.buffer.slice(raw.byteOffset + 8 + nv * 12, raw.byteOffset + 8 + nv * 12 + ni * 4));
-    return { positions, indices };
+    let positions = new Float32Array(raw.buffer.slice(o, o + nv * 12));
+    let indices = new Uint32Array(raw.buffer.slice(o + nv * 12, o + nv * 12 + ni * 4));
+    let numTris = ni / 3;
+    let matStart = o + nv * 12 + ni * 4;
+    let materials = new Uint8Array(numTris);
+    if(raw.byteOffset + raw.length >= matStart + numTris) materials.set(raw.subarray(matStart - raw.byteOffset, matStart - raw.byteOffset + numTris));
+    return { positions, indices, materials };
 }
 
 /** FNV-1a 32-bit hash as 8 hex chars; used as a chunk content version. */

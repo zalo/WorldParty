@@ -8,7 +8,7 @@
  *   RigidBody    { shape:'box'|'sphere'|'capsule'|'hulls'|'trimesh', halfExtent,
  *                  propId, kinematic, frozen, sleeping }
  *   Prop         { propId, url }               visual: GLTF loaded by url
- *   FragmentMesh { data }                      visual+collider: gzip+base64 tri soup, body-local
+ *   FragmentMesh { data, mats }                visual+collider: gzip+base64 tri soup (body-local) + material id per triangle
  *   Joint        { type:'rope'|'weld'|'hinge', bodyA, bodyB, localOffsetA, localOffsetB, axis }
  *   Grabbed      { by }                       physgun hold (target pose is transient: $GrabTarget)
  *   Player       { name, color }
@@ -26,7 +26,7 @@ export const RigidBody = ({ shape = 'box', halfExtent = 0.5, propId = null, kine
 
 export const Prop = ({ propId, url = null }) => ({ propId, url });
 
-export const FragmentMesh = ({ data }) => ({ data });
+export const FragmentMesh = ({ data, mats = null }) => ({ data, mats });
 
 export const Joint = ({ type, bodyA, bodyB, localOffsetA = { x: 0, y: 0, z: 0 }, localOffsetB = { x: 0, y: 0, z: 0 }, axis = null }) =>
     ({ type, bodyA, bodyB, localOffsetA, localOffsetB, axis });

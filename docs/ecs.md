@@ -87,3 +87,18 @@ replicate differently:
   materializes implicit chunks itself.
 - Storage key `chunk:<index>` holds `{index, version, bytes}`. Rooms saved
   in the old base64 soup format are migrated on load.
+
+## Terrain materials
+
+Every triangle carries a material id (`src/terrain/materials.js`). The
+server reserves one Manifold original ID per material at startup and tags
+each brush and each implicit chunk cube with its material's ID
+(`Terrain.withMaterial`). Manifold booleans report, per run of output
+triangles, which original they came from, so after a subtract the cut
+faces carry the brush's material while untouched faces keep theirs.
+`Terrain.triangleMaterials` reads the runs back; `meshToManifold` rebuilds
+runs from stored per-triangle ids so provenance survives restarts. Chunk
+bytes append one byte per triangle; the client expands chunks to flat
+triangles with a vertex color per face, and fragments carry `mats` in
+their `FragmentMesh` component. The CSG tool cycles materials with `R`
+(or the Material button on mobile).

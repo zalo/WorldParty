@@ -6,6 +6,7 @@
  *  same convention as the server. */
 import * as THREE from 'three/webgpu';
 import { decodeChunkMesh, EMPTY_VERSION } from '../net/codec.js';
+import { materialColor, DEFAULT_MATERIAL } from '../terrain/materials.js';
 
 export const GRID = 10;
 export const CHUNK_COUNT = GRID * GRID * GRID;
@@ -48,10 +49,10 @@ export class TerrainMirror {
     /** Restore a chunk to its implicit state. */
     setDefault(index) {
         if(isDefaultSolid(index)) {
-            let geometry = new THREE.BoxGeometry(10, 10, 10);
-            geometry.deleteAttribute('uv'); // chunk meshes carry position + normal only; all batch geometries must match
+            let box = new THREE.BoxGeometry(10, 10, 10);
             let c = chunkCenter(index);
-            geometry.translate(c.x, c.y, c.z);
+            box.translate(c.x, c.y, c.z);
+            let geometry = this.buildGeometry(box.attributes.position.array, box.index.array, null);
             this.setGeometry(index, geometry);
             this.versions[index] = SOLID_VERSION;
         } else {
@@ -64,13 +65,34 @@ export class TerrainMirror {
     setChunk(index, bytes, version) {
         this.pending.delete(index);
         if(!bytes) { this.setGeometry(index, null); this.versions[index] = EMPTY_VERSION; return; }
-        let { positions, indices } = decodeChunkMesh(bytes);
-        let geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-        geometry.computeVertexNormals(); // material uses flat shading; normals only keep attributes uniform
-        this.setGeometry(index, geometry);
+        let { positions, indices, materials } = decodeChunkMesh(bytes);
+        this.setGeometry(index, this.buildGeometry(positions, indices, materials));
         this.versions[index] = version;
+    }
+
+    /** Expand an indexed mesh to flat triangles with a per-face material color.
+     *  (Per-face attributes need unshared vertices; a sequential index keeps the batch's indexed layout.) */
+    buildGeometry(positions, indices, materials) {
+        let numTris = indices.length / 3;
+        let pos = new Float32Array(numTris * 9);
+        let col = new Float32Array(numTris * 9);
+        let idx = new Uint32Array(numTris * 3);
+        let color = new THREE.Color();
+        for(let t = 0; t < numTris; t++) {
+            color.setHex(materialColor(materials ? materials[t] : DEFAULT_MATERIAL));
+            for(let k = 0; k < 3; k++) {
+                let v = indices[t * 3 + k], o = t * 9 + k * 3;
+                pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
+                col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
+                idx[t * 3 + k] = t * 3 + k;
+            }
+        }
+        let geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        geometry.setIndex(new THREE.BufferAttribute(idx, 1));
+        geometry.computeVertexNormals();
+        return geometry;
     }
 
     /** Reconcile with a {index: version} map from the server; fetch what we lack. */

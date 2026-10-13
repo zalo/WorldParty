@@ -36,7 +36,8 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 - **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems.
 - **`src/props/PropRegistry.js`** - Single source of truth for spawnable props (collider shape, size, GLTF url, menu entry).
 - **`src/tools/*`** - Garry's Mod style tools (physgun, CSG brush, rope, weld, hinge). Tools send messages; the server mutates entities.
-- **`src/net/codec.js`** - gzip+base64 triangle soup codec shared by both sides.
+- **`src/net/codec.js`** - geometry codecs shared by both sides (brush soups, versioned chunk meshes with per-triangle materials, binary chunk frames).
+- **`src/terrain/materials.js`** - terrain material palette; ids are tracked through Manifold booleans via reserved original IDs (see `docs/ecs.md`).
 
 ### Terrain System
 

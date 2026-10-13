@@ -225,10 +225,18 @@ export class SpawnMenu {
                     tool.onScroll(this.main, -120);
                 } else if(action.action === 'scrollDown') {
                     tool.onScroll(this.main, 120);
+                } else if(tool.onAction) {
+                    tool.onAction(this.main, action.action);
                 }
             });
             this.mobileActionArea.appendChild(btn);
         }
+    }
+
+    /** Extra text after the tool name in the top label (e.g. the current brush material). */
+    setStatus(tool, text) {
+        if(this.tools[this.currentToolIndex] !== tool) return;
+        this.toolLabel.textContent = `${tool.icon} ${tool.name}` + (text ? ` · ${text}` : '');
     }
 
     getCurrentTool() {

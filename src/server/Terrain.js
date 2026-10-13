@@ -16,6 +16,7 @@ import manMod from '../../assets/manifold-3d/manifold.wasm';
 import { decodeSoup, encodeChunkMesh, decodeChunkMesh, hashBytes, EMPTY_VERSION } from '../net/codec.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup } from '../net/codec.js';
+import { MATERIALS, DEFAULT_MATERIAL, clampMaterial } from '../terrain/materials.js';
 
 export const GRID = 10;
 export const CHUNK_SIZE = 10.0;
@@ -51,16 +52,18 @@ export class Terrain {
             }
         });
         this.manifold.setup();
+        // One Manifold original ID per material; booleans report which original each output triangle came from.
+        this.materialBase = this.manifold.Manifold.reserveIDs(MATERIALS.length);
         for(let key in storedChunks) {
             let c = storedChunks[key];
             let index = c.index;
             if(c.bytes) {
                 let bytes = c.bytes instanceof Uint8Array ? c.bytes : new Uint8Array(c.bytes);
                 let mesh = decodeChunkMesh(bytes);
-                this.chunks[index] = { index, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices) };
+                this.chunks[index] = { index, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
             } else if(c.data) {
                 // Legacy gzip+base64 triangle soup
-                let manifold = this.soupToManifold(c.data);
+                let manifold = this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL);
                 this.chunks[index] = { index, version: '', bytes: null, manifold };
                 this._refresh(index);
                 this.dirty.add(index);
@@ -82,7 +85,7 @@ export class Terrain {
         if(c) return c.manifold;
         if(!isDefaultSolid(index)) return null;
         let p = chunkCenter(index);
-        return this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(p.x, p.y, p.z);
+        return this.withMaterial(this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(p.x, p.y, p.z), DEFAULT_MATERIAL);
     }
 
     /** {index: version} for every stored chunk (full updates). */
@@ -133,10 +136,10 @@ export class Terrain {
         if(soup.length > MAX_BRUSH_FLOATS || soup.length % 9 !== 0) return [];
         let brush;
         try {
-            brush = this.soupToManifold(msg.brush,
+            brush = this.withMaterial(this.soupToManifold(msg.brush,
                 new THREE.Vector3(msg.position.x, msg.position.y, msg.position.z),
                 new THREE.Quaternion(msg.quaternion.x, msg.quaternion.y, msg.quaternion.z, msg.quaternion.w),
-                new THREE.Vector3(s.x, s.y, s.z));
+                new THREE.Vector3(s.x, s.y, s.z)), clampMaterial(msg.material));
         } catch(e) { console.warn('Rejected brush: ' + e.message); return []; }
 
         let fragments = [];
@@ -212,7 +215,7 @@ export class Terrain {
             return;
         }
         let mesh = c.manifold.getMesh();
-        c.bytes = encodeChunkMesh(new Float32Array(mesh.vertProperties), new Uint32Array(mesh.triVerts));
+        c.bytes = encodeChunkMesh(new Float32Array(mesh.vertProperties), new Uint32Array(mesh.triVerts), this.triangleMaterials(mesh));
         c.version = hashBytes(c.bytes);
     }
 
@@ -241,6 +244,7 @@ export class Terrain {
         let v = mesh.vertProperties, tri = mesh.triVerts;
         let numVerts = v.length / 3, numTris = tri.length / 3;
         if(numVerts < 4 || numTris < 1) return null;
+        let mats = this.triangleMaterials(mesh);
 
         let cx = 0, cy = 0, cz = 0;
         for(let i = 0; i < numVerts; i++) { cx += v[i * 3]; cy += v[i * 3 + 1]; cz += v[i * 3 + 2]; }
@@ -259,14 +263,57 @@ export class Terrain {
         return {
             Transform: Transform({ position: { x: cx, y: cy, z: cz } }),
             RigidBody: RigidBody({ shape: 'trimesh', halfExtent }),
-            FragmentMesh: FragmentMesh({ data: encodeSoup(soup) }),
+            FragmentMesh: FragmentMesh({ data: encodeSoup(soup), mats: Array.from(mats) }),
         };
     }
 
     // ---- codecs -----------------------------------------------------------
 
-    meshToManifold(positions, indices) {
-        let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties: new Float32Array(positions), triVerts: new Uint32Array(indices) });
+    /** Per-triangle material ids from a mesh's runs (runOriginalID - materialBase). */
+    triangleMaterials(mesh) {
+        let numTris = mesh.triVerts.length / 3;
+        let mats = new Uint8Array(numTris);
+        let runIndex = mesh.runIndex, runIds = mesh.runOriginalID;
+        if(!runIndex || !runIds) return mats;
+        for(let r = 0; r < runIds.length; r++) {
+            let id = runIds[r] - this.materialBase;
+            if(id < 0 || id >= MATERIALS.length) id = DEFAULT_MATERIAL;
+            let start = runIndex[r] / 3, end = (r + 1 < runIndex.length ? runIndex[r + 1] : mesh.triVerts.length) / 3;
+            mats.fill(id, start, end);
+        }
+        return mats;
+    }
+
+    /** Rebuild a manifold whose every triangle belongs to one material (one run). Takes ownership of `manifold`. */
+    withMaterial(manifold, material) {
+        let m = manifold.getMesh();
+        let mesh = new this.manifold.Mesh({
+            numProp: 3,
+            vertProperties: new Float32Array(m.vertProperties),
+            triVerts: new Uint32Array(m.triVerts),
+            runIndex: new Uint32Array([0, m.triVerts.length]),
+            runOriginalID: new Uint32Array([this.materialBase + material]),
+        });
+        manifold.delete();
+        return new this.manifold.Manifold(mesh);
+    }
+
+    /** Manifold from an indexed mesh plus per-triangle materials, grouped into one run per material. */
+    meshToManifold(positions, indices, materials) {
+        let numTris = indices.length / 3;
+        let order = Array.from({ length: numTris }, (_, i) => i);
+        if(materials) order.sort((a, b) => materials[a] - materials[b] || a - b);
+        let triVerts = new Uint32Array(indices.length);
+        let runIndex = [], runIds = [];
+        let last = -1;
+        for(let k = 0; k < numTris; k++) {
+            let t = order[k];
+            let mat = materials ? materials[t] : DEFAULT_MATERIAL;
+            if(mat !== last) { runIndex.push(k * 3); runIds.push(this.materialBase + mat); last = mat; }
+            triVerts[k * 3] = indices[t * 3]; triVerts[k * 3 + 1] = indices[t * 3 + 1]; triVerts[k * 3 + 2] = indices[t * 3 + 2];
+        }
+        runIndex.push(indices.length);
+        let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties: new Float32Array(positions), triVerts, runIndex: new Uint32Array(runIndex), runOriginalID: new Uint32Array(runIds) });
         return new this.manifold.Manifold(mesh);
     }
 
@@ -283,8 +330,9 @@ export class Terrain {
             vertProperties[i] = vertex.x; vertProperties[i + 1] = vertex.y; vertProperties[i + 2] = vertex.z;
         }
         let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties, triVerts: new Uint32Array(geometry.index.array) });
-        let out = new this.manifold.Manifold(mesh);
-        out.simplify(0.1);
+        let raw = new this.manifold.Manifold(mesh);
+        let out = raw.simplify(0.1); // returns a copy
+        raw.delete();
         return out;
     }
 }
