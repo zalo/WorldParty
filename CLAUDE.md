@@ -40,11 +40,11 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 ### Terrain System
 
-The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored. Edits send the brush geometry and transform plus the original chunk soup; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders.
+The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk indices plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{index: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<index>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand.
 
 ### Networking Protocol
 
-JSON over WebSocket. Client → server: `player`, `manifoldcsgoperation`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks`, `serverTickMs`.
+JSON over WebSocket. Client → server: `player`, `csg`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks` (versions), `serverTickMs`, plus binary chunk frames.
 
 ## Key Dependencies
 

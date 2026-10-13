@@ -3,19 +3,26 @@
  *  y=5, empty above. Chunks are indexed x*100 + y*10 + z over a 10x10x10 grid
  *  centred on the origin.
  *
- *  This module owns the mesh data; colliders live in Physics and fragment
- *  bodies are ECS entities created by the caller from fragmentComponents(). */
+ *  Each stored chunk carries an indexed mesh encoded with encodeChunkMesh()
+ *  and a content hash used as its version. Clients fetch chunk bytes by
+ *  version over HTTP and are told about new versions through the normal
+ *  update stream. A stored chunk with a null manifold is an explicitly empty
+ *  chunk (fully carved away). */
 import * as THREE from 'three';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ADDITION, INTERSECTION, SUBTRACTION } from 'three-bvh-csg';
 import { M } from '../../assets/manifold-3d/manifold.js';
 import manMod from '../../assets/manifold-3d/manifold.wasm';
-import { encodeSoup, decodeSoup } from '../net/codec.js';
+import { decodeSoup, encodeChunkMesh, decodeChunkMesh, hashBytes, EMPTY_VERSION } from '../net/codec.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
+import { encodeSoup } from '../net/codec.js';
 
 export const GRID = 10;
 export const CHUNK_SIZE = 10.0;
 export const SOLID_BELOW_Y = 5;
+export const CHUNK_COUNT = GRID * GRID * GRID;
+const MAX_BRUSH_SCALE = 20;
+const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
 
 export function chunkCoords(index) {
     return { x: Math.floor(index / 100), y: Math.floor(index / 10) % 10, z: index % 10 };
@@ -24,10 +31,11 @@ export function chunkCenter(index) {
     let c = chunkCoords(index);
     return { x: c.x * CHUNK_SIZE - 45.0, y: c.y * CHUNK_SIZE - 45.0, z: c.z * CHUNK_SIZE - 45.0 };
 }
+export function isDefaultSolid(index) { return chunkCoords(index).y < SOLID_BELOW_Y; }
 
 export class Terrain {
     constructor() {
-        /** @type {Record<number, { index:number, data:string, manifold:any }>} */
+        /** @type {Record<number, { index:number, version:string, bytes:Uint8Array|null, manifold:any|null }>} */
         this.chunks = {};
         /** @type {Set<number>} chunk indices changed since last takeDirty() */
         this.dirty = new Set();
@@ -45,29 +53,57 @@ export class Terrain {
         this.manifold.setup();
         for(let key in storedChunks) {
             let c = storedChunks[key];
-            this.chunks[c.index] = { index: c.index, data: c.data, manifold: this.soupToManifold(c.data) };
+            let index = c.index;
+            if(c.bytes) {
+                let bytes = c.bytes instanceof Uint8Array ? c.bytes : new Uint8Array(c.bytes);
+                let mesh = decodeChunkMesh(bytes);
+                this.chunks[index] = { index, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices) };
+            } else if(c.data) {
+                // Legacy gzip+base64 triangle soup
+                let manifold = this.soupToManifold(c.data);
+                this.chunks[index] = { index, version: '', bytes: null, manifold };
+                this._refresh(index);
+                this.dirty.add(index);
+            } else {
+                this.chunks[index] = { index, version: EMPTY_VERSION, bytes: null, manifold: null };
+            }
         }
     }
 
     /** True if the chunk has terrain (either implicit solid or a stored manifold). */
     hasTerrain(index) {
         let c = this.chunks[index];
-        if(c) return !!c.manifold;
-        return chunkCoords(index).y < SOLID_BELOW_Y;
+        return c ? !!c.manifold : isDefaultSolid(index);
     }
 
-    /** Serializable chunk map for storage and full updates. */
-    serialize() {
+    /** Current manifold for a chunk, materializing the implicit default. Caller must not delete it. */
+    currentManifold(index) {
+        let c = this.chunks[index];
+        if(c) return c.manifold;
+        if(!isDefaultSolid(index)) return null;
+        let p = chunkCenter(index);
+        return this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(p.x, p.y, p.z);
+    }
+
+    /** {index: version} for every stored chunk (full updates). */
+    versions() {
         let out = {};
-        for(let key in this.chunks) out[key] = { index: this.chunks[key].index, data: this.chunks[key].data };
+        for(let key in this.chunks) out[key] = this.chunks[key].version;
         return out;
     }
 
+    /** {index: version} for chunks changed since the last call. */
     takeDirty() {
         let out = {};
-        for(let index of this.dirty) if(this.chunks[index]) out[index] = { index, data: this.chunks[index].data };
+        for(let index of this.dirty) if(this.chunks[index]) out[index] = this.chunks[index].version;
         this.dirty.clear();
         return out;
+    }
+
+    /** Storage record for a chunk. */
+    serializeChunk(index) {
+        let c = this.chunks[index];
+        return c ? { index: c.index, version: c.version, bytes: c.bytes } : undefined;
     }
 
     clear() {
@@ -76,73 +112,108 @@ export class Terrain {
         this.dirty.clear();
     }
 
-    /** World-space triangle soup for a chunk's collider, or null if the chunk is implicit. */
-    chunkPositions(index) {
+    /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty. */
+    chunkMesh(index) {
         let c = this.chunks[index];
-        return c ? decodeSoup(c.data) : null;
+        return c && c.bytes ? decodeChunkMesh(c.bytes) : null;
     }
 
     /**
-     * Apply a brush boolean to a chunk. `msg` is the client's manifoldcsgoperation payload.
-     * Returns an array of component bags for floating fragments (to become entities).
+     * Apply a brush boolean to a set of chunks. `msg` is the client's `csg` payload:
+     * { indices:[...], brush: soup base64, operation, position, quaternion, scale }.
+     * Returns component bags for floating fragments (to become entities).
      */
     applyCsg(msg) {
-        let index = msg.index;
-        if(!this.chunks[index] || !this.chunks[index].manifold) {
-            if(!msg.originalChunk) { console.error("csg op without originalChunk for fresh index " + index); return []; }
-            this.chunks[index] = { index, data: msg.originalChunk, manifold: this.soupToManifold(msg.originalChunk) };
-        }
-        let chunk = this.chunks[index];
-        let brush = this.soupToManifold(msg.brush,
-            new THREE.Vector3(msg.brushPosition.x, msg.brushPosition.y, msg.brushPosition.z),
-            new THREE.Quaternion(msg.brushQuaternion.x, msg.brushQuaternion.y, msg.brushQuaternion.z, msg.brushQuaternion.w),
-            new THREE.Vector3(msg.brushScale.x, msg.brushScale.y, msg.brushScale.z));
-
         let op = parseInt(msg.operation);
+        if(op !== ADDITION && op !== SUBTRACTION && op !== INTERSECTION) return [];
+        let s = msg.scale || { x: 1, y: 1, z: 1 };
+        for(let k of ['x', 'y', 'z']) if(!Number.isFinite(s[k]) || Math.abs(s[k]) > MAX_BRUSH_SCALE) return [];
+
+        let soup = decodeSoup(msg.brush);
+        if(soup.length > MAX_BRUSH_FLOATS || soup.length % 9 !== 0) return [];
+        let brush;
+        try {
+            brush = this.soupToManifold(msg.brush,
+                new THREE.Vector3(msg.position.x, msg.position.y, msg.position.z),
+                new THREE.Quaternion(msg.quaternion.x, msg.quaternion.y, msg.quaternion.z, msg.quaternion.w),
+                new THREE.Vector3(s.x, s.y, s.z));
+        } catch(e) { console.warn('Rejected brush: ' + e.message); return []; }
+
+        let fragments = [];
+        let indices = [...new Set((msg.indices || []).map(i => i | 0).filter(i => i >= 0 && i < CHUNK_COUNT))];
+        for(let index of indices) fragments.push(...this.applyToChunk(index, brush, op));
+        brush.delete();
+        return fragments;
+    }
+
+    applyToChunk(index, brush, op) {
+        let current = this.currentManifold(index); // owned by chunk record, or a fresh default cube
+        let owned = !this.chunks[index];            // true if `current` was materialized here
         let result;
-        if(op === ADDITION) result = chunk.manifold.add(brush);
-        else if(op === INTERSECTION) result = chunk.manifold.intersect(brush);
-        else if(op === SUBTRACTION) result = chunk.manifold.subtract(brush);
-        else { console.error("Unknown manifold operation: " + op); brush.delete(); return []; }
+        if(!current) {
+            if(op !== ADDITION) return [];           // carving empty space changes nothing
+            result = brush.add(brush);               // copy (manifold ops return new objects)
+        } else if(op === ADDITION) result = current.add(brush);
+        else if(op === SUBTRACTION) result = current.subtract(brush);
+        else result = current.intersect(brush);
 
         // Clip to the chunk's bounds
         let c = chunkCenter(index);
         let cube = this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z);
         let clipped = result.intersect(cube);
-        cube.delete(); result.delete(); chunk.manifold.delete(); brush.delete();
+        cube.delete(); result.delete();
+        if(current && (owned || this.chunks[index])) current.delete();
 
         let fragments = [];
-        let islands = clipped.decompose();
-        if(islands.length <= 1) {
-            for(let i of islands) i.delete();
-            chunk.manifold = clipped;
-        } else {
-            // Largest island is always terrain; smaller ones stay only if grounded.
-            let info = islands.map((m, idx) => ({ idx, volume: m.volume() })).sort((a, b) => b.volume - a.volume);
-            let terrain = [islands[info[0].idx]];
-            for(let j = 1; j < info.length; j++) {
-                let island = islands[info[j].idx];
-                if(info[j].volume < 0.01) { island.delete(); continue; }
-                if(this.isIslandGrounded(island, index)) terrain.push(island);
-                else fragments.push(island);
-            }
-            let merged = terrain[0];
-            for(let i = 1; i < terrain.length; i++) {
-                let next = merged.add(terrain[i]);
-                merged.delete(); terrain[i].delete();
-                merged = next;
-            }
-            chunk.manifold = merged;
+        let terrain = null;
+        if(clipped.isEmpty()) {
             clipped.delete();
-            console.log(`Decomposed chunk ${index}: ${islands.length} islands, ${terrain.length} grounded, ${fragments.length} floating`);
+        } else {
+            let islands = clipped.decompose();
+            if(islands.length <= 1) {
+                for(let i of islands) i.delete();
+                terrain = clipped;
+            } else {
+                // Largest island is always terrain; smaller ones stay only if grounded.
+                let info = islands.map((m, idx) => ({ idx, volume: m.volume() })).sort((a, b) => b.volume - a.volume);
+                let keep = [islands[info[0].idx]];
+                for(let j = 1; j < info.length; j++) {
+                    let island = islands[info[j].idx];
+                    if(info[j].volume < 0.01) { island.delete(); continue; }
+                    if(this.isIslandGrounded(island, index)) keep.push(island);
+                    else fragments.push(island);
+                }
+                terrain = keep[0];
+                for(let i = 1; i < keep.length; i++) {
+                    let next = terrain.add(keep[i]);
+                    terrain.delete(); keep[i].delete();
+                    terrain = next;
+                }
+                clipped.delete();
+                console.log(`Decomposed chunk ${index}: ${islands.length} islands, ${keep.length} grounded, ${fragments.length} floating`);
+            }
         }
 
-        chunk.data = this.manifoldToSoup(chunk.manifold);
+        this.chunks[index] = { index, version: '', bytes: null, manifold: terrain };
+        this._refresh(index);
         this.dirty.add(index);
 
         let out = [];
         for(let frag of fragments) { let comps = this.fragmentComponents(frag); frag.delete(); if(comps) out.push(comps); }
         return out;
+    }
+
+    /** Re-encode a chunk's bytes and version from its manifold. */
+    _refresh(index) {
+        let c = this.chunks[index];
+        if(!c.manifold || c.manifold.isEmpty()) {
+            if(c.manifold) { c.manifold.delete(); c.manifold = null; }
+            c.bytes = null; c.version = EMPTY_VERSION;
+            return;
+        }
+        let mesh = c.manifold.getMesh();
+        c.bytes = encodeChunkMesh(new Float32Array(mesh.vertProperties), new Uint32Array(mesh.triVerts));
+        c.version = hashBytes(c.bytes);
     }
 
     /** An island is grounded if it touches a chunk face whose neighbour has terrain. */
@@ -194,6 +265,11 @@ export class Terrain {
 
     // ---- codecs -----------------------------------------------------------
 
+    meshToManifold(positions, indices) {
+        let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties: new Float32Array(positions), triVerts: new Uint32Array(indices) });
+        return new this.manifold.Manifold(mesh);
+    }
+
     soupToManifold(base64, position = new THREE.Vector3(), quaternion = new THREE.Quaternion(), scale = new THREE.Vector3(1, 1, 1)) {
         let geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.BufferAttribute(decodeSoup(base64), 3));
@@ -210,16 +286,5 @@ export class Terrain {
         let out = new this.manifold.Manifold(mesh);
         out.simplify(0.1);
         return out;
-    }
-
-    manifoldToSoup(manifold) {
-        let mesh = manifold.getMesh();
-        let v = mesh.vertProperties, tri = mesh.triVerts;
-        let soup = new Float32Array(tri.length * 3);
-        for(let i = 0; i < tri.length; i++) {
-            let vi = tri[i];
-            soup[i * 3] = v[vi * 3]; soup[i * 3 + 1] = v[vi * 3 + 1]; soup[i * 3 + 2] = v[vi * 3 + 2];
-        }
-        return encodeSoup(soup);
     }
 }

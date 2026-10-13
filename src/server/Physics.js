@@ -198,24 +198,27 @@ export class Physics {
         this.chunkActors[index] = actor;
     }
 
-    /** Static triangle-mesh collider for a CSG-modified chunk (world-space soup). */
-    setChunkCollider(index, positions) {
+    /** Static triangle-mesh collider for a CSG-modified chunk (world-space indexed mesh), or none if `mesh` is null. */
+    setChunkCollider(index, mesh) {
         this._removeChunkActor(index);
+        if(!mesh) { this.wakeAll(); return; }
         let px = this.px;
+        let { positions, indices } = mesh;
         let numVerts = positions.length / 3;
-        let numTris = Math.floor(numVerts / 3);
+        let numTris = Math.floor(indices.length / 3);
         if(numTris < 1) return;
 
         let verts = new px.PxArray_PxVec3(numVerts);
         for(let i = 0; i < numVerts; i++) verts.set(i, new px.PxVec3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-        let indices = new px.PxArray_PxU32(numTris * 3);
-        for(let i = 0; i < numTris * 3; i++) indices.set(i, i);
+        let idx = new px.PxArray_PxU32(numTris * 3);
+        for(let i = 0; i < numTris * 3; i++) idx.set(i, indices[i]);
 
         let desc = new px.PxTriangleMeshDesc();
         desc.points.set_count(numVerts); desc.points.set_stride(12); desc.points.set_data(verts.begin());
-        desc.triangles.set_count(numTris); desc.triangles.set_stride(12); desc.triangles.set_data(indices.begin());
+        desc.triangles.set_count(numTris); desc.triangles.set_stride(12); desc.triangles.set_data(idx.begin());
         if(!desc.isValid()) { console.warn(`Invalid triangle mesh desc for chunk ${index}`); return; }
         let triMesh = px.CreateTriangleMesh(this.cookingParams, desc);
+        verts.__destroy__(); idx.__destroy__(); desc.__destroy__();
         if(!triMesh) { console.warn(`Failed to cook triangle mesh for chunk ${index}`); return; }
 
         let actor = this.physics.createRigidStatic(this._pose({ x: 0, y: 0, z: 0 }));

@@ -48,35 +48,17 @@ export class CSGBrushTool extends BaseTool {
     }
 
     performCSG(main, operation) {
-        let box1 = new THREE.Box3();
-        box1.setFromObject(main.brush2);
-
-        for(let i = 0; i < main.chunkBBoxes.length; i++) {
-            if (box1.intersectsBox(main.chunkBBoxes[i])) {
-                main.conn.send(JSON.stringify({
-                    type: "manifoldcsgoperation",
-                    index: i,
-                    originalChunk: main.brushToBase64(main.chunkBrushes[i]),
-                    brush: main.brushToBase64(main.brush2),
-                    operation: operation,
-                    brushPosition: {
-                        x: main.brush2.position.x,
-                        y: main.brush2.position.y,
-                        z: main.brush2.position.z
-                    },
-                    brushQuaternion: {
-                        x: main.brush2.quaternion.x,
-                        y: main.brush2.quaternion.y,
-                        z: main.brush2.quaternion.z,
-                        w: main.brush2.quaternion.w
-                    },
-                    brushScale: {
-                        x: main.brush2.scale.x,
-                        y: main.brush2.scale.y,
-                        z: main.brush2.scale.z
-                    }
-                }));
-            }
-        }
+        let box = new THREE.Box3().setFromObject(main.brush2);
+        let indices = main.terrain.intersecting(box);
+        if(indices.length === 0) return;
+        main.conn.send(JSON.stringify({
+            type: "csg",
+            indices,
+            brush: main.brushToBase64(main.brush2),
+            operation,
+            position: { x: main.brush2.position.x, y: main.brush2.position.y, z: main.brush2.position.z },
+            quaternion: { x: main.brush2.quaternion.x, y: main.brush2.quaternion.y, z: main.brush2.quaternion.z, w: main.brush2.quaternion.w },
+            scale: { x: main.brush2.scale.x, y: main.brush2.scale.y, z: main.brush2.scale.z }
+        }));
     }
 }

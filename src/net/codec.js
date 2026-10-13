@@ -1,6 +1,9 @@
 /** Geometry wire codec shared by client and server.
- *  Triangle soups (non-indexed float32 xyz) are gzip-compressed and base64
- *  encoded so they can ride inside JSON messages and durable storage. */
+ *
+ *  - Brushes travel as gzip+base64 triangle soups inside JSON (small, rare).
+ *  - Chunks travel as binary: gzip of [u32 numVerts][u32 numIndices][f32 xyz...][u32 idx...],
+ *    content-addressed by an FNV-1a hash so clients can cache by version.
+ */
 import { gzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 
 function b64encode(input) { return btoa(encodeURIComponent(input)); }
@@ -20,4 +23,59 @@ export function decodeSoup(base64String) {
     let compressed = new Uint8Array(binary.length);
     for(let b = 0; b < binary.length; b++) compressed[b] = binary.charCodeAt(b);
     return new Float32Array(gunzipSync(compressed).buffer);
+}
+
+/** @param {Float32Array} positions @param {Uint32Array} indices @returns {Uint8Array} */
+export function encodeChunkMesh(positions, indices) {
+    let raw = new Uint8Array(8 + positions.byteLength + indices.byteLength);
+    let dv = new DataView(raw.buffer);
+    dv.setUint32(0, positions.length / 3, true);
+    dv.setUint32(4, indices.length, true);
+    raw.set(new Uint8Array(positions.buffer, positions.byteOffset, positions.byteLength), 8);
+    raw.set(new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength), 8 + positions.byteLength);
+    return gzipSync(raw);
+}
+
+/** @param {Uint8Array} bytes @returns {{positions: Float32Array, indices: Uint32Array}} */
+export function decodeChunkMesh(bytes) {
+    let raw = gunzipSync(bytes);
+    let dv = new DataView(raw.buffer, raw.byteOffset);
+    let nv = dv.getUint32(0, true), ni = dv.getUint32(4, true);
+    // Copy out so the typed arrays are aligned and independently owned
+    let positions = new Float32Array(raw.buffer.slice(raw.byteOffset + 8, raw.byteOffset + 8 + nv * 12));
+    let indices = new Uint32Array(raw.buffer.slice(raw.byteOffset + 8 + nv * 12, raw.byteOffset + 8 + nv * 12 + ni * 4));
+    return { positions, indices };
+}
+
+/** FNV-1a 32-bit hash as 8 hex chars; used as a chunk content version. */
+export function hashBytes(bytes) {
+    let h = 0x811c9dc5;
+    for(let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(16).padStart(8, '0');
+}
+
+export const EMPTY_VERSION = '0';
+export const FRAME_CHUNK = 1;
+
+/** Binary WebSocket frame: [u8 type=1][u32 index][u8 versionLength][version ascii][payload] */
+export function packChunkFrame(index, version, bytes) {
+    let out = new Uint8Array(6 + version.length + (bytes ? bytes.length : 0));
+    let dv = new DataView(out.buffer);
+    out[0] = FRAME_CHUNK;
+    dv.setUint32(1, index, true);
+    out[5] = version.length;
+    for(let i = 0; i < version.length; i++) out[6 + i] = version.charCodeAt(i);
+    if(bytes) out.set(bytes, 6 + version.length);
+    return out;
+}
+
+export function unpackChunkFrame(buffer) {
+    let u8 = new Uint8Array(buffer);
+    if(u8[0] !== FRAME_CHUNK) return null;
+    let dv = new DataView(u8.buffer, u8.byteOffset);
+    let index = dv.getUint32(1, true);
+    let vlen = u8[5];
+    let version = String.fromCharCode(...u8.subarray(6, 6 + vlen));
+    let bytes = u8.subarray(6 + vlen);
+    return { index, version, bytes: bytes.length ? bytes : null };
 }

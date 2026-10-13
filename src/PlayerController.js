@@ -108,7 +108,7 @@ export class PlayerController extends THREE.Group {
     }
 
     updatePlayer(delta) {
-        if (!this.terrainBatch) return;
+        if (!this.terrain) return;
 
         this.walkMovement.x = 0;
         this.walkMovement.y = 0;
@@ -214,39 +214,32 @@ export class PlayerController extends THREE.Group {
         globalBox.min.addScalar(- capsuleInfo.radius);
         globalBox.max.addScalar(capsuleInfo.radius);
 
-        // Collision against terrain BatchedMesh BVHs
-        // Geometry is in world space (identity matrix), so no transform needed
-        let boundsTrees = this.terrainBatch ? this.terrainBatch.boundsTrees : null;
-        if(boundsTrees) {
-            for( let i = 0; i < this.chunkGeoIds.length; i++ ) {
-                let geoId = this.chunkGeoIds[i];
-                let bvh = boundsTrees[geoId];
-                if(!bvh) continue;
-                if(!globalBox.intersectsBox(this.chunkBBoxes[i])) continue;
+        // Collision against terrain chunk BVHs (geometry is in world space)
+        for( let i = 0; i < this.terrain.bboxes.length; i++ ) {
+            if(!globalBox.intersectsBox(this.terrain.bboxes[i])) continue;
+            let bvh = this.terrain.bvh(i);
+            if(!bvh) continue;
 
-                this.tempBox.makeEmpty();
-                this.tempBox.expandByPoint(this.tempSegment.start);
-                this.tempBox.expandByPoint(this.tempSegment.end);
-                this.tempBox.min.addScalar(- capsuleInfo.radius);
-                this.tempBox.max.addScalar(capsuleInfo.radius);
+            this.tempBox.makeEmpty();
+            this.tempBox.expandByPoint(this.tempSegment.start);
+            this.tempBox.expandByPoint(this.tempSegment.end);
+            this.tempBox.min.addScalar(- capsuleInfo.radius);
+            this.tempBox.max.addScalar(capsuleInfo.radius);
 
-                bvh.shapecast({
-                    intersectsBounds: box => box.intersectsBox(this.tempBox),
-                    intersectsTriangle: tri => {
-                        const triPoint = this.tempVector;
-                        const capsulePoint = this.tempVector2;
-
-                        const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
-                        if (distance < capsuleInfo.radius) {
-                            const depth = capsuleInfo.radius - distance;
-                            const direction = capsulePoint.sub(triPoint).normalize();
-
-                            this.tempSegment.start.addScaledVector(direction, depth);
-                            this.tempSegment.end.addScaledVector(direction, depth);
-                        }
+            bvh.shapecast({
+                intersectsBounds: box => box.intersectsBox(this.tempBox),
+                intersectsTriangle: tri => {
+                    const triPoint = this.tempVector;
+                    const capsulePoint = this.tempVector2;
+                    const distance = tri.closestPointToSegment(this.tempSegment, triPoint, capsulePoint);
+                    if (distance < capsuleInfo.radius) {
+                        const depth = capsuleInfo.radius - distance;
+                        const direction = capsulePoint.sub(triPoint).normalize();
+                        this.tempSegment.start.addScaledVector(direction, depth);
+                        this.tempSegment.end.addScaledVector(direction, depth);
                     }
-                });
-            }
+                }
+            });
         }
 
         // Capsule-vs-BVH collision against replicated physics bodies (ECS $Mesh with a BVH)

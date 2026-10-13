@@ -8,8 +8,9 @@
 import { World } from './ecs/World.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
-import { Terrain, GRID, SOLID_BELOW_Y, chunkCenter } from './server/Terrain.js';
+import { Terrain, GRID, SOLID_BELOW_Y, CHUNK_COUNT, chunkCenter } from './server/Terrain.js';
 import { getPropDef } from './props/PropRegistry.js';
+import { packChunkFrame } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -31,6 +32,7 @@ class PartyServer {
     this.physics = new Physics();
     this.terrain = new Terrain();
     this.ready = false;
+    this.readyPromise = new Promise(res => { this.resolveReady = res; });
     this.globalPlayerCount = 0;
     this.tickCount = 0;
     this.serverTickMs = 0;
@@ -68,8 +70,10 @@ class PartyServer {
     this.world.nextId = maxId + 1;
     this.world.takeDirty(); // loaded state is not "changed"
     this.persistQueue.clear(); this.persistRemoved.clear();
-    if(legacyChunks) for(let k in storedChunks) this.terrain.dirty.add(parseInt(k)); // migrate to per-chunk keys
+    // Chunks loaded from the legacy soup format are re-encoded and flagged for re-persist
+    for(let k in this.terrain.takeDirty()) this.markChunkPersist(parseInt(k));
     this.ready = true;
+    this.resolveReady();
     console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities`);
   }
 
@@ -88,7 +92,7 @@ class PartyServer {
       let c = chunkCenter(index);
       this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z);
     }
-    for(let index in this.terrain.chunks) this.physics.setChunkCollider(parseInt(index), this.terrain.chunkPositions(parseInt(index)));
+    for(let index in this.terrain.chunks) this.physics.setChunkCollider(parseInt(index), this.terrain.chunkMesh(parseInt(index)));
   }
 
   /** @param {Connection} conn @param {ConnectionContext} ctx */
@@ -144,7 +148,7 @@ class PartyServer {
   }
 
   fullUpdate() {
-    return { type: "fullupdate", entities: this.world.serialize(), removed: [], chunks: this.terrain.serialize(), serverTickMs: this.serverTickMs };
+    return { type: "fullupdate", entities: this.world.serialize(), removed: [], chunks: this.terrain.versions(), serverTickMs: this.serverTickMs };
   }
 
   // ---- persistence (per-entity / per-chunk keys) --------------------------
@@ -158,7 +162,7 @@ class PartyServer {
       if(s && Object.keys(s).length > 0) puts['ent:' + id] = s;
     }
     let deletes = [...this.persistRemoved].map(id => 'ent:' + id);
-    for(let index of this.persistChunks || []) puts['chunk:' + index] = { index, data: this.terrain.chunks[index].data };
+    for(let index of this.persistChunks || []) { let c = this.terrain.serializeChunk(index); if(c) puts['chunk:' + index] = c; }
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set();
 
     let keys = Object.keys(puts);
@@ -184,12 +188,35 @@ class PartyServer {
   }
 
   applyCsg(data) {
-    let index = num(data.index, -1) | 0;
-    if(index < 0 || index >= GRID * GRID * GRID) return;
-    let fragments = this.terrain.applyCsg({ ...data, index });
-    this.physics.setChunkCollider(index, this.terrain.chunkPositions(index));
-    this.markChunkPersist(index);
+    let fragments = this.terrain.applyCsg(data);
+    let changed = this.terrain.takeDirty();
+    for(let key in changed) {
+      let index = parseInt(key);
+      this.physics.setChunkCollider(index, this.terrain.chunkMesh(index));
+      this.markChunkPersist(index);
+      // Push the new bytes to everyone now; later joiners fetch by version over HTTP.
+      let c = this.terrain.chunks[index];
+      this.room.broadcast(packChunkFrame(index, c.version, c.bytes));
+    }
     for(let comps of fragments) this.world.create(comps);
+  }
+
+  /** HTTP: GET /parties/main/<room>/chunk/<index>?v=<version> -> chunk bytes (204 if empty). */
+  async onRequest(req) {
+    await this.readyPromise;
+    let url = new URL(req.url);
+    let m = /\/chunk\/(\d+)$/.exec(url.pathname);
+    if((req.method !== "GET" && req.method !== "HEAD") || !m) return new Response("Not found", { status: 404 });
+    let index = parseInt(m[1]);
+    if(index < 0 || index >= CHUNK_COUNT) return new Response("Bad chunk", { status: 400 });
+    let c = this.terrain.chunks[index];
+    if(!c) return new Response("Implicit chunk", { status: 404 });
+    let headers = { "X-Chunk-Version": c.version, "Access-Control-Allow-Origin": "*" };
+    // A URL that names the exact current version may be cached forever
+    headers["Cache-Control"] = url.searchParams.get("v") === c.version ? "public, max-age=31536000, immutable" : "no-store";
+    if(!c.bytes) return new Response(null, { status: 204, headers });
+    headers["Content-Type"] = "application/octet-stream";
+    return new Response(c.bytes, { status: 200, headers });
   }
 
   createJoint(data) {
@@ -245,7 +272,7 @@ class PartyServer {
         if(w.has(me, 'Player')) w.set(me, 'Player', { name: String(data.name || 'Player').slice(0, 32) });
         break;
 
-      case "manifoldcsgoperation":
+      case "csg":
         this.applyCsg(data);
         break;
 

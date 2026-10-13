@@ -68,7 +68,22 @@ and on disconnect, in batches of 128 keys (the Durable Object limit).
 
 ## Not entities (yet)
 
-Terrain chunks stay a separate sparse map (`src/server/Terrain.js`), keyed
-by chunk index and persisted under `chunk:<index>`. They are spatial
-structure rather than things with identity, and their replication path is
-different (content blobs, soon CDN-fetched).
+Terrain chunks stay a separate sparse map (`src/server/Terrain.js` on the
+server, `src/client/TerrainMirror.js` on the client), keyed by chunk index.
+They are spatial structure rather than things with identity, and they
+replicate differently:
+
+- Each stored chunk is an indexed mesh encoded by `encodeChunkMesh()` and
+  versioned by a content hash. Explicitly empty chunks have version `0`.
+- Update messages carry only `{index: version}`. Clients compare with their
+  local version and `GET /parties/main/<room>/chunk/<index>?v=<version>`;
+  a URL naming the current version is served `immutable`, so browsers and
+  edge caches keep it.
+- Right after an edit the server also pushes the new bytes to everyone in
+  the room as a binary WebSocket frame (`packChunkFrame`), so the editor and
+  nearby players see the change without a round trip.
+- The client never sends chunk geometry. A `csg` message lists the chunk
+  indices the brush overlaps plus the brush soup and transform; the server
+  materializes implicit chunks itself.
+- Storage key `chunk:<index>` holds `{index, version, bytes}`. Rooms saved
+  in the old base64 soup format are migrated on load.

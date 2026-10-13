@@ -12,7 +12,8 @@ import { computeBoundsTree, disposeBoundsTree, computeBatchedBoundsTree, dispose
 import PartySocket from "partysocket";
 
 import { World as EcsWorld } from './ecs/World.js';
-import { encodeSoup, decodeSoup } from './net/codec.js';
+import { encodeSoup, unpackChunkFrame } from './net/codec.js';
+import { TerrainMirror } from './client/TerrainMirror.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { SceneCleanupSystem, SnapshotSystem, BodyRenderSystem, PlayerRenderSystem, JointRenderSystem, ModelRenderSystem } from './client/systems.js';
 
@@ -23,10 +24,6 @@ import { WeldTool } from './tools/WeldTool.js';
 import { HingeTool } from './tools/HingeTool.js';
 import { SpawnMenu } from './ui/SpawnMenu.js';
 
-const GRID = 10;
-const CHUNK_COUNT = GRID * GRID * GRID;
-const CHUNK_RESERVED_VERTS = 10000;
-const CHUNK_RESERVED_INDICES = 30000;
 
 /** Client entry: rendering world, local player, terrain mirror, ECS mirror of server entities, tools. */
 export default class Main {
@@ -52,6 +49,7 @@ export default class Main {
         }
 
         this.conn = new PartySocket({ host: PARTYKIT_HOST, room: this.curRoom });
+        try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
 
         this.serverTickMs = 0;
@@ -77,9 +75,7 @@ export default class Main {
         this.player = new PlayerController(this.world.camera, this.simulationParams);
         this.world.scene.add(this.player);
         this.player.reset();
-        this.player.terrainBatch = this.terrainBatch;
-        this.player.chunkGeoIds = this.chunkGeoIds;
-        this.player.chunkBBoxes = this.chunkBBoxes;
+        this.player.terrain = this.terrain;
 
         // CSG brush preview (owned by CSGBrushTool, created here for shared access)
         this.transparentMaterial = new THREE.MeshStandardMaterial({ color: 0x8080a8, roughness: 0.5, metalness: 0.5, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
@@ -141,60 +137,19 @@ export default class Main {
     // ---- terrain mirror ---------------------------------------------------
 
     setupTerrain() {
-        this.defaultMaterial = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.5 });
-        this.terrainBatch = new THREE.BatchedMesh(CHUNK_COUNT, CHUNK_COUNT * CHUNK_RESERVED_VERTS, CHUNK_COUNT * CHUNK_RESERVED_INDICES, this.defaultMaterial);
-        this.terrainBatch.perObjectFrustumCulled = true;
-        this.terrainBatch.castShadow = true;
-        this.terrainBatch.receiveShadow = true;
-
-        this.chunkGeoIds = [];
-        this.chunkBBoxes = [];
-        this.chunkBrushes = []; // Brush per chunk, kept for CSG message encoding
-        let bbox = new THREE.Box3(new THREE.Vector3(-5, -5, -5), new THREE.Vector3(5, 5, 5));
-
-        for(let x = 0; x < GRID; x++) for(let y = 0; y < GRID; y++) for(let z = 0; z < GRID; z++) {
-            let geometry = y < 5 ? new THREE.BoxGeometry(10, 10, 10) : new THREE.BoxGeometry(0.1, 0.1, 0.1);
-            geometry.translate(x * 10 - 45, y * 10 - 45, z * 10 - 45);
-            geometry.computeBoundingBox();
-            geometry.computeBoundingSphere();
-
-            let geoId = this.terrainBatch.addGeometry(geometry, CHUNK_RESERVED_VERTS, CHUNK_RESERVED_INDICES);
-            let instanceId = this.terrainBatch.addInstance(geoId);
-            this.terrainBatch.setMatrixAt(instanceId, new THREE.Matrix4());
-
-            // Non-indexed so brushToBase64() emits a true triangle soup (the server builds a Manifold from it)
-            let brush = new Brush(geometry.toNonIndexed(), this.defaultMaterial);
-            brush.updateMatrixWorld(true);
-            brush.prepareGeometry();
-
-            this.chunkGeoIds.push(geoId);
-            this.chunkBBoxes.push(bbox.clone().translate(new THREE.Vector3(x * 10 - 45, y * 10 - 45, z * 10 - 45)));
-            this.chunkBrushes.push(brush);
-        }
-        this.terrainBatch.computeBoundsTree();
-        this.world.scene.add(this.terrainBatch);
+        this.defaultMaterial = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.5, flatShading: true });
+        this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
+        this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
+        this.terrainBatch = this.terrain.batch; // raycast target for tools
     }
 
-    fillChunk(chunkIndex, base64String) {
-        let positions = decodeSoup(base64String);
-        let numVerts = positions.length / 3;
-        let geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(numVerts * 2), 2));
-        geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(positions.length), 3));
-        let indices = new Uint32Array(numVerts);
-        for(let i = 0; i < numVerts; i++) indices[i] = i;
-        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-        geometry.computeBoundingBox();
-        geometry.computeBoundingSphere();
-        geometry.computeVertexNormals();
-
-        let geoId = this.chunkGeoIds[chunkIndex];
-        this.terrainBatch.setGeometryAt(geoId, geometry);
-        this.terrainBatch.computeBoundsTree(geoId);
-
-        this.chunkBrushes[chunkIndex].geometry = geometry.toNonIndexed();
-        this.chunkBrushes[chunkIndex].prepareGeometry();
+    /** Chunk bytes by content version over HTTP (cacheable, immutable per version). */
+    async fetchChunk(index, version) {
+        let protocol = location.protocol === 'https:' ? 'https:' : 'http:';
+        let res = await fetch(`${protocol}//${PARTYKIT_HOST}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${index}?v=${version}`);
+        if(res.status === 204) return null;
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        return new Uint8Array(await res.arrayBuffer());
     }
 
     brushToBase64(brush) { return encodeSoup(brush.geometry.attributes.position.array); }
@@ -202,13 +157,19 @@ export default class Main {
     // ---- networking -------------------------------------------------------
 
     updateFromServer(event) {
+        if(event.data instanceof ArrayBuffer) {
+            let frame = unpackChunkFrame(event.data);
+            if(frame) this.terrain.setChunk(frame.index, frame.bytes, frame.version);
+            return;
+        }
         if(typeof event.data !== 'string' || !event.data.startsWith("{")) return;
         let data = JSON.parse(event.data);
         if(data.type !== "fullupdate" && data.type !== "partialupdate") return;
         if(data.serverTickMs !== undefined) this.serverTickMs = data.serverTickMs;
 
-        if(data.entities) this.ecs.applySnapshot(data.entities, { full: data.type === "fullupdate", removed: data.removed || [] });
-        for(let chunkIndex in data.chunks) this.fillChunk(chunkIndex, '' + data.chunks[chunkIndex].data);
+        let full = data.type === "fullupdate";
+        if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
+        if(data.chunks) this.terrain.applyVersions(data.chunks, full);
     }
 
     /** Entity id for a three.js object created by a render system (walks up parents). */
