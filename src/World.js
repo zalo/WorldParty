@@ -3,6 +3,7 @@ import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec4, packN
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
+import { DayCycle } from './sky/DayCycle.js';
 
 /** The fundamental set up and animation structures for 3D Visualization */
 export default class World {
@@ -24,9 +25,8 @@ export default class World {
         this.camera.layers.enableAll();
         this.scene.add(this.camera);
 
-        this.dirLight = new THREE.DirectionalLight( 0x55505a, Math.PI * 10.0 );
-        this.dirLight.position.set( 3, 3, 0 );
-        this.dirLight.rotateX( 2 );
+        this.dirLight = new THREE.DirectionalLight( 0xffffff, Math.PI * 3.0 );
+        this.dirLight.position.set( 30, 60, -70 );
         this.dirLight.castShadow = true;
         this.dirLight.shadow.camera.near  = -100;
         this.dirLight.shadow.camera.far   = 100;
@@ -39,18 +39,7 @@ export default class World {
         this.dirLight.shadow.bias = -0.0002;
         this.dirLight.shadow.normalBias = 0.02;
         this.scene.add( this.dirLight );
-
-        this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 3.0 );
-        this.hemiLight.position.set( 0, 20, 0 );
-        this.scene.add( this.hemiLight );
-
-        new THREE.TextureLoader()
-            .load( 'assets/skybox.png', ( texture ) => {
-                texture.mapping = THREE.EquirectangularReflectionMapping;
-                texture.colorSpace = THREE.SRGBColorSpace;
-                this.scene.background = texture;
-                this.scene.environment = texture;
-            } );
+        this.scene.add( this.dirLight.target );
 
         // Mobile renders at half resolution
         let pixelRatio = this.isMobile ? Math.max(0.5, window.devicePixelRatio * 0.25) : Math.min(1, window.devicePixelRatio);
@@ -59,6 +48,8 @@ export default class World {
         this.renderer = new THREE.WebGPURenderer();
         this.renderer.setPixelRatio( pixelRatio );
         this.renderer.shadowMap.enabled = true;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 0.55;
         this.container.appendChild(this.renderer.domElement);
         this.renderer.setAnimationLoop(mainObject.update.bind(mainObject));
         this.renderer.setClearColor( 0x000000, 0 );
@@ -115,6 +106,7 @@ export default class World {
         this.renderPipeline.outputNode = traaPass;
 
         this._onWindowResize();
+        this._setupSky(mainObject);
 
         // Raycaster
         this.raycaster = new THREE.Raycaster();
@@ -131,6 +123,34 @@ export default class World {
         this.zVec = new THREE.Vector3(0, 0, 1);
         this.quat = new THREE.Quaternion().identity();
         this.color = new THREE.Color();
+    }
+
+    /** Physically based sky + sun (needs WebGPU); otherwise the static skybox image and a hemisphere light. */
+    _setupSky(mainObject) {
+        let params = mainObject.queryParams;
+        let timeOfDay = params && params.has('time') ? parseFloat(params.get('time')) : 10;
+        let dayLengthMinutes = params && params.has('daylength') ? parseFloat(params.get('daylength')) : 0;
+        this.renderer.init().then(() => {
+            if(DayCycle.supported(this.renderer)) {
+                this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
+                return;
+            }
+            console.warn('DayCycle needs WebGPU; using the static skybox');
+            this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 3.0 );
+            this.scene.add( this.hemiLight );
+            this.dirLight.color.setHex(0xfff2e0);
+            new THREE.TextureLoader().load( 'assets/skybox.png', ( texture ) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping;
+                texture.colorSpace = THREE.SRGBColorSpace;
+                this.scene.background = texture;
+                this.scene.environment = texture;
+            } );
+        });
+    }
+
+    /** Once per frame before rendering. */
+    update(dt) {
+        if(this.dayCycle) this.dayCycle.update(dt, this.camera);
     }
 
     /** **INTERNAL**: This function recalculates the viewport based on the new window size. */

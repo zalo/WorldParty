@@ -225,6 +225,7 @@ export default class Main {
         }
 
         this.ecs.update(this.deltaTime / 1000.0);
+        this.world.update(this.deltaTime / 1000.0);
 
         this.world.renderPipeline.render();
         this.world.stats.update();
