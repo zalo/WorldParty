@@ -171,7 +171,7 @@ export default class Main {
 
         let full = data.type === "fullupdate";
         if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
-        if(data.chunks) this.terrain.applyVersions(data.chunks, full);
+        if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full);
     }
 
     /** Entity id for a three.js object created by a render system (walks up parents). */

@@ -33,7 +33,8 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 - **`src/World.js`** - Three.js WebGPU renderer, camera, lighting, SSGI + TRAA post-processing pipeline.
 - **`src/PlayerController.js`** - First-person capsule player with BVH collision against terrain and ECS body meshes. WASD + PointerLock on desktop, nipplejs joysticks on mobile.
 - **`src/terrain/grid.js`** - Chunk grid constants, neighbour lookup, and face-exposure mask shared by server and client.
-- **`src/server/Terrain.js`** - Sparse chunk map with Manifold CSG, island decomposition, fragment extraction, and exposure queries.
+- **`src/server/Terrain.js`** - Sparse chunk map with per-chunk Manifold booleans and fragment component extraction.
+- **`src/server/Connectivity.js`** - Cross-chunk connectivity of solid (grounding, fragments) and air (which hollows are active and what to materialize).
 - **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems.
 - **`src/props/PropRegistry.js`** - Single source of truth for spawnable props (collider shape, size, GLTF url, menu entry).
 - **`src/tools/*`** - Garry's Mod style tools (physgun, CSG brush, rope, weld, hinge). Tools send messages; the server mutates entities.
@@ -42,11 +43,11 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 ### Terrain System
 
-The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk indices plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, decomposes into islands, keeps grounded islands as terrain, and spawns floating islands as `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{index: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<index>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand. Only visible terrain is materialized: `src/terrain/grid.js` (shared) computes which chunk faces border air or a modified chunk; buried rock gets no geometry and no server collider, exposed rock contributes just its exposed faces, and modified chunks drop boundary triangles that lie against rock. Neighbours are re-evaluated whenever a chunk changes.
+The world is a 10x10x10 grid of chunks, each a 10-unit cube, indexed `x*100 + y*10 + z`. Unmodified chunks are implicit (solid below y=5, empty above); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk indices plus the brush soup and transform; the server runs the boolean in Manifold, clips to the chunk, and then lets connectivity decide what is unsupported; unsupported solid becomes `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Changed chunk bytes are pushed as binary WebSocket frames; updates otherwise carry only `{index: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<index>?v=<version>`, served immutable). The client `TerrainMirror` keeps everything in one BatchedMesh that grows on demand. Grounding and loading are decided by `src/server/Connectivity.js`: solid and air islands per chunk, face footprints rasterized on a 16x16 grid, union-find across chunks. Unsupported solid becomes fragments (merged across chunks); terrain is only held and collided where it faces an air component containing a player or body, so buried rock and empty sealed caves cost nothing. Updates carry `chunks`/`rock`/`cull` maps and the client holds only what it is told to.
 
 ### Networking Protocol
 
-JSON over WebSocket. Client → server: `player`, `csg`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks` (versions), `serverTickMs`, plus binary chunk frames.
+JSON over WebSocket. Client → server: `player`, `csg`, `spawnprop`, `physgun_grab/move/release/freeze`, `createjoint`, `removejoint`, `deletebody`, `model`/`select`/`deselect`/`deletemodel`, `chat`, `reset`. Server → client: `fullupdate` / `partialupdate` with `entities`, `removed`, `chunks` (`{index: version|null}`), `rock` (`{index: faceMask}`), `cull` (`{index: faceMask}`), `serverTickMs`, plus binary chunk frames.
 
 ## Key Dependencies
 

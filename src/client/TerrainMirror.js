@@ -2,20 +2,18 @@
  *  on demand instead of reserved up front, with a BVH per chunk for player
  *  collision and a version per chunk for content-addressed fetching.
  *
- *  Unmodified chunks are implicit (solid box below y=5, nothing above), the
- *  same convention as the server. Only what can be seen is materialized:
- *  unmodified rock contributes just the faces that border air or a modified
- *  chunk (buried rock contributes nothing at all), and modified chunks drop
- *  the boundary triangles that lie flat against unmodified rock. */
+ *  The server decides what is worth holding (see server/Connectivity.js):
+ *  updates carry `chunks` {index: version|null} for modified chunks to hold
+ *  or drop, `rock` {index: faceMask} for the faces of untouched rock to draw,
+ *  and `cull` {index: faceMask} for the boundary faces of a modified chunk
+ *  that face nothing visible. Everything else costs nothing here. */
 import * as THREE from 'three/webgpu';
 import { decodeChunkMesh, EMPTY_VERSION } from '../net/codec.js';
 import { materialColor, DEFAULT_MATERIAL } from '../terrain/materials.js';
-import { GRID, CHUNK_COUNT, HALF, FACES, chunkCenter as gridCenter, isDefaultSolid, neighbour, exposedFaces } from '../terrain/grid.js';
+import { GRID, CHUNK_COUNT, HALF, FACES, chunkCenter as gridCenter, isDefaultSolid } from '../terrain/grid.js';
 
 export { GRID, CHUNK_COUNT, isDefaultSolid };
 const INITIAL_VERTS = 1 << 16;
-const SOLID_VERSION = 'solid';
-const AIR_VERSION = 'air';
 const PLANE_EPS = 1e-3;
 
 export function chunkCenter(index) { let c = gridCenter(index); return new THREE.Vector3(c.x, c.y, c.z); }
@@ -33,9 +31,10 @@ export class TerrainMirror {
         this.instIds = new Int32Array(CHUNK_COUNT).fill(-1);
         this.reservedV = new Int32Array(CHUNK_COUNT);
         this.reservedI = new Int32Array(CHUNK_COUNT);
-        this.masks = new Int32Array(CHUNK_COUNT).fill(-1); // exposed-face bitmask used for the current geometry
-        this.versions = new Array(CHUNK_COUNT);
-        this.meshes = new Array(CHUNK_COUNT);  // decoded {positions, indices, materials} for modified chunks
+        this.rockMask = new Int32Array(CHUNK_COUNT); // faces of untouched rock to draw
+        this.cullMask = new Int32Array(CHUNK_COUNT); // boundary faces of a held modified chunk to skip
+        this.versions = new Array(CHUNK_COUNT);      // version of each held modified chunk
+        this.meshes = new Array(CHUNK_COUNT);        // decoded {positions, indices, materials} per held chunk
         this.bboxes = [];
         this.pending = new Map(); // index -> version being fetched
         this.wastedVerts = 0;
@@ -45,18 +44,7 @@ export class TerrainMirror {
         for(let i = 0; i < CHUNK_COUNT; i++) {
             let c = chunkCenter(i);
             this.bboxes.push(new THREE.Box3(c.clone().sub(half), c.clone().add(half)));
-            this.versions[i] = isDefaultSolid(i) ? SOLID_VERSION : AIR_VERSION;
         }
-        for(let i = 0; i < CHUNK_COUNT; i++) this.rebuild(i);
-    }
-
-    /** Restore a chunk to its implicit state. */
-    setDefault(index) {
-        this.pending.delete(index);
-        this.meshes[index] = null;
-        this.versions[index] = isDefaultSolid(index) ? SOLID_VERSION : AIR_VERSION;
-        this.rebuild(index);
-        this.refreshNeighbours(index);
     }
 
     /** Apply decoded chunk bytes (or null for an explicitly empty chunk). */
@@ -64,32 +52,58 @@ export class TerrainMirror {
         this.pending.delete(index);
         this.meshes[index] = bytes ? decodeChunkMesh(bytes) : null;
         this.versions[index] = bytes ? version : EMPTY_VERSION;
+        this.rockMask[index] = 0;
         this.rebuild(index);
-        this.refreshNeighbours(index);
     }
 
-    /** Is chunk i untouched solid rock? (The only kind of neighbour that hides faces.) */
-    isRock(i) { return this.versions[i] === SOLID_VERSION; }
+    /** Drop a modified chunk we no longer need to hold. */
+    unload(index) {
+        this.pending.delete(index);
+        this.meshes[index] = null;
+        this.versions[index] = undefined;
+        this.rebuild(index);
+    }
 
-    /** Rebuild a chunk's geometry from its state and its neighbours' exposure. */
+    /** Rebuild a chunk's geometry from what we hold and the server's masks. */
     rebuild(index) {
-        let mask = exposedFaces(index, i => this.isRock(i));
-        this.masks[index] = mask;
         let geometry = null;
-        if(this.isRock(index)) {
-            if(mask) geometry = this.rockFaces(index, mask);
-        } else if(this.meshes[index]) {
-            geometry = this.culledGeometry(index, this.meshes[index], mask);
-        }
+        if(this.rockMask[index]) geometry = this.rockFaces(index, this.rockMask[index]);
+        else if(this.meshes[index]) geometry = this.culledGeometry(index, this.meshes[index], this.cullMask[index]);
         this.setGeometry(index, geometry);
     }
 
-    /** Neighbours whose exposure changed because `index` did are rebuilt. */
-    refreshNeighbours(index) {
-        for(let f = 0; f < 6; f++) {
-            let n = neighbour(index, f);
-            if(n < 0) continue;
-            if(exposedFaces(n, i => this.isRock(i)) !== this.masks[n]) this.rebuild(n);
+    /** Reconcile with an update's {chunks, rock, cull} maps; fetch what we lack. */
+    applyUpdate(data, full = false) {
+        let chunks = data.chunks || {}, rock = data.rock || {}, cull = data.cull || {};
+        if(full) {
+            for(let i = 0; i < CHUNK_COUNT; i++) {
+                if(chunks[i] === undefined && (this.versions[i] !== undefined || this.pending.has(i))) this.unload(i);
+                if(rock[i] === undefined && this.rockMask[i]) { this.rockMask[i] = 0; this.rebuild(i); }
+            }
+        }
+        for(let key in cull) {
+            let index = +key;
+            if(this.cullMask[index] === cull[key]) continue;
+            this.cullMask[index] = cull[key];
+            if(this.meshes[index]) this.rebuild(index);
+        }
+        for(let key in rock) {
+            let index = +key;
+            if(this.rockMask[index] === rock[key]) continue;
+            this.rockMask[index] = rock[key];
+            this.rebuild(index);
+        }
+        for(let key in chunks) {
+            let index = +key, version = chunks[key];
+            if(version === null) { if(this.versions[index] !== undefined || this.pending.has(index)) this.unload(index); continue; }
+            if(this.versions[index] === version || this.pending.get(index) === version) continue;
+            if(version === EMPTY_VERSION) { this.setChunk(index, null, version); continue; }
+            this.pending.set(index, version);
+            Promise.resolve(this.fetchChunk?.(index, version)).then(bytes => {
+                if(this.pending.get(index) !== version) return; // superseded or unloaded
+                if(bytes) this.setChunk(index, bytes, version);
+                else this.pending.delete(index);
+            }).catch(e => { this.pending.delete(index); console.warn(`chunk ${index} fetch failed: ${e.message}`); });
         }
     }
 
@@ -116,10 +130,9 @@ export class TerrainMirror {
         return this.buildGeometry(new Float32Array(positions), new Uint32Array(indices), null);
     }
 
-    /** A modified chunk's mesh minus the triangles lying flat on a face shared with rock. */
-    culledGeometry(index, mesh, mask) {
+    /** A modified chunk's mesh minus the triangles lying flat on a boundary face in `hidden`. */
+    culledGeometry(index, mesh, hidden) {
         let { positions, indices, materials } = mesh;
-        let hidden = ~mask & 63;
         if(!hidden) return this.buildGeometry(positions, indices, materials);
         let c = gridCenter(index);
         let center = [c.x, c.y, c.z];
@@ -171,33 +184,13 @@ export class TerrainMirror {
 
     /** Resource summary for diagnostics. */
     stats() {
-        let chunks = 0, tris = 0, rock = 0, buried = 0;
+        let chunks = 0, tris = 0, rock = 0, held = 0;
         for(let i = 0; i < CHUNK_COUNT; i++) {
-            if(this.isRock(i)) { rock++; if(!this.masks[i]) buried++; }
+            if(this.rockMask[i]) rock++;
+            if(this.meshes[i]) held++;
             if(this.geoIds[i] >= 0) { chunks++; tris += this.batch._geometryInfo[this.geoIds[i]].indexCount / 3; }
         }
-        return { chunks, tris, rock, buried, vertexCapacity: this.batch._maxVertexCount, vertexUsed: this.batch._nextVertexStart };
-    }
-
-    /** Reconcile with a {index: version} map from the server; fetch what we lack. */
-    applyVersions(map, full = false) {
-        for(let key in map) {
-            let index = +key, version = map[key];
-            if(this.versions[index] === version || this.pending.get(index) === version) continue;
-            if(version === EMPTY_VERSION) { this.setChunk(index, null, version); continue; }
-            this.pending.set(index, version);
-            Promise.resolve(this.fetchChunk?.(index, version)).then(bytes => {
-                if(this.pending.get(index) !== version) return; // superseded
-                if(bytes) this.setChunk(index, bytes, version);
-                else this.pending.delete(index);
-            }).catch(e => { this.pending.delete(index); console.warn(`chunk ${index} fetch failed: ${e.message}`); });
-        }
-        if(full) {
-            // Chunks absent from a full update are back to their implicit state
-            for(let i = 0; i < CHUNK_COUNT; i++) {
-                if(map[i] === undefined && this.versions[i] !== SOLID_VERSION && this.versions[i] !== AIR_VERSION) this.setDefault(i);
-            }
-        }
+        return { chunks, tris, rock, held, pending: this.pending.size, vertexCapacity: this.batch._maxVertexCount, vertexUsed: this.batch._nextVertexStart };
     }
 
     /** Indices of chunks whose bounds intersect `box`. */

@@ -9,6 +9,7 @@ import { World } from './ecs/World.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
 import { Terrain, CHUNK_COUNT, chunkCenter } from './server/Terrain.js';
+import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { packChunkFrame } from './net/codec.js';
 
@@ -31,6 +32,13 @@ class PartyServer {
     this.world = new World();
     this.physics = new Physics();
     this.terrain = new Terrain();
+    this.connectivity = new Connectivity(this.terrain);
+    this.chunkStates = new Array(CHUNK_COUNT);   // what clients should hold, see Connectivity.states()
+    this.sentStates = new Array(CHUNK_COUNT);    // last state broadcast per chunk
+    this.chunkDelta = null;                      // pending {chunks, rock, cull} for the next partial update
+    this.occupiedKey = '';                       // chunks containing players/bodies, for cheap change detection
+    this.activeRoots = new Set();
+    this.colliderState = new Array(CHUNK_COUNT); // 'box' | 'mesh:<version>' | undefined
     this.ready = false;
     this.readyPromise = new Promise(res => { this.resolveReady = res; });
     this.globalPlayerCount = 0;
@@ -60,7 +68,6 @@ class PartyServer {
 
     await this.terrain.init(storedChunks);
     await this.physics.init();
-    this.rebuildAllChunkColliders();
 
     let maxId = 0;
     for(let id in storedEntities) {
@@ -72,9 +79,13 @@ class PartyServer {
     this.persistQueue.clear(); this.persistRemoved.clear();
     // Chunks loaded from the legacy soup format are re-encoded and flagged for re-persist
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(parseInt(k));
+    // Ground check with the current algorithm: anything unsupported falls now
+    let shed = this.settleTerrain();
+    for(let k in this.terrain.takeDirty()) this.markChunkPersist(parseInt(k));
+    this.refreshActivity(true);
     this.ready = true;
     this.resolveReady();
-    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
+    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
   }
 
   async loadPrefixed(prefix) {
@@ -84,18 +95,116 @@ class PartyServer {
     return out;
   }
 
-  /** Colliders for every stored chunk plus every unmodified solid chunk that is at least
-   *  partly exposed. Fully buried rock gets nothing: no body can reach it. */
-  rebuildAllChunkColliders() {
-    for(let index in this.physics.chunkActors) this.physics._removeChunkActor(index);
-    for(let index of this.terrain.exposedDefaults()) this.ensureDefaultCollider(index);
-    for(let index in this.terrain.chunks) this.physics.setChunkCollider(parseInt(index), this.terrain.chunkMesh(parseInt(index)));
+  // ---- terrain connectivity ------------------------------------------------
+
+  /** Solve connectivity and turn every unsupported solid into fragment entities. Returns the number made. */
+  settleTerrain() {
+    let made = 0;
+    for(let pass = 0; pass < 4; pass++) {
+      this.connectivity.solve();
+      let floating = this.connectivity.floatingComponents();
+      if(!floating.length) break;
+      let touched = new Map(); // index -> Set of island k removed
+      for(let comp of floating) {
+        if(comp.volume > MAX_FRAGMENT_VOLUME) { console.log(`Keeping unsupported terrain of volume ${comp.volume.toFixed(0)} (too large to drop)`); continue; }
+        for(let { index, k } of comp.islands) { if(!touched.has(index)) touched.set(index, new Set()); touched.get(index).add(k); }
+        if(comp.volume < DUST_VOLUME) continue;
+        let M = this.terrain.manifold.Manifold;
+        let pieces = comp.islands.map(({ index, island }) => island.manifold || this.terrain.rockManifold(index));
+        let merged = pieces.length === 1 ? M.compose([pieces[0]]) : M.union(pieces);
+        for(let i = 0; i < pieces.length; i++) if(!comp.islands[i].island.manifold) pieces[i].delete(); // materialized rock copies
+        let comps = this.terrain.fragmentComponents(merged);
+        merged.delete();
+        if(comps) { this.world.create(comps); made++; }
+      }
+      // Rebuild each touched chunk from the islands that stay
+      for(let [index, removed] of touched) {
+        let S = this.connectivity.summary(index);
+        let keep = S.solid.filter((_, k) => !removed.has(k)).map(s => s.manifold);
+        this.terrain.setManifold(index, keep.length ? this.terrain.manifold.Manifold.compose(keep) : null);
+      }
+      // Removing solid can merge hollows, so solve again; normally nothing is left floating.
+    }
+    return made;
   }
 
-  ensureDefaultCollider(index) {
-    if(this.physics.chunkActors[index]) return;
-    let c = chunkCenter(index);
-    this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z);
+  /** Chunks containing a player or a body, as a sorted key for change detection. */
+  occupiedChunks() {
+    let set = new Set();
+    for(let [id, tf] of this.world.each('Transform')) {
+      if(this.world.has(id, 'Player') || this.world.has(id, 'RigidBody')) set.add(Connectivity.chunkAt(tf.position));
+    }
+    return set;
+  }
+
+  /** Recompute which hollows are active and what every chunk should materialize; queue the diff for clients. */
+  refreshActivity(force = false) {
+    let occupied = this.occupiedChunks();
+    let key = [...occupied].sort((a, b) => a - b).join(',');
+    if(!force && key === this.occupiedKey) return;
+    this.occupiedKey = key;
+    let roots = this.connectivity.activeRoots(occupied);
+    if(!force && roots.size === this.activeRoots.size && [...roots].every(r => this.activeRoots.has(r))) return;
+    this.activeRoots = roots;
+    this.chunkStates = this.connectivity.states(roots);
+    this.syncColliders();
+    this.queueChunkDelta();
+  }
+
+  syncColliders() {
+    for(let index = 0; index < CHUNK_COUNT; index++) {
+      let st = this.chunkStates[index];
+      let want = !st ? undefined : st.mask !== undefined ? 'box' : 'mesh:' + this.terrain.chunks[index].version;
+      if(want === this.colliderState[index]) continue;
+      this.colliderState[index] = want;
+      if(!want) this.physics._removeChunkActor(index);
+      else if(want === 'box') { let c = chunkCenter(index); this.physics.setDefaultChunkCollider(index, c.x, c.y, c.z); }
+      else this.physics.setChunkCollider(index, this.terrain.chunkMesh(index));
+    }
+  }
+
+  /** What a client should hold for a chunk: [version|null for modified, rock mask, cull mask]. */
+  wireState(index) {
+    let st = this.chunkStates[index];
+    if(!st) return null;
+    if(st.mask !== undefined) return { rock: st.mask };
+    return { version: this.terrain.chunks[index].version, cull: st.cull };
+  }
+
+  /** Diff wire states against what was last sent and merge into the pending delta. */
+  queueChunkDelta() {
+    let delta = this.chunkDelta || { chunks: {}, rock: {}, cull: {} };
+    let any = false;
+    for(let index = 0; index < CHUNK_COUNT; index++) {
+      let now = this.wireState(index), was = this.sentStates[index] || null;
+      if(JSON.stringify(now) === JSON.stringify(was)) continue;
+      any = true;
+      this.sentStates[index] = now;
+      if(now && now.version !== undefined) {
+        if(!was || was.version !== now.version) delta.chunks[index] = now.version;
+        if(!was || was.cull !== now.cull) delta.cull[index] = now.cull;
+        if(was && was.rock !== undefined) delta.rock[index] = 0;
+      } else if(now) {
+        delta.rock[index] = now.rock;
+        if(was && was.version !== undefined) delta.chunks[index] = null;
+      } else {
+        if(was.version !== undefined) delta.chunks[index] = null;
+        else delta.rock[index] = 0;
+      }
+    }
+    if(any) this.chunkDelta = delta;
+  }
+
+  /** Full wire maps for a full update. */
+  chunkMaps() {
+    let chunks = {}, rock = {}, cull = {};
+    for(let index = 0; index < CHUNK_COUNT; index++) {
+      let st = this.sentStates[index];
+      if(!st) continue;
+      if(st.version !== undefined) { chunks[index] = st.version; cull[index] = st.cull; }
+      else rock[index] = st.rock;
+    }
+    return { chunks, rock, cull };
   }
 
   /** @param {Connection} conn @param {ConnectionContext} ctx */
@@ -128,21 +237,24 @@ class PartyServer {
     let players = this.world.query('Player').size;
 
     // Nothing to simulate: no players and everything asleep
-    if(players === 0 && !this.anyAwake && !this.world.hasDirty() && this.terrain.dirty.size === 0) {
+    if(players === 0 && !this.anyAwake && !this.world.hasDirty() && !this.chunkDelta) {
       this.physics.lastTime = start;
       return;
     }
 
     this.anyAwake = this.physics.update(this.world, TICK_MS / 1000);
     this.tickCount++;
+    this.refreshActivity();
 
     if(players > 0) {
       if(this.tickCount % FULL_UPDATE_EVERY === 0) {
         this.room.broadcast(JSON.stringify(this.fullUpdate()));
-        this.world.takeDirty(); this.terrain.takeDirty();
-      } else if(this.world.hasDirty() || this.terrain.dirty.size > 0) {
+        this.world.takeDirty(); this.chunkDelta = null;
+      } else if(this.world.hasDirty() || this.chunkDelta) {
         let { entities, removed } = this.world.takeDirty();
-        this.room.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: this.terrain.takeDirty(), serverTickMs: this.serverTickMs }));
+        let d = this.chunkDelta || {};
+        this.chunkDelta = null;
+        this.room.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: d.chunks, rock: d.rock, cull: d.cull, serverTickMs: this.serverTickMs }));
       }
     }
 
@@ -151,7 +263,7 @@ class PartyServer {
   }
 
   fullUpdate() {
-    return { type: "fullupdate", entities: this.world.serialize(), removed: [], chunks: this.terrain.versions(), serverTickMs: this.serverTickMs };
+    return { type: "fullupdate", entities: this.world.serialize(), removed: [], ...this.chunkMaps(), serverTickMs: this.serverTickMs };
   }
 
   // ---- persistence (per-entity / per-chunk keys) --------------------------
@@ -191,21 +303,21 @@ class PartyServer {
   }
 
   applyCsg(data) {
-    let fragments = this.terrain.applyCsg(data);
+    this.terrain.applyCsg(data);
+    if(this.terrain.dirty.size === 0) return;
+    let t0 = Date.now();
+    let fragments = this.settleTerrain();
+    this.refreshActivity(true);
+    let settleMs = Date.now() - t0;
     let changed = this.terrain.takeDirty();
     for(let key in changed) {
       let index = parseInt(key);
-      this.physics.setChunkCollider(index, this.terrain.chunkMesh(index));
-      // Rock next to a modified chunk may now be reachable through it
-      for(let n of this.terrain.defaultNeighbours(index)) this.ensureDefaultCollider(n);
       this.markChunkPersist(index);
-      // Push the new bytes to everyone now; later joiners fetch by version over HTTP.
-      let c = this.terrain.chunks[index];
-      this.room.broadcast(packChunkFrame(index, c.version, c.bytes));
+      // Push the new bytes to everyone who should hold this chunk now; later joiners fetch by version over HTTP.
+      let st = this.sentStates[index], c = this.terrain.chunks[index];
+      if(st && st.version !== undefined && c.bytes) this.room.broadcast(packChunkFrame(index, c.version, c.bytes));
     }
-    for(let comps of fragments) this.world.create(comps);
-    let n = Object.keys(changed).length;
-    if(n) console.log(`csg: ${n} chunk(s) changed, ${fragments.length} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
+    console.log(`csg: ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders, settle ${settleMs}ms`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<index>?v=<version> -> chunk bytes (204 if empty). */
@@ -253,7 +365,10 @@ class PartyServer {
     let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set();
-    this.rebuildAllChunkColliders();
+    this.connectivity.clear();
+    this.connectivity.solve();
+    this.refreshActivity(true);
+    this.chunkDelta = null;
     this.room.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
   }

@@ -175,6 +175,16 @@ export class PlayerController extends THREE.Group {
             this.jumpRequested = false;
         }
 
+        // Hold still while terrain around us is still arriving (e.g. after a teleport
+        // into a hollow the server only just activated); simulating against a missing
+        // floor would drop us through it.
+        if (this.terrain && this.terrain.pending.size > 0) {
+            let near = new THREE.Box3().setFromCenterAndSize(this.position, new THREE.Vector3(4, 8, 4));
+            for (let index of this.terrain.pending.keys()) {
+                if (near.intersectsBox(this.terrain.bboxes[index])) { this.playerVelocity.set(0, 0, 0); this.camera.position.copy(this.position); return; }
+            }
+        }
+
         // Gravity
         if (this.playerIsOnGround) {
             this.playerVelocity.y = delta * this.simulationParams.gravity;

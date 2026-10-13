@@ -88,32 +88,51 @@ replicate differently:
 - Storage key `chunk:<index>` holds `{index, version, bytes}`. Rooms saved
   in the old base64 soup format are migrated on load.
 
-### Only what can be seen is materialized
+### Connectivity: grounding and hollows
 
-`src/terrain/grid.js` is shared by both sides and answers, for any chunk,
-which of its six faces border something other than unmodified solid rock
-(`exposedFaces`). Beyond the grid, the underside counts as solid (players
-and bodies are reset at y=-100, so nothing can get there) and the sides and
-top count as air.
+`src/server/Connectivity.js` answers two questions after every edit, with one
+primitive. Each stored chunk is summarized into solid islands (Manifold
+`decompose`) and air islands (the chunk cube minus the solid, decomposed).
+Every island's contact with the six chunk faces is rasterized onto a 16x16
+grid (0.625 m cells) from the triangles lying flat on that face. Islands in
+neighbouring chunks are joined with a union-find when their footprints on
+the shared face overlap a cell. Untouched rock is one solid island with full
+faces; implicit air and explicitly empty chunks are one air island with full
+faces. The underside of the grid is `GROUND`; the sides and top are `SKY`.
 
-- Unmodified rock chunks with no exposed face are fully buried. The client
-  gives them no geometry and the server gives them no collider. In a fresh
-  world 256 of the 500 solid chunks are buried.
-- Exposed rock contributes only its exposed faces, two triangles each,
-  instead of a full box: the untouched world renders 600 triangles rather
-  than 6000 and keeps 244 small BVHs rather than 500.
-- Modified chunks keep their decoded mesh client-side and drop the boundary
-  triangles that lie flat against rock, so a carved chunk's underside and
-  the sides facing untouched neighbours are never drawn. The stored manifold
-  is untouched by this; culling is a render-time view.
-- When a chunk changes state, its six neighbours are re-evaluated and
-  rebuilt only if their exposure mask changed. Carving into rock exposes the
-  rock behind it on both sides: the client grows faces, the server adds box
-  colliders (`ensureDefaultCollider`). Exposure only ever grows until a
-  `reset`.
+- **Grounding.** Any solid component not connected to `GROUND` is floating.
+  Its islands are merged across chunks (`Manifold.union`) into one fragment
+  entity and removed from their chunks; a rock chunk that is fully undercut
+  becomes a fragment too. Components below `DUST_VOLUME` just vanish, and
+  components above `MAX_FRAGMENT_VOLUME` (1.5 chunks) are kept as terrain
+  with a log line, since dropping a mountain is never what anyone wanted.
+  Removing solid can merge hollows, so the solve repeats until nothing
+  floats. The old per-chunk rule ("largest island stays, smaller islands
+  stay if any face neighbour has terrain") is gone.
+- **Hollows.** An air component is active when a player or a body stands in
+  a chunk it touches (all air islands of that chunk, conservatively; falling
+  out of the grid counts as sky). `Connectivity.states()` then says what each
+  chunk should materialize: rock contributes the faces that touch active air
+  (`{mask}`), a modified chunk is held when it touches active air and culls
+  the boundary faces that do not (`{active, cull}`), everything else is
+  nothing. A sealed cave nobody is in costs nothing on either side; a player
+  sealed inside a cave unloads the surface for that server's clients.
 
-`TerrainMirror.stats()` reports loaded chunks, drawn triangles, rock and
-buried counts for diagnostics.
+Rasterized contact is conservative both ways: solid sharing a cell with
+solid counts as attached, air sharing a cell with air counts as connected.
+Both errors are safe (terrain stays put, a little extra gets loaded).
+
+The server tracks which chunks contain players or bodies each tick and
+re-derives states only when that set changes or after an edit. The states
+are diffed against what was last sent and the delta rides on the next
+`partialupdate` as `chunks` `{index: version|null}`, `rock` `{index: mask}`
+and `cull` `{index: mask}`; full updates carry the whole maps. Chunk
+colliders follow the same states (box for rock faces, triangle mesh for held
+chunks). The client `TerrainMirror` holds only what it is told to and
+rebuilds a chunk when its mesh or mask changes. The player controller holds
+still while a chunk near it is still being fetched, so a teleport into a
+freshly activated hollow does not fall through a floor that has not arrived.
+`TerrainMirror.stats()` reports what is loaded.
 
 ## Terrain materials
 
