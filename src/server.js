@@ -345,12 +345,16 @@ class PartyServer {
   }
 
   applyCsg(data) {
+    let tStart = Date.now();
     this.terrain.applyCsg(data);
+    let booleanMs = Date.now() - tStart;
     if(this.terrain.dirty.size === 0) return;
     let t0 = Date.now();
     let fragments = this.settleTerrain();
-    this.refreshActivity(true);
     let settleMs = Date.now() - t0;
+    t0 = Date.now();
+    this.refreshActivity(true);
+    let activityMs = Date.now() - t0; // includes PhysX cooking of changed chunk colliders
     let changed = this.terrain.takeDirty();
     for(let key in changed) {
       this.markChunkPersist(key);
@@ -358,7 +362,7 @@ class PartyServer {
       let st = this.sentStates.get(key), c = this.terrain.chunks[key];
       if(st && st.version !== undefined && c.bytes) this.room.broadcast(packChunkFrame(key, c.version, c.bytes));
     }
-    console.log(`csg: ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders, settle ${settleMs}ms`);
+    console.log(`csg: ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; boolean+encode ${booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms, total ${Date.now() - tStart}ms`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty). */

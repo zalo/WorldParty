@@ -227,7 +227,12 @@ export default class Main {
     updateFromServer(event) {
         if(event.data instanceof ArrayBuffer) {
             let frame = unpackChunkFrame(event.data);
-            if(frame) this.terrain.setChunk(frame.key, frame.bytes, frame.version);
+            if(frame) {
+                let t0 = performance.now();
+                this.terrain.setChunk(frame.key, frame.bytes, frame.version);
+                let ms = performance.now() - t0;
+                if(ms > 30) console.log(`chunk ${frame.key}: ${frame.bytes ? (frame.bytes.length / 1024).toFixed(0) : 0} KB decoded and rebuilt in ${ms.toFixed(0)} ms`);
+            }
             return;
         }
         if(typeof event.data !== 'string' || !event.data.startsWith("{")) return;

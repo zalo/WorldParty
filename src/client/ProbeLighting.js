@@ -65,9 +65,15 @@ export class ProbeLighting {
         for(let iy = i0[1]; iy <= i1[1]; iy++) for(let iz = i0[2]; iz <= i1[2]; iz++) for(let ix = i0[0]; ix <= i1[0]; ix++) this.dirty.add(this.index(ix, iy, iz));
     }
 
-    /** Bake up to `perFrame` dirty probes, grouped into contiguous ranges. */
+    /** Bake a few dirty probes per frame, grouped into contiguous ranges. The batch size adapts to
+     *  keep the bake around `budgetMs` per frame, so a heavy scene does not stall interaction. */
     update() {
         if(!this.grid || this.dirty.size === 0 || this.renderer.initialized === false) return;
+        this.budgetMs ??= 4;
+        if(this.lastBakeMs !== undefined) {
+            if(this.lastBakeMs > this.budgetMs * 1.5) this.perFrame = Math.max(1, Math.floor(this.perFrame / 2));
+            else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(32, this.perFrame + 1);
+        }
         let take = [...this.dirty].sort((a, b) => a - b).slice(0, this.perFrame);
         for(let i of take) this.dirty.delete(i);
         let runs = [];
@@ -76,8 +82,12 @@ export class ProbeLighting {
             if(last && last.start + last.count === i) last.count++; else runs.push({ start: i, count: 1 });
         }
         try {
+            let t0 = performance.now();
             for(let r of runs) this.grid.bake(this.renderer, this.scene, { start: r.start, count: r.count, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
             this.bakedOnce = true;
+            this.lastBakeMs = performance.now() - t0;
+            this.bakedTotal = (this.bakedTotal || 0) + take.length;
+            if(this.lastBakeMs > 50) console.log(`probe bake: ${take.length} probes in ${this.lastBakeMs.toFixed(0)} ms (${this.dirty.size} left, now ${this.perFrame}/frame)`);
         } catch(e) {
             console.warn('probe bake failed: ' + e.message);
             this.dirty.clear();
