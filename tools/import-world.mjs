@@ -12,8 +12,14 @@
  * chunk faces coincide and the server's connectivity solver works unchanged.
  *
  * Modes:
- *   shell   (default) solid = within `shell` metres of any surface. Robust for
- *           anything; walls and floors get real thickness.
+ *   exact   (default) per part (GLB primitive), slicer-style repair then exact
+ *           booleans: weld vertices, drop degenerate/duplicate triangles, orient
+ *           consistently and outward, fill small holes, thicken what is still
+ *           open into a shell, reject self-intersecting results; parts that
+ *           cannot be closed fall back to a level set of their own. Closed parts
+ *           keep every triangle, UV and material; Manifold.union resolves the
+ *           parts against each other.
+ *   shell   whole soup as a level set: solid = within `shell` metres of any surface.
  *   winding solid = generalized winding number >= 0.5 (Jacobson 2013, with the
  *           far-field dipole approximation of Barill 2018). Fills closed-ish
  *           volumes even with holes, flipped faces and self-intersections;
@@ -34,6 +40,7 @@ import { M } from '../assets/manifold-3d/manifold.js';
 import { encodeChunkMesh, hashBytes } from '../src/net/codec.js';
 import { MATERIALS, DEFAULT_MATERIAL, MAX_MATERIALS } from '../src/terrain/materials.js';
 import { CHUNK_SIZE, key as chunkKey } from '../src/terrain/grid.js';
+import { weld, dedupe, orient, boundaryLoops, fillLoop, toMeshInput, thicken, selfIntersections } from './lib/repair.mjs';
 
 // ---- args ------------------------------------------------------------------
 const argv = process.argv.slice(2);
@@ -47,7 +54,10 @@ const scaleOpt = +opt('scale', 1);
 const offset = (opt('offset', '0,0,0')).split(',').map(Number);
 const edge = +opt('edge', 0.3);
 const shell = +opt('shell', 0.2);
-const mode = opt('mode', 'shell');
+const mode = opt('mode', 'exact');
+const fallback = opt('fallback', 'shell');   // level-set mode for parts the exact path cannot close
+const holeMax = +opt('hole', 1.0);           // fill boundary loops shorter than this (m); longer ones get thickened
+const weldTol = +opt('weld', 0.0005);        // vertex weld tolerance (m, after scaling)
 const floor = !flag('no-floor');            // implicit rock under the model
 const center = !flag('no-center');          // put the model's footprint centre at the origin with its base at y=0
 const out = opt('out', `assets/worlds/${name}.json`);
@@ -80,6 +90,7 @@ function readGLB(path) {
         return { array: outArr, n };
     }
     let positions = [], uvs = [], materials = [];
+    let parts = []; // one per primitive: { positions, uvs, material, name }
     // Every source material becomes a world material entry after the palette: exact base colour,
     // and its base colour texture written out as a file next to the manifest.
     const imageExt = (img) => ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' })[img.mimeType] || 'bin';
@@ -120,22 +131,25 @@ function readGLB(path) {
                 let idx = prim.indices !== undefined ? accessor(prim.indices).array : Uint32Array.from({ length: pos.length / 3 }, (_, i) => i);
                 let mat = prim.material !== undefined ? palette[prim.material] : DEFAULT_MATERIAL;
                 let v = new THREE.Vector3();
+                let partPos = [], partUv = [];
                 for(let i = 0; i < idx.length; i += 3) {
                     for(let k = 0; k < 3; k++) {
                         let p = idx[i + k] * 3, q = idx[i + k] * 2;
                         v.set(pos[p], pos[p + 1], pos[p + 2]).applyMatrix4(world);
-                        positions.push(v.x, v.y, v.z);
-                        uvs.push(tex ? tex[q] : 0, tex ? tex[q + 1] : 0);
+                        positions.push(v.x, v.y, v.z); partPos.push(v.x, v.y, v.z);
+                        let tu = tex ? tex[q] : 0, tv = tex ? tex[q + 1] : 0;
+                        uvs.push(tu, tv); partUv.push(tu, tv);
                     }
                     materials.push(mat);
                 }
+                parts.push({ positions: new Float32Array(partPos), uvs: new Float32Array(partUv), material: mat, name: node.name || `mesh ${node.mesh}` });
             }
         }
         for(let c of node.children || []) walk(c, world);
     }
     let scene = json.scenes[json.scene || 0];
     for(let n of scene.nodes) walk(n, new THREE.Matrix4());
-    return { positions: new Float32Array(positions), uvs: new Float32Array(uvs), materials: new Uint8Array(materials), entries, textureFiles };
+    return { positions: new Float32Array(positions), uvs: new Float32Array(uvs), materials: new Uint8Array(materials), entries, textureFiles, parts };
 }
 
 const linearToSrgb = c => Math.min(1, Math.max(0, c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055));
@@ -217,17 +231,21 @@ class WindingNumber {
 
 // ---- main ------------------------------------------------------------------
 let t0 = Date.now();
-let { positions, uvs: sourceUvs, materials, entries, textureFiles } = readGLB(file);
+let { positions, uvs: sourceUvs, materials, entries, textureFiles, parts } = readGLB(file);
 let geom = new THREE.BufferGeometry();
 geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 geom.computeBoundingBox();
 let size = geom.boundingBox.getSize(new THREE.Vector3());
 let scale = scaleOpt * (targetSize > 0 ? targetSize / Math.max(size.x, size.y, size.z) : 1);
 geom.scale(scale, scale, scale);
-if(center) { geom.computeBoundingBox(); let c = geom.boundingBox.getCenter(new THREE.Vector3()); geom.translate(-c.x, -geom.boundingBox.min.y, -c.z); }
-geom.translate(offset[0], offset[1], offset[2]);
+geom.computeBoundingBox();
+let shift = [offset[0], offset[1], offset[2]];
+if(center) { let c = geom.boundingBox.getCenter(new THREE.Vector3()); shift[0] -= c.x; shift[1] -= geom.boundingBox.min.y; shift[2] -= c.z; }
+geom.translate(shift[0], shift[1], shift[2]);
 geom.computeBoundingBox();
 let bb = geom.boundingBox;
+// the same transform on every part (geom.scale/translate only touched the merged soup, in place)
+for(let part of parts) for(let i = 0; i < part.positions.length; i += 3) { part.positions[i] = part.positions[i] * scale + shift[0]; part.positions[i + 1] = part.positions[i + 1] * scale + shift[1]; part.positions[i + 2] = part.positions[i + 2] * scale + shift[2]; }
 console.log(`model: ${positions.length / 9} triangles, scale ${scale.toFixed(4)}, bounds ${bb.min.toArray().map(v => v.toFixed(1))} .. ${bb.max.toArray().map(v => v.toFixed(1))}`);
 
 let bvh = new MeshBVH(geom);
@@ -280,14 +298,159 @@ const manifold = await M({ instantiateWasm: (imports, cb) => { WebAssembly.insta
 manifold.setup();
 const { Manifold } = manifold;
 
+const NUM_PROP = 5;
+const materialBase = Manifold.reserveIDs(MAX_MATERIALS);
+/** Manifold with 5 properties per vertex (xyz uv, uv zero unless the mesh had them) and one material run. Takes ownership. */
+function withProps(src, material, uvOf = null) {
+    let m = src.getMesh();
+    let np = m.numProp, nv = m.vertProperties.length / np;
+    let props = new Float32Array(nv * NUM_PROP);
+    for(let i = 0; i < nv; i++) {
+        props[i * NUM_PROP] = m.vertProperties[i * np]; props[i * NUM_PROP + 1] = m.vertProperties[i * np + 1]; props[i * NUM_PROP + 2] = m.vertProperties[i * np + 2];
+        if(np >= 5) { props[i * NUM_PROP + 3] = m.vertProperties[i * np + 3]; props[i * NUM_PROP + 4] = m.vertProperties[i * np + 4]; }
+        else if(uvOf) { let [u, w] = uvOf(props[i * NUM_PROP], props[i * NUM_PROP + 1], props[i * NUM_PROP + 2]); props[i * NUM_PROP + 3] = u; props[i * NUM_PROP + 4] = w; }
+    }
+    let mesh = new manifold.Mesh({ numProp: NUM_PROP, vertProperties: props, triVerts: new Uint32Array(m.triVerts), runIndex: new Uint32Array([0, m.triVerts.length]), runOriginalID: new Uint32Array([materialBase + material]) });
+    mesh.merge();
+    src.delete();
+    return new Manifold(mesh);
+}
+
 let pad = edge + shell;
 let box = { min: [bb.min.x - pad, floor ? lowestLayer * CHUNK_SIZE - pad : bb.min.y - pad, bb.min.z - pad], max: [bb.max.x + pad, bb.max.y + pad, bb.max.z + pad] };
 let t1 = Date.now();
-let whole = Manifold.levelSet(sdf, box, edge);
-console.log(`level set (${mode}): ${whole.numTri()} triangles, ${whole.decompose().length} components, ${calls} sdf calls, ${Date.now() - t1} ms`);
-let simp = whole.simplify(edge * 0.2);
-whole.delete();
-console.log(`simplified: ${simp.numTri()} triangles, volume ${simp.volume().toFixed(1)} m³`);
+let simp;
+if(mode !== 'exact') {
+    let whole = Manifold.levelSet(sdf, box, edge);
+    console.log(`level set (${mode}): ${whole.numTri()} triangles, ${whole.decompose().length} components, ${calls} sdf calls, ${Date.now() - t1} ms`);
+    simp = whole.simplify(edge * 0.2);
+    whole.delete();
+    console.log(`simplified: ${simp.numTri()} triangles, volume ${simp.volume().toFixed(1)} m³`);
+} else {
+    simp = importExact();
+}
+
+/** Per-part repair and exact union. */
+function importExact() {
+    let solids = [], stats = { closed: 0, filled: 0, thickened: 0, levelset: 0, dropped: 0, selfIntersecting: 0 };
+    let shellT = Math.max(shell, 0.05);
+    for(let part of parts) {
+        let numTris = part.positions.length / 9;
+        if(numTris < 1) continue;
+        let result = repairPart(part, shellT, stats);
+        if(result) solids.push(result);
+        else stats.dropped++;
+    }
+    console.log(`parts: ${parts.length} -> closed ${stats.closed}, holes filled ${stats.filled}, thickened ${stats.thickened}, level set ${stats.levelset}, dropped ${stats.dropped} (self-intersecting ${stats.selfIntersecting}), ${Date.now() - t1} ms`);
+    console.log(`solids: ${solids.length}, summed volume ${(stats.sumVolume || 0).toFixed(1)} m³, negative-volume solids ${stats.negative || 0}, flipped: closed ${stats.negative_closed || 0}, filled ${stats.negative_filled || 0}, thickened ${stats.negative_thickened || 0}`);
+    if(floor) {
+        // exact ground slab under the model's footprint: from the bottom of the lowest layer up to the base
+        let y0 = lowestLayer * CHUNK_SIZE - 1, h = floorY - y0;
+        let slab = Manifold.cube([bb.max.x - bb.min.x + 2 * pad, h, bb.max.z - bb.min.z + 2 * pad]).translate(bb.min.x - pad, y0, bb.min.z - pad);
+        solids.push(withProps(slab, DEFAULT_MATERIAL));
+    }
+    let t2 = Date.now();
+    let u = solids.length === 1 ? solids[0] : Manifold.union(solids);
+    if(solids.length > 1) for(let s of solids) s.delete();
+    console.log(`union: ${u.numTri()} triangles, ${u.decompose().length} components, volume ${u.volume().toFixed(1)} m³, ${Date.now() - t2} ms`);
+    return u;
+}
+
+function repairPart(part, shellT, stats) {
+    let m = weld(part, weldTol);
+    let tris = dedupe(m);
+    if(!tris.length) return null;
+    let o = orient(m, tris);
+    let id = materialBase + part.material;
+    // Repair each edge-connected component on its own; the union resolves them against each other.
+    let byComp = new Map();
+    for(let t of tris) { let c = o.compOf[t]; let list = byComp.get(c); if(!list) byComp.set(c, list = []); list.push(t); }
+    let solids = [];
+    let xyz = null;
+    for(let [comp, ctris] of byComp) {
+        let solid = null;
+        if(!o.nonManifoldComps.has(comp)) {
+            let loops = boundaryLoops(m, ctris, o);
+            let extra = [], big = [];
+            const perim = (loop) => { if(!xyz) xyz = posXYZ(m); let L = 0; for(let k = 0; k < loop.length; k++) { let a = loop[k], b = loop[(k + 1) % loop.length]; L += Math.hypot(xyz[a * 3] - xyz[b * 3], xyz[a * 3 + 1] - xyz[b * 3 + 1], xyz[a * 3 + 2] - xyz[b * 3 + 2]); } return L; };
+            for(let loop of loops) { if(perim(loop) < holeMax) extra.push(...fillLoop(loop, xyz)); else big.push(loop); }
+            if(big.length === 0) {
+                try { solid = checkSolid(new Manifold(toMeshInput(m, ctris, o, extra, manifold, id)), loops.length ? 'filled' : 'closed', stats); } catch(e) { solid = null; }
+            } else {
+                // thicken the open sheet; a shell that crosses itself gets retried thinner before giving up
+                for(let t of [shellT, shellT / 4]) {
+                    try {
+                        let th = thicken(m, ctris, o, big, t);
+                        let first = new Map(), from = [], to = [];
+                        for(let v = 0; v < th.posOf.length; v++) { let f = first.get(th.posOf[v]); if(f === undefined) first.set(th.posOf[v], v); else { from.push(v); to.push(f); } }
+                        let mesh = new manifold.Mesh({ numProp: NUM_PROP, vertProperties: th.props, triVerts: th.triVerts, mergeFromVert: new Uint32Array(from), mergeToVert: new Uint32Array(to), runIndex: new Uint32Array([0, th.triVerts.length]), runOriginalID: new Uint32Array([id]) });
+                        solid = checkSolid(new Manifold(mesh), 'thickened', stats);
+                    } catch(e) { solid = null; }
+                    if(solid) break;
+                }
+            }
+        }
+        if(!solid) solid = levelSetComponent(part, ctris, shellT, stats);
+        if(solid) {
+            let vol = solid.volume();
+            if(vol < 0) { stats.negative = (stats.negative || 0) + 1; }
+            stats.sumVolume = (stats.sumVolume || 0) + vol;
+            solids.push(solid);
+        }
+    }
+    if(!solids.length) return null;
+    if(solids.length === 1) return solids[0];
+    let u = Manifold.union(solids);
+    for(let s of solids) s.delete();
+    return u;
+}
+
+/** Reject a solid that crosses itself; count the method otherwise. */
+function checkSolid(mf, how, stats) {
+    let mesh = mf.getMesh();
+    let np = mesh.numProp, soup = new Float32Array(mesh.triVerts.length * 3);
+    for(let i = 0; i < mesh.triVerts.length; i++) { let v = mesh.triVerts[i] * np; soup[i * 3] = mesh.vertProperties[v]; soup[i * 3 + 1] = mesh.vertProperties[v + 1]; soup[i * 3 + 2] = mesh.vertProperties[v + 2]; }
+    if(selfIntersections(soup) > 0) { stats.selfIntersecting++; mf.delete(); return null; }
+    if(mf.volume() < 0) {
+        // inside-out solid (orientation guess was wrong): rebuild with reversed winding
+        stats['negative_' + how] = (stats['negative_' + how] || 0) + 1;
+        let tv = new Uint32Array(mesh.triVerts);
+        for(let t = 0; t < tv.length; t += 3) { let tmp = tv[t + 1]; tv[t + 1] = tv[t + 2]; tv[t + 2] = tmp; }
+        let flipped = new manifold.Mesh({ numProp: np, vertProperties: new Float32Array(mesh.vertProperties), triVerts: tv, mergeFromVert: mesh.mergeFromVert, mergeToVert: mesh.mergeToVert, runIndex: new Uint32Array(mesh.runIndex), runOriginalID: new Uint32Array(mesh.runOriginalID) });
+        mf.delete();
+        mf = new Manifold(flipped);
+    }
+    stats[how]++;
+    return mf;
+}
+
+/** Fallback for one component: a level set of its own triangles, UVs projected from them. */
+function levelSetComponent(part, ctris, shellT, stats) {
+    stats.levelset++;
+    let cpos = new Float32Array(ctris.length * 9), cuv = new Float32Array(ctris.length * 6);
+    ctris.forEach((t, i) => { cpos.set(part.positions.subarray(t * 9, t * 9 + 9), i * 9); cuv.set(part.uvs.subarray(t * 6, t * 6 + 6), i * 6); });
+    let pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.BufferAttribute(cpos, 3)); pg.computeBoundingBox();
+    let pbvh = new MeshBVH(pg), pt2 = new THREE.Vector3(), tg = {};
+    let pb = pg.boundingBox, ppad = edge + shellT;
+    let pbox = { min: [pb.min.x - ppad, pb.min.y - ppad, pb.min.z - ppad], max: [pb.max.x + ppad, pb.max.y + ppad, pb.max.z + ppad] };
+    const psdf = ([x, y, z]) => { pt2.set(x, y, z); pbvh.closestPointToPoint(pt2, tg); return shellT - tg.distance; };
+    let ls = Manifold.levelSet(psdf, pbox, edge);
+    if(ls.isEmpty()) { ls.delete(); return null; }
+    let simpl = ls.simplify(edge * 0.2); ls.delete();
+    const uvOf = (x, y, z) => {
+        pt2.set(x, y, z); pbvh.closestPointToPoint(pt2, tg); let t = tg.faceIndex;
+        let a = new THREE.Vector3(cpos[t * 9], cpos[t * 9 + 1], cpos[t * 9 + 2]), b = new THREE.Vector3(cpos[t * 9 + 3], cpos[t * 9 + 4], cpos[t * 9 + 5]), c = new THREE.Vector3(cpos[t * 9 + 6], cpos[t * 9 + 7], cpos[t * 9 + 8]);
+        let bc = new THREE.Vector3(); THREE.Triangle.getBarycoord(tg.point, a, b, c, bc); let u = t * 6;
+        return [cuv[u] * bc.x + cuv[u + 2] * bc.y + cuv[u + 4] * bc.z, cuv[u + 1] * bc.x + cuv[u + 3] * bc.y + cuv[u + 5] * bc.z];
+    };
+    return withProps(simpl, part.material, uvOf);
+}
+
+function posXYZ(m) {
+    let xyz = new Float32Array(m.numPos * 3), done = new Uint8Array(m.numPos);
+    for(let v = 0; v < m.posOf.length; v++) { let pi = m.posOf[v]; if(done[pi]) continue; done[pi] = 1; xyz[pi * 3] = m.props[v * 5]; xyz[pi * 3 + 1] = m.props[v * 5 + 1]; xyz[pi * 3 + 2] = m.props[v * 5 + 2]; }
+    return xyz;
+}
 
 // Split into chunks
 let cmin = [Math.floor(box.min[0] / CHUNK_SIZE), Math.floor(box.min[1] / CHUNK_SIZE), Math.floor(box.min[2] / CHUNK_SIZE)];
@@ -297,7 +460,7 @@ let chunks = {};
 let totalTris = 0, maxTris = 0, totalBytes = 0;
 let centroid = new THREE.Vector3();
 for(let x = cmin[0]; x <= cmax[0]; x++) for(let y = cmin[1]; y <= cmax[1]; y++) for(let z = cmin[2]; z <= cmax[2]; z++) {
-    let cube = Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE]).translate(x * CHUNK_SIZE, y * CHUNK_SIZE, z * CHUNK_SIZE);
+    let cube = withProps(Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE]).translate(x * CHUNK_SIZE, y * CHUNK_SIZE, z * CHUNK_SIZE), DEFAULT_MATERIAL);
     let part = simp.intersect(cube);
     cube.delete();
     if(part.isEmpty()) { part.delete(); continue; }
@@ -307,20 +470,30 @@ for(let x = cmin[0]; x <= cmax[0]; x++) for(let y = cmin[1]; y <= cmax[1]; y++) 
     let v = new Float32Array(numVerts * 3);
     for(let i = 0; i < numVerts; i++) { v[i * 3] = props[i * np]; v[i * 3 + 1] = props[i * np + 1]; v[i * 3 + 2] = props[i * np + 2]; }
     let mats = new Uint8Array(numTris);
-    for(let t = 0; t < numTris; t++) {
-        centroid.set(0, 0, 0);
-        for(let k = 0; k < 3; k++) { let i = tri[t * 3 + k] * 3; centroid.x += v[i]; centroid.y += v[i + 1]; centroid.z += v[i + 2]; }
-        centroid.multiplyScalar(1 / 3);
-        bvh.closestPointToPoint(centroid, target);
-        mats[t] = materials[target.faceIndex] ?? DEFAULT_MATERIAL;
-    }
-    // UVs by projecting each vertex onto the nearest source triangle
     let chunkUvs = new Float32Array(numVerts * 2);
-    for(let i = 0; i < numVerts; i++) {
-        pt.set(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
-        bvh.closestPointToPoint(pt, target);
-        let [u, w] = uvAt(target.point, target.faceIndex);
-        chunkUvs[i * 2] = u; chunkUvs[i * 2 + 1] = w;
+    if(np >= 5 && mesh.runOriginalID && mesh.runOriginalID.length) {
+        // exact path: materials from the runs, UVs from the properties
+        for(let r = 0; r < mesh.runOriginalID.length; r++) {
+            let idm = mesh.runOriginalID[r] - materialBase; if(idm < 0 || idm >= MAX_MATERIALS) idm = DEFAULT_MATERIAL;
+            let start = mesh.runIndex[r] / 3, end = (r + 1 < mesh.runIndex.length ? mesh.runIndex[r + 1] : tri.length) / 3;
+            mats.fill(idm, start, end);
+        }
+        for(let i = 0; i < numVerts; i++) { chunkUvs[i * 2] = props[i * np + 3]; chunkUvs[i * 2 + 1] = props[i * np + 4]; }
+    } else {
+        for(let t = 0; t < numTris; t++) {
+            centroid.set(0, 0, 0);
+            for(let k = 0; k < 3; k++) { let i = tri[t * 3 + k] * 3; centroid.x += v[i]; centroid.y += v[i + 1]; centroid.z += v[i + 2]; }
+            centroid.multiplyScalar(1 / 3);
+            bvh.closestPointToPoint(centroid, target);
+            mats[t] = materials[target.faceIndex] ?? DEFAULT_MATERIAL;
+        }
+        // UVs by projecting each vertex onto the nearest source triangle
+        for(let i = 0; i < numVerts; i++) {
+            pt.set(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+            bvh.closestPointToPoint(pt, target);
+            let [u, w] = uvAt(target.point, target.faceIndex);
+            chunkUvs[i * 2] = u; chunkUvs[i * 2 + 1] = w;
+        }
     }
     let bytes = encodeChunkMesh(new Float32Array(v), new Uint32Array(tri), mats, chunkUvs);
     chunks[chunkKey(x, y, z)] = { version: hashBytes(bytes), bytes: Buffer.from(bytes).toString('base64') };
@@ -343,7 +516,7 @@ if(textureFiles.size) {
     for(let [, f] of textureFiles) writeFileSync(resolve(texDir, f.name), f.bytes);
     for(let e of entries) if(e.texture) e.texture = `${texUrlBase}/${e.texture}`;
 }
-let manifest = { name, world: { bounds, rock, materials: entries }, source: basename(file), options: { edge, shell, mode, scale, offset }, chunks, entities: [] };
+let manifest = { name, world: { bounds, rock, materials: entries }, source: basename(file), options: { edge, shell, mode, fallback, holeMax, weldTol, scale, offset }, chunks, entities: [] };
 writeFileSync(out, JSON.stringify(manifest));
 console.log(`materials: ${entries.length} (${textureFiles.size} textures written to ${texDir})`);
 console.log(`chunks: ${Object.keys(chunks).length}, ${totalTris} triangles (max ${maxTris} per chunk), ${(totalBytes / 1024).toFixed(0)} KB of chunk bytes`);
