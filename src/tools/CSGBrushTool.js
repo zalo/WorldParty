@@ -67,11 +67,11 @@ export class CSGBrushTool extends BaseTool {
 
     performCSG(main, operation) {
         let box = new THREE.Box3().setFromObject(main.brush2);
-        let indices = main.terrain.intersecting(box);
-        if(indices.length === 0) return;
+        let keys = main.terrain.intersecting(box);
+        if(keys.length === 0) return;
         main.conn.send(JSON.stringify({
             type: "csg",
-            indices,
+            keys,
             brush: main.brushToBase64(main.brush2),
             operation,
             material: this.material,

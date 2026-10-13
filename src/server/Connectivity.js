@@ -18,7 +18,7 @@
  *  cell with other solid counts as attached, air that shares a cell with other
  *  air counts as connected. Both errors are in the safe direction (terrain
  *  stays put, a little extra terrain is loaded). */
-import { CHUNK_COUNT, CHUNK_SIZE, HALF, FACES, chunkCenter, isDefaultSolid, neighbour, outsideIsSolid } from '../terrain/grid.js';
+import { CHUNK_SIZE, HALF, FACES, chunkCenter, isRockKey, neighbour, outsideIsSolid } from '../terrain/grid.js';
 
 export const RASTER = 16;                       // cells per face edge (0.625 m)
 const CELLS = RASTER * RASTER;
@@ -31,10 +31,13 @@ export const SKY = 'sky', GROUND = 'ground';
 const FULL = new Uint8Array(CELLS).fill(1);
 const ALL_FACES = 63;
 const ROCK = { rock: true, solid: [{ manifold: null, masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES, volume: CHUNK_SIZE ** 3 }], air: [] };
-const AIR = { air: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES }], solid: [] };
+const OPEN_AIR = { implicit: true, air: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES }], solid: [] }; // unstored air: always sky
+const EMPTY_AIR = { air: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES }], solid: [] };                // stored, carved away: a real island
 
-const solidKey = (index, k) => `s${index}_${k}`;
-const airKey = (index, k) => `a${index}_${k}`;
+const solidKey = (key, k) => `s${key}_${k}`;
+const airKey = (key, k) => `a${key}_${k}`;
+/** Island key for air island k of chunk `key` with summary S; implicit air is the sky itself. */
+const airKeyOf = (key, k, S) => S.implicit ? SKY : airKey(key, k);
 
 /** Do island `s` on its face f and island `t` on its face g (the same world plane) share a cell? */
 function touches(s, f, t, g) {
@@ -86,30 +89,32 @@ export class Connectivity {
     /** @param {import('./Terrain.js').Terrain} terrain */
     constructor(terrain) {
         this.terrain = terrain;
-        this.cache = new Array(CHUNK_COUNT);  // per-chunk summaries of stored chunks, keyed by version
+        this.cache = new Map();   // key -> summary of a stored chunk, tagged with its version
         this.uf = new UnionFind();
-        this.touch = null;                    // touch[index][face] = air island keys touching this chunk's solid across that face
+        this.touch = new Map();   // key -> [face] -> air island keys touching this chunk's solid across that face
     }
 
     get M() { return this.terrain.manifold.Manifold; }
 
     // ---- per-chunk summaries -------------------------------------------------
 
-    summary(index) {
-        let c = this.terrain.chunks[index];
-        if(!c) return isDefaultSolid(index) ? ROCK : AIR;
-        if(!c.manifold) return AIR;
-        let cached = this.cache[index];
+    summary(key) {
+        let c = this.terrain.chunks[key];
+        if(!c) return isRockKey(this.terrain.world, key) ? ROCK : OPEN_AIR;
+        if(!c.manifold) return EMPTY_AIR;
+        let cached = this.cache.get(key);
         if(cached && cached.version === c.version) return cached;
         if(cached) this.dispose(cached);
-        let center = chunkCenter(index);
+        let center = chunkCenter(key);
         let solid = c.manifold.decompose().map(m => this.island(m, center, true));
         let cube = this.M.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(center.x, center.y, center.z);
         let airManifold = cube.subtract(c.manifold);
         cube.delete();
         let air = airManifold.decompose().map(m => { let isl = this.island(m, center, false); m.delete(); return isl; });
         airManifold.delete();
-        return this.cache[index] = { version: c.version, solid, air };
+        let summary = { version: c.version, solid, air };
+        this.cache.set(key, summary);
+        return summary;
     }
 
     /** Face footprints of one island. Keeps the manifold alive when `keep` (solid islands may become fragments). */
@@ -139,58 +144,63 @@ export class Connectivity {
 
     dispose(summary) { for(let s of summary.solid) if(s.manifold) s.manifold.delete(); }
 
-    invalidate(index) { if(this.cache[index]) { this.dispose(this.cache[index]); this.cache[index] = null; } }
+    invalidate(key) { let c = this.cache.get(key); if(c) { this.dispose(c); this.cache.delete(key); } }
 
-    clear() { for(let i = 0; i < CHUNK_COUNT; i++) this.invalidate(i); this.uf = new UnionFind(); this.touch = null; }
+    clear() { for(let c of this.cache.values()) this.dispose(c); this.cache.clear(); this.uf = new UnionFind(); this.touch = new Map(); }
 
     // ---- global solve ------------------------------------------------------
 
     /** Rebuild the union-find over every island and the per-face air contacts. */
     solve() {
         let uf = this.uf = new UnionFind();
-        let touch = this.touch = new Array(CHUNK_COUNT);
-        for(let index = 0; index < CHUNK_COUNT; index++) {
-            let S = this.summary(index);
-            let lists = touch[index] = [null, null, null, null, null, null];
+        let touch = this.touch = new Map();
+        let world = this.terrain.world;
+        this.keys = this.terrain.relevantKeys();
+        for(let key of this.keys) {
+            let S = this.summary(key);
+            let lists = [null, null, null, null, null, null];
+            touch.set(key, lists);
             for(let f = 0; f < 6; f++) {
-                let n = neighbour(index, f);
-                if(n < 0) {
+                let n = neighbour(world, key, f);
+                if(n === null) {
                     if(outsideIsSolid(f)) {
-                        for(let k = 0; k < S.solid.length; k++) if(S.solid[k].touch & (1 << f)) uf.union(solidKey(index, k), GROUND);
+                        for(let k = 0; k < S.solid.length; k++) if(S.solid[k].touch & (1 << f)) uf.union(solidKey(key, k), GROUND);
                     } else {
-                        for(let k = 0; k < S.air.length; k++) if(S.air[k].touch & (1 << f)) uf.union(airKey(index, k), SKY);
+                        for(let k = 0; k < S.air.length; k++) if(S.air[k].touch & (1 << f)) uf.union(airKey(key, k), SKY);
                         if(S.solid.some(s => s.touch & (1 << f))) lists[f] = [SKY];
                     }
                     continue;
                 }
                 let T = this.summary(n), g = f ^ 1;
-                if(f & 1) { // each pair once, from the positive side
+                // Pairs between two relevant chunks are joined once, from the positive side; a neighbour
+                // that is not relevant (open air) is only ever seen from here.
+                if((f & 1) || !this.keys.has(n)) {
                     for(let i = 0; i < S.solid.length; i++) for(let j = 0; j < T.solid.length; j++)
-                        if(touches(S.solid[i], f, T.solid[j], g)) uf.union(solidKey(index, i), solidKey(n, j));
+                        if(touches(S.solid[i], f, T.solid[j], g)) uf.union(solidKey(key, i), solidKey(n, j));
                     for(let i = 0; i < S.air.length; i++) for(let j = 0; j < T.air.length; j++)
-                        if(touches(S.air[i], f, T.air[j], g)) uf.union(airKey(index, i), airKey(n, j));
+                        if(touches(S.air[i], f, T.air[j], g)) uf.union(airKey(key, i), airKeyOf(n, j, T));
                 }
                 let keys = null;
                 for(let j = 0; j < T.air.length; j++) {
-                    for(let i = 0; i < S.solid.length; i++) if(touches(S.solid[i], f, T.air[j], g)) { (keys ||= []).push(airKey(n, j)); break; }
+                    for(let i = 0; i < S.solid.length; i++) if(touches(S.solid[i], f, T.air[j], g)) { (keys ||= []).push(airKeyOf(n, j, T)); break; }
                 }
                 lists[f] = keys;
             }
         }
     }
 
-    /** Solid components not connected to the ground: [{ islands:[{index,k,island}], volume }]. */
+    /** Solid components not connected to the ground: [{ islands:[{key,k,island}], volume }]. */
     floatingComponents() {
         let ground = this.uf.find(GROUND);
         let groups = new Map();
-        for(let index = 0; index < CHUNK_COUNT; index++) {
-            let S = this.summary(index);
+        for(let key of this.keys) {
+            let S = this.summary(key);
             for(let k = 0; k < S.solid.length; k++) {
-                let root = this.uf.find(solidKey(index, k));
+                let root = this.uf.find(solidKey(key, k));
                 if(root === ground) continue;
                 let g = groups.get(root);
                 if(!g) groups.set(root, g = { islands: [], volume: 0 });
-                g.islands.push({ index, k, island: S.solid[k] });
+                g.islands.push({ key, k, island: S.solid[k] });
                 g.volume += S.solid[k].volume;
             }
         }
@@ -199,42 +209,35 @@ export class Connectivity {
 
     // ---- activity ------------------------------------------------------------
 
-    /** Chunk index containing a world position, or -1 outside the grid. */
-    static chunkAt(p) {
-        let x = Math.floor((p.x + 50) / CHUNK_SIZE), y = Math.floor((p.y + 50) / CHUNK_SIZE), z = Math.floor((p.z + 50) / CHUNK_SIZE);
-        if(x < 0 || x > 9 || y < 0 || y > 9 || z < 0 || z > 9) return -1;
-        return x * 100 + y * 10 + z;
-    }
-
-    /** Roots of the air components touched by the given chunk indices (-1 = outside the grid = sky). */
+    /** Roots of the air components touched by the given chunk keys (null = outside the grid = sky). */
     activeRoots(occupied) {
         let roots = new Set();
-        for(let index of occupied) {
-            if(index < 0) { roots.add(this.uf.find(SKY)); continue; }
-            let S = this.summary(index);
-            for(let k = 0; k < S.air.length; k++) roots.add(this.uf.find(airKey(index, k)));
+        for(let key of occupied) {
+            if(key === null) { roots.add(this.uf.find(SKY)); continue; }
+            let S = this.summary(key);
+            for(let k = 0; k < S.air.length; k++) roots.add(this.uf.find(airKeyOf(key, k, S)));
         }
         return roots;
     }
 
     /**
-     * Per-chunk materialization given the active air roots:
+     * Per-chunk materialization given the active air roots, as a Map:
      *   rock:     { mask }                faces that touch active air (0 = nothing)
      *   modified: { active, cull }        load it? which boundary faces to cull
-     *   air/empty: undefined
+     * Chunks with nothing to show are absent.
      */
     states(roots) {
         let active = key => roots.has(this.uf.find(key));
-        let out = new Array(CHUNK_COUNT);
-        for(let index = 0; index < CHUNK_COUNT; index++) {
-            let S = this.summary(index);
+        let out = new Map();
+        for(let key of this.keys) {
+            let S = this.summary(key);
             if(!S.solid.length) continue;
             let faces = 0;
-            let lists = this.touch[index];
+            let lists = this.touch.get(key);
             for(let f = 0; f < 6; f++) if(lists[f] && lists[f].some(active)) faces |= 1 << f;
-            if(S.rock) { if(faces) out[index] = { mask: faces }; continue; }
-            let own = S.air.some((_, k) => active(airKey(index, k)));
-            if(faces || own) out[index] = { active: true, cull: ~faces & ALL_FACES };
+            if(S.rock) { if(faces) out.set(key, { mask: faces }); continue; }
+            let own = S.air.some((_, k) => active(airKey(key, k)));
+            if(faces || own) out.set(key, { active: true, cull: ~faces & ALL_FACES });
         }
         return out;
     }

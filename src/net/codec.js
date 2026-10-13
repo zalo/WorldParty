@@ -64,15 +64,16 @@ export function hashBytes(bytes) {
 export const EMPTY_VERSION = '0';
 export const FRAME_CHUNK = 1;
 
-/** Binary WebSocket frame: [u8 type=1][u32 index][u8 versionLength][version ascii][payload] */
-export function packChunkFrame(index, version, bytes) {
-    let out = new Uint8Array(6 + version.length + (bytes ? bytes.length : 0));
+/** Binary WebSocket frame: [u8 type=1][i32 x][i32 y][i32 z][u8 versionLength][version ascii][payload] */
+export function packChunkFrame(key, version, bytes) {
+    let [x, y, z] = key.split(',').map(Number);
+    let out = new Uint8Array(14 + version.length + (bytes ? bytes.length : 0));
     let dv = new DataView(out.buffer);
     out[0] = FRAME_CHUNK;
-    dv.setUint32(1, index, true);
-    out[5] = version.length;
-    for(let i = 0; i < version.length; i++) out[6 + i] = version.charCodeAt(i);
-    if(bytes) out.set(bytes, 6 + version.length);
+    dv.setInt32(1, x, true); dv.setInt32(5, y, true); dv.setInt32(9, z, true);
+    out[13] = version.length;
+    for(let i = 0; i < version.length; i++) out[14 + i] = version.charCodeAt(i);
+    if(bytes) out.set(bytes, 14 + version.length);
     return out;
 }
 
@@ -80,9 +81,9 @@ export function unpackChunkFrame(buffer) {
     let u8 = new Uint8Array(buffer);
     if(u8[0] !== FRAME_CHUNK) return null;
     let dv = new DataView(u8.buffer, u8.byteOffset);
-    let index = dv.getUint32(1, true);
-    let vlen = u8[5];
-    let version = String.fromCharCode(...u8.subarray(6, 6 + vlen));
-    let bytes = u8.subarray(6 + vlen);
-    return { index, version, bytes: bytes.length ? bytes : null };
+    let key = `${dv.getInt32(1, true)},${dv.getInt32(5, true)},${dv.getInt32(9, true)}`;
+    let vlen = u8[13];
+    let version = String.fromCharCode(...u8.subarray(14, 14 + vlen));
+    let bytes = u8.subarray(14 + vlen);
+    return { key, version, bytes: bytes.length ? bytes : null };
 }

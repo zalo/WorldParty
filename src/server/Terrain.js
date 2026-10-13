@@ -7,7 +7,8 @@
  *  and a content hash used as its version. Clients fetch chunk bytes by
  *  version over HTTP and are told about new versions through the normal
  *  update stream. A stored chunk with a null manifold is an explicitly empty
- *  chunk (fully carved away).
+ *  chunk (fully carved away). Chunks are keyed "x,y,z" (see terrain/grid.js);
+ *  the world config says which unstored chunks are implicit rock.
  *
  *  Booleans here are purely local to a chunk. Which solid is grounded and
  *  which hollows are reachable is decided afterwards by Connectivity. */
@@ -21,21 +22,23 @@ import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup } from '../net/codec.js';
 import { MATERIALS, DEFAULT_MATERIAL, clampMaterial } from '../terrain/materials.js';
 
-import { GRID, CHUNK_SIZE, SOLID_BELOW_Y, CHUNK_COUNT, chunkCoords, chunkCenter, isDefaultSolid } from '../terrain/grid.js';
-export { GRID, CHUNK_SIZE, SOLID_BELOW_Y, CHUNK_COUNT, chunkCoords, chunkCenter, isDefaultSolid };
+import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
+export { CHUNK_SIZE, chunkCenter };
 const MAX_BRUSH_SCALE = 20;
 const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
 
 export class Terrain {
     constructor() {
-        /** @type {Record<number, { index:number, version:string, bytes:Uint8Array|null, manifold:any|null }>} */
+        /** @type {Record<string, { key:string, version:string, bytes:Uint8Array|null, manifold:any|null }>} */
         this.chunks = {};
-        /** @type {Set<number>} chunk indices changed since last takeDirty() */
+        /** @type {Set<string>} chunk keys changed since last takeDirty() */
         this.dirty = new Set();
         this.manifold = null;
+        this.world = DEFAULT_WORLD;
     }
 
-    async init(storedChunks = {}) {
+    async init(storedChunks = {}, world = null) {
+        this.world = sanitizeWorld(world) || DEFAULT_WORLD;
         this.manifold = await M({
             instantiateWasm: (imports, callback) => {
                 const instance = new WebAssembly.Instance(manMod, imports);
@@ -48,64 +51,71 @@ export class Terrain {
         this.materialBase = this.manifold.Manifold.reserveIDs(MATERIALS.length);
         for(let key in storedChunks) {
             let c = storedChunks[key];
-            let index = c.index;
+            if(!isValidKey(key)) continue;
             if(c.bytes) {
                 let bytes = c.bytes instanceof Uint8Array ? c.bytes : new Uint8Array(c.bytes);
                 let mesh = decodeChunkMesh(bytes);
-                this.chunks[index] = { index, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
+                this.chunks[key] = { key, version: c.version || hashBytes(bytes), bytes, manifold: this.meshToManifold(mesh.positions, mesh.indices, mesh.materials) };
             } else if(c.data) {
                 // Legacy gzip+base64 triangle soup
                 let manifold = this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL);
-                this.chunks[index] = { index, version: '', bytes: null, manifold };
-                this._refresh(index);
-                this.dirty.add(index);
+                this.chunks[key] = { key, version: '', bytes: null, manifold };
+                this._refresh(key);
+                this.dirty.add(key);
             } else {
-                this.chunks[index] = { index, version: EMPTY_VERSION, bytes: null, manifold: null };
+                this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
             }
         }
     }
 
+    /** Every chunk that can carry solid: implicit rock plus everything stored. */
+    relevantKeys() {
+        let out = new Set(rockChunks(this.world));
+        for(let key in this.chunks) out.add(key);
+        return out;
+    }
+
     /** Replace a chunk's manifold (takes ownership; null = explicitly empty). */
-    setManifold(index, manifold) {
-        let c = this.chunks[index];
+    setManifold(key, manifold) {
+        let c = this.chunks[key];
         if(c && c.manifold) c.manifold.delete();
-        this.chunks[index] = { index, version: '', bytes: null, manifold };
-        this._refresh(index);
-        this.dirty.add(index);
+        this.chunks[key] = { key, version: '', bytes: null, manifold };
+        this._refresh(key);
+        this.dirty.add(key);
     }
 
     /** A fresh copy of the implicit rock cube for a chunk (caller owns it). */
-    rockManifold(index) {
-        let p = chunkCenter(index);
+    rockManifold(key) {
+        let p = chunkCenter(key);
         return this.withMaterial(this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(p.x, p.y, p.z), DEFAULT_MATERIAL);
     }
 
     /** Current manifold for a chunk, materializing the implicit default. Caller must not delete it. */
-    currentManifold(index) {
-        let c = this.chunks[index];
+    currentManifold(key) {
+        let c = this.chunks[key];
         if(c) return c.manifold;
-        return isDefaultSolid(index) ? this.rockManifold(index) : null;
+        return isRockKey(this.world, key) ? this.rockManifold(key) : null;
     }
 
-    /** {index: version} for every stored chunk (full updates). */
+    /** {key: version} for every stored chunk. */
     versions() {
         let out = {};
         for(let key in this.chunks) out[key] = this.chunks[key].version;
         return out;
     }
 
-    /** {index: version} for chunks changed since the last call. */
+    /** {key: version} for chunks changed since the last call. */
     takeDirty() {
         let out = {};
-        for(let index of this.dirty) if(this.chunks[index]) out[index] = this.chunks[index].version;
+        for(let key of this.dirty) if(this.chunks[key]) out[key] = this.chunks[key].version;
         this.dirty.clear();
         return out;
     }
 
     /** Storage record for a chunk. */
-    serializeChunk(index) {
-        let c = this.chunks[index];
-        return c ? { index: c.index, version: c.version, bytes: c.bytes } : undefined;
+    serializeChunk(key) {
+        let c = this.chunks[key];
+        return c ? { key: c.key, version: c.version, bytes: c.bytes } : undefined;
     }
 
     clear() {
@@ -115,14 +125,14 @@ export class Terrain {
     }
 
     /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty. */
-    chunkMesh(index) {
-        let c = this.chunks[index];
+    chunkMesh(key) {
+        let c = this.chunks[key];
         return c && c.bytes ? decodeChunkMesh(c.bytes) : null;
     }
 
     /**
      * Apply a brush boolean to a set of chunks. `msg` is the client's `csg` payload:
-     * { indices:[...], brush: soup base64, operation, position, quaternion, scale }.
+     * { keys:["x,y,z", ...], brush: soup base64, operation, position, quaternion, scale }.
      * Changed chunks are added to `dirty`; grounding is Connectivity's job.
      */
     applyCsg(msg) {
@@ -141,13 +151,13 @@ export class Terrain {
                 new THREE.Vector3(s.x, s.y, s.z)), clampMaterial(msg.material));
         } catch(e) { console.warn('Rejected brush: ' + e.message); return; }
 
-        let indices = [...new Set((msg.indices || []).map(i => i | 0).filter(i => i >= 0 && i < CHUNK_COUNT))];
-        for(let index of indices) this.applyToChunk(index, brush, op);
+        let keys = [...new Set((msg.keys || []).filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))];
+        for(let key of keys) this.applyToChunk(key, brush, op);
         brush.delete();
     }
 
-    applyToChunk(index, brush, op) {
-        let current = this.currentManifold(index); // owned by chunk record, or a fresh default cube
+    applyToChunk(key, brush, op) {
+        let current = this.currentManifold(key); // owned by chunk record, or a fresh default cube
         let result;
         if(!current) {
             if(op !== ADDITION) return;              // carving empty space changes nothing
@@ -157,17 +167,17 @@ export class Terrain {
         else result = current.intersect(brush);
 
         // Clip to the chunk's bounds
-        let c = chunkCenter(index);
+        let c = chunkCenter(key);
         let cube = this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z);
         let clipped = result.intersect(cube);
         cube.delete(); result.delete();
-        if(current && !this.chunks[index]) current.delete(); // materialized here; stored ones are deleted by setManifold
-        this.setManifold(index, clipped);
+        if(current && !this.chunks[key]) current.delete(); // materialized here; stored ones are deleted by setManifold
+        this.setManifold(key, clipped);
     }
 
     /** Re-encode a chunk's bytes and version from its manifold. */
-    _refresh(index) {
-        let c = this.chunks[index];
+    _refresh(key) {
+        let c = this.chunks[key];
         if(!c.manifold || c.manifold.isEmpty()) {
             if(c.manifold) { c.manifold.delete(); c.manifold = null; }
             c.bytes = null; c.version = EMPTY_VERSION;

@@ -1,115 +1,136 @@
-/** Client terrain mirror: one BatchedMesh holding every chunk's mesh, grown
- *  on demand instead of reserved up front, with a BVH per chunk for player
- *  collision and a version per chunk for content-addressed fetching.
+/** Client terrain mirror: one BatchedMesh holding every held chunk's mesh,
+ *  grown on demand instead of reserved up front, with a BVH per chunk for
+ *  player collision and a version per chunk for content-addressed fetching.
  *
- *  The server decides what is worth holding (see server/Connectivity.js):
- *  updates carry `chunks` {index: version|null} for modified chunks to hold
- *  or drop, `rock` {index: faceMask} for the faces of untouched rock to draw,
- *  and `cull` {index: faceMask} for the boundary faces of a modified chunk
- *  that face nothing visible. Everything else costs nothing here. */
+ *  Chunks are keyed "x,y,z" over a sparse world (see terrain/grid.js); the
+ *  world config arrives with the first full update. The server decides what
+ *  is worth holding (see server/Connectivity.js): updates carry `chunks`
+ *  {key: version|null} for modified chunks to hold or drop, `rock`
+ *  {key: faceMask} for the faces of untouched rock to draw, and `cull`
+ *  {key: faceMask} for the boundary faces of a modified chunk that face
+ *  nothing visible. Everything else costs nothing here. */
 import * as THREE from 'three/webgpu';
 import { decodeChunkMesh, EMPTY_VERSION } from '../net/codec.js';
 import { materialColor, DEFAULT_MATERIAL } from '../terrain/materials.js';
-import { GRID, CHUNK_COUNT, HALF, FACES, chunkCenter as gridCenter, isDefaultSolid } from '../terrain/grid.js';
+import { CHUNK_SIZE, HALF, FACES, DEFAULT_WORLD, chunkCenter as gridCenter, chunkMin, chunksInBox, sanitizeWorld } from '../terrain/grid.js';
 
-export { GRID, CHUNK_COUNT, isDefaultSolid };
+export { CHUNK_SIZE };
 const INITIAL_VERTS = 1 << 16;
+const INITIAL_INSTANCES = 1024;
 const PLANE_EPS = 1e-3;
 
-export function chunkCenter(index) { let c = gridCenter(index); return new THREE.Vector3(c.x, c.y, c.z); }
+export function chunkCenter(key) { let c = gridCenter(key); return new THREE.Vector3(c.x, c.y, c.z); }
 
 export class TerrainMirror {
     constructor(scene, material) {
+        this.scene = scene;
         this.material = material;
-        this.batch = new THREE.BatchedMesh(CHUNK_COUNT, INITIAL_VERTS, INITIAL_VERTS * 3, material);
+        this.world = DEFAULT_WORLD;
+        this.maxInstances = INITIAL_INSTANCES;
+        this.rockMask = new Map();  // key -> faces of untouched rock to draw
+        this.cullMask = new Map();  // key -> boundary faces of a held modified chunk to skip
+        this.versions = new Map();  // key -> version of each held modified chunk
+        this.meshes = new Map();    // key -> decoded {positions, indices, materials}
+        this.pending = new Map();   // key -> version being fetched
+        this.boxes = new Map();     // key -> Box3 (cached)
+        this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
+        this.createBatch();
+    }
+
+    createBatch() {
+        this.batch = new THREE.BatchedMesh(this.maxInstances, INITIAL_VERTS, INITIAL_VERTS * 3, this.material);
         this.batch.perObjectFrustumCulled = true;
         this.batch.castShadow = true;
         this.batch.receiveShadow = true;
-        scene.add(this.batch);
-
-        this.geoIds = new Int32Array(CHUNK_COUNT).fill(-1);
-        this.instIds = new Int32Array(CHUNK_COUNT).fill(-1);
-        this.reservedV = new Int32Array(CHUNK_COUNT);
-        this.reservedI = new Int32Array(CHUNK_COUNT);
-        this.rockMask = new Int32Array(CHUNK_COUNT); // faces of untouched rock to draw
-        this.cullMask = new Int32Array(CHUNK_COUNT); // boundary faces of a held modified chunk to skip
-        this.versions = new Array(CHUNK_COUNT);      // version of each held modified chunk
-        this.meshes = new Array(CHUNK_COUNT);        // decoded {positions, indices, materials} per held chunk
-        this.bboxes = [];
-        this.pending = new Map(); // index -> version being fetched
+        this.scene.add(this.batch);
+        this.geoIds = new Map();
+        this.instIds = new Map();
+        this.reservedV = new Map();
+        this.reservedI = new Map();
         this.wastedVerts = 0;
-        this.fetchChunk = null;   // async (index, version) => Uint8Array|null, set by Main
-
-        let half = new THREE.Vector3(HALF, HALF, HALF);
-        for(let i = 0; i < CHUNK_COUNT; i++) {
-            let c = chunkCenter(i);
-            this.bboxes.push(new THREE.Box3(c.clone().sub(half), c.clone().add(half)));
-        }
     }
 
+    /** Adopt the server's world config (bounds, implicit rock). */
+    configure(world) {
+        let w = sanitizeWorld(world);
+        if(w) this.world = w;
+    }
+
+    /** World-space bounds of a chunk. */
+    bbox(key) {
+        let b = this.boxes.get(key);
+        if(!b) {
+            let m = chunkMin(key);
+            b = new THREE.Box3(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x + CHUNK_SIZE, m.y + CHUNK_SIZE, m.z + CHUNK_SIZE));
+            this.boxes.set(key, b);
+        }
+        return b;
+    }
+
+    /** Keys of in-bounds chunks whose bounds intersect `box`. */
+    intersecting(box) { return chunksInBox(this.world, box.min, box.max); }
+
     /** Apply decoded chunk bytes (or null for an explicitly empty chunk). */
-    setChunk(index, bytes, version) {
-        this.pending.delete(index);
-        this.meshes[index] = bytes ? decodeChunkMesh(bytes) : null;
-        this.versions[index] = bytes ? version : EMPTY_VERSION;
-        this.rockMask[index] = 0;
-        this.rebuild(index);
+    setChunk(key, bytes, version) {
+        this.pending.delete(key);
+        if(bytes) this.meshes.set(key, decodeChunkMesh(bytes)); else this.meshes.delete(key);
+        this.versions.set(key, bytes ? version : EMPTY_VERSION);
+        this.rockMask.delete(key);
+        this.rebuild(key);
     }
 
     /** Drop a modified chunk we no longer need to hold. */
-    unload(index) {
-        this.pending.delete(index);
-        this.meshes[index] = null;
-        this.versions[index] = undefined;
-        this.rebuild(index);
+    unload(key) {
+        this.pending.delete(key);
+        this.meshes.delete(key);
+        this.versions.delete(key);
+        this.rebuild(key);
     }
 
     /** Rebuild a chunk's geometry from what we hold and the server's masks. */
-    rebuild(index) {
+    rebuild(key) {
         let geometry = null;
-        if(this.rockMask[index]) geometry = this.rockFaces(index, this.rockMask[index]);
-        else if(this.meshes[index]) geometry = this.culledGeometry(index, this.meshes[index], this.cullMask[index]);
-        this.setGeometry(index, geometry);
+        let rock = this.rockMask.get(key) || 0, mesh = this.meshes.get(key);
+        if(rock) geometry = this.rockFaces(key, rock);
+        else if(mesh) geometry = this.culledGeometry(key, mesh, this.cullMask.get(key) || 0);
+        this.setGeometry(key, geometry);
     }
 
-    /** Reconcile with an update's {chunks, rock, cull} maps; fetch what we lack. */
+    /** Reconcile with an update's {world, chunks, rock, cull} maps; fetch what we lack. */
     applyUpdate(data, full = false) {
+        if(data.world) this.configure(data.world);
         let chunks = data.chunks || {}, rock = data.rock || {}, cull = data.cull || {};
         if(full) {
-            for(let i = 0; i < CHUNK_COUNT; i++) {
-                if(chunks[i] === undefined && (this.versions[i] !== undefined || this.pending.has(i))) this.unload(i);
-                if(rock[i] === undefined && this.rockMask[i]) { this.rockMask[i] = 0; this.rebuild(i); }
-            }
+            for(let key of [...this.versions.keys(), ...this.pending.keys()]) if(chunks[key] === undefined) this.unload(key);
+            for(let key of [...this.rockMask.keys()]) if(rock[key] === undefined) { this.rockMask.delete(key); this.rebuild(key); }
         }
         for(let key in cull) {
-            let index = +key;
-            if(this.cullMask[index] === cull[key]) continue;
-            this.cullMask[index] = cull[key];
-            if(this.meshes[index]) this.rebuild(index);
+            if((this.cullMask.get(key) || 0) === cull[key]) continue;
+            this.cullMask.set(key, cull[key]);
+            if(this.meshes.has(key)) this.rebuild(key);
         }
         for(let key in rock) {
-            let index = +key;
-            if(this.rockMask[index] === rock[key]) continue;
-            this.rockMask[index] = rock[key];
-            this.rebuild(index);
+            if((this.rockMask.get(key) || 0) === rock[key]) continue;
+            if(rock[key]) this.rockMask.set(key, rock[key]); else this.rockMask.delete(key);
+            this.rebuild(key);
         }
         for(let key in chunks) {
-            let index = +key, version = chunks[key];
-            if(version === null) { if(this.versions[index] !== undefined || this.pending.has(index)) this.unload(index); continue; }
-            if(this.versions[index] === version || this.pending.get(index) === version) continue;
-            if(version === EMPTY_VERSION) { this.setChunk(index, null, version); continue; }
-            this.pending.set(index, version);
-            Promise.resolve(this.fetchChunk?.(index, version)).then(bytes => {
-                if(this.pending.get(index) !== version) return; // superseded or unloaded
-                if(bytes) this.setChunk(index, bytes, version);
-                else this.pending.delete(index);
-            }).catch(e => { this.pending.delete(index); console.warn(`chunk ${index} fetch failed: ${e.message}`); });
+            let version = chunks[key];
+            if(version === null) { if(this.versions.has(key) || this.pending.has(key)) this.unload(key); continue; }
+            if(this.versions.get(key) === version || this.pending.get(key) === version) continue;
+            if(version === EMPTY_VERSION) { this.setChunk(key, null, version); continue; }
+            this.pending.set(key, version);
+            Promise.resolve(this.fetchChunk?.(key, version)).then(bytes => {
+                if(this.pending.get(key) !== version) return; // superseded or unloaded
+                if(bytes) this.setChunk(key, bytes, version);
+                else this.pending.delete(key);
+            }).catch(e => { this.pending.delete(key); console.warn(`chunk ${key} fetch failed: ${e.message}`); });
         }
     }
 
     /** Quads for the exposed faces of an unmodified solid chunk. */
-    rockFaces(index, mask) {
-        let c = gridCenter(index);
+    rockFaces(key, mask) {
+        let c = gridCenter(key);
         let center = [c.x, c.y, c.z];
         let positions = [], indices = [];
         for(let f = 0; f < 6; f++) {
@@ -131,10 +152,10 @@ export class TerrainMirror {
     }
 
     /** A modified chunk's mesh minus the triangles lying flat on a boundary face in `hidden`. */
-    culledGeometry(index, mesh, hidden) {
+    culledGeometry(key, mesh, hidden) {
         let { positions, indices, materials } = mesh;
         if(!hidden) return this.buildGeometry(positions, indices, materials);
-        let c = gridCenter(index);
+        let c = gridCenter(key);
         let center = [c.x, c.y, c.z];
         let numTris = indices.length / 3;
         let keepIdx = [], keepMat = [];
@@ -184,65 +205,57 @@ export class TerrainMirror {
 
     /** Resource summary for diagnostics. */
     stats() {
-        let chunks = 0, tris = 0, rock = 0, held = 0;
-        for(let i = 0; i < CHUNK_COUNT; i++) {
-            if(this.rockMask[i]) rock++;
-            if(this.meshes[i]) held++;
-            if(this.geoIds[i] >= 0) { chunks++; tris += this.batch._geometryInfo[this.geoIds[i]].indexCount / 3; }
-        }
-        return { chunks, tris, rock, held, pending: this.pending.size, vertexCapacity: this.batch._maxVertexCount, vertexUsed: this.batch._nextVertexStart };
-    }
-
-    /** Indices of chunks whose bounds intersect `box`. */
-    intersecting(box) {
-        let out = [];
-        for(let i = 0; i < CHUNK_COUNT; i++) if(box.intersectsBox(this.bboxes[i])) out.push(i);
-        return out;
+        let tris = 0;
+        for(let geoId of this.geoIds.values()) tris += this.batch._geometryInfo[geoId].indexCount / 3;
+        return { chunks: this.geoIds.size, tris, rock: this.rockMask.size, held: this.meshes.size, pending: this.pending.size,
+                 vertexCapacity: this.batch._maxVertexCount, vertexUsed: this.batch._nextVertexStart, maxInstances: this.maxInstances };
     }
 
     /** BVH for a chunk, or null if it has no geometry. */
-    bvh(index) {
-        let geoId = this.geoIds[index];
-        return geoId >= 0 && this.batch.boundsTrees ? this.batch.boundsTrees[geoId] : null;
+    bvh(key) {
+        let geoId = this.geoIds.get(key);
+        return geoId !== undefined && this.batch.boundsTrees ? this.batch.boundsTrees[geoId] : null;
     }
 
     // ---- batch management ---------------------------------------------------
 
-    setGeometry(index, geometry) {
-        let geoId = this.geoIds[index];
+    setGeometry(key, geometry) {
+        let geoId = this.geoIds.get(key);
         if(!geometry) {
-            if(geoId >= 0) this.release(index);
+            if(geoId !== undefined) this.release(key);
             return;
         }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         let nv = geometry.attributes.position.count, ni = geometry.index.count;
-        if(geoId >= 0 && nv <= this.reservedV[index] && ni <= this.reservedI[index]) {
+        if(geoId !== undefined && nv <= this.reservedV.get(key) && ni <= this.reservedI.get(key)) {
             this.batch.setGeometryAt(geoId, geometry);
             this.batch.computeBoundsTree(geoId);
             return;
         }
-        if(geoId >= 0) this.release(index);
+        if(geoId !== undefined) this.release(key);
+        if(this.geoIds.size >= this.maxInstances) { this.growInstances(); }
         let rv = Math.max(nv, Math.ceil(nv * 1.5)), ri = Math.max(ni, Math.ceil(ni * 1.5));
         this.ensureCapacity(rv, ri);
         geoId = this.batch.addGeometry(geometry, rv, ri);
-        this.geoIds[index] = geoId;
-        this.instIds[index] = this.batch.addInstance(geoId);
-        this.batch.setMatrixAt(this.instIds[index], new THREE.Matrix4());
-        this.reservedV[index] = rv;
-        this.reservedI[index] = ri;
+        this.geoIds.set(key, geoId);
+        let instId = this.batch.addInstance(geoId);
+        this.instIds.set(key, instId);
+        this.batch.setMatrixAt(instId, new THREE.Matrix4());
+        this.reservedV.set(key, rv);
+        this.reservedI.set(key, ri);
         this.batch.computeBoundsTree(geoId);
     }
 
-    release(index) {
-        let geoId = this.geoIds[index];
+    release(key) {
+        let geoId = this.geoIds.get(key);
         this.batch.deleteGeometry(geoId); // also deletes its instance
         if(this.batch.boundsTrees) this.batch.boundsTrees[geoId] = null;
-        this.wastedVerts += this.reservedV[index];
-        this.geoIds[index] = -1;
-        this.instIds[index] = -1;
-        this.reservedV[index] = 0;
-        this.reservedI[index] = 0;
+        this.wastedVerts += this.reservedV.get(key);
+        this.geoIds.delete(key);
+        this.instIds.delete(key);
+        this.reservedV.delete(key);
+        this.reservedI.delete(key);
         // Compact once dead ranges dominate; BVHs reference buffer ranges, so rebuild them all.
         if(this.wastedVerts > this.batch._nextVertexStart / 2 && this.wastedVerts > 4096) {
             this.batch.optimize();
@@ -263,5 +276,16 @@ export class TerrainMirror {
         // The underlying buffers were replaced; rebuild every BVH against the new arrays.
         b.disposeBoundsTree();
         b.computeBoundsTree();
+    }
+
+    /** BatchedMesh cannot grow its instance table: build a bigger one and refill it from our state. */
+    growInstances() {
+        let old = this.batch;
+        this.scene.remove(old);
+        old.disposeBoundsTree?.();
+        old.dispose();
+        this.maxInstances *= 2;
+        this.createBatch();
+        for(let key of new Set([...this.rockMask.keys(), ...this.meshes.keys()])) this.rebuild(key);
     }
 }

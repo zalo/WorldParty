@@ -69,14 +69,18 @@ and on disconnect, in batches of 128 keys (the Durable Object limit).
 ## Not entities (yet)
 
 Terrain chunks stay a separate sparse map (`src/server/Terrain.js` on the
-server, `src/client/TerrainMirror.js` on the client), keyed by chunk index.
+server, `src/client/TerrainMirror.js` on the client), keyed `"x,y,z"` over
+an unbounded grid. A world config (`terrain/grid.js`) gives the room's
+bounds and the box of implicit rock; unstored chunks inside it are rock,
+unstored chunks elsewhere are air. The config is persisted per room and
+sent with full updates, so an imported world simply ships a different one.
 They are spatial structure rather than things with identity, and they
 replicate differently:
 
 - Each stored chunk is an indexed mesh encoded by `encodeChunkMesh()` and
   versioned by a content hash. Explicitly empty chunks have version `0`.
 - Update messages carry only `{index: version}`. Clients compare with their
-  local version and `GET /parties/main/<room>/chunk/<index>?v=<version>`;
+  local version and `GET /parties/main/<room>/chunk/<x,y,z>?v=<version>`;
   a URL naming the current version is served `immutable`, so browsers and
   edge caches keep it.
 - Right after an edit the server also pushes the new bytes to everyone in
@@ -85,7 +89,7 @@ replicate differently:
 - The client never sends chunk geometry. A `csg` message lists the chunk
   indices the brush overlaps plus the brush soup and transform; the server
   materializes implicit chunks itself.
-- Storage key `chunk:<index>` holds `{index, version, bytes}`. Rooms saved
+- Storage key `chunk:<x,y,z>` holds `{key, version, bytes}`. Rooms saved
   in the old base64 soup format are migrated on load.
 
 ### Connectivity: grounding and hollows
@@ -97,8 +101,9 @@ Every island's contact with the six chunk faces is rasterized onto a 16x16
 grid (0.625 m cells) from the triangles lying flat on that face. Islands in
 neighbouring chunks are joined with a union-find when their footprints on
 the shared face overlap a cell. Untouched rock is one solid island with full
-faces; implicit air and explicitly empty chunks are one air island with full
-faces. The underside of the grid is `GROUND`; the sides and top are `SKY`.
+faces; explicitly empty chunks are one air island with full faces, and
+unstored air is the sky itself. The solve iterates the stored chunks plus
+the implicit rock box, so its cost follows the edited world, not the bounds. The underside of the grid is `GROUND`; the sides and top are `SKY`.
 
 - **Grounding.** Any solid component not connected to `GROUND` is floating.
   Its islands are merged across chunks (`Manifold.union`) into one fragment
@@ -125,8 +130,8 @@ Both errors are safe (terrain stays put, a little extra gets loaded).
 The server tracks which chunks contain players or bodies each tick and
 re-derives states only when that set changes or after an edit. The states
 are diffed against what was last sent and the delta rides on the next
-`partialupdate` as `chunks` `{index: version|null}`, `rock` `{index: mask}`
-and `cull` `{index: mask}`; full updates carry the whole maps. Chunk
+`partialupdate` as `chunks` `{key: version|null}`, `rock` `{key: mask}`
+and `cull` `{key: mask}`; full updates carry the whole maps. Chunk
 colliders follow the same states (box for rock faces, triangle mesh for held
 chunks). The client `TerrainMirror` holds only what it is told to and
 rebuilds a chunk when its mesh or mask changes. The player controller holds

@@ -146,9 +146,9 @@ export default class Main {
     }
 
     /** Chunk bytes by content version over HTTP (cacheable, immutable per version). */
-    async fetchChunk(index, version) {
+    async fetchChunk(key, version) {
         let protocol = location.protocol === 'https:' ? 'https:' : 'http:';
-        let res = await fetch(`${protocol}//${PARTYKIT_HOST}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${index}?v=${version}`);
+        let res = await fetch(`${protocol}//${PARTYKIT_HOST}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${key}?v=${version}`);
         if(res.status === 204) return null;
         if(!res.ok) throw new Error('HTTP ' + res.status);
         return new Uint8Array(await res.arrayBuffer());
@@ -161,7 +161,7 @@ export default class Main {
     updateFromServer(event) {
         if(event.data instanceof ArrayBuffer) {
             let frame = unpackChunkFrame(event.data);
-            if(frame) this.terrain.setChunk(frame.index, frame.bytes, frame.version);
+            if(frame) this.terrain.setChunk(frame.key, frame.bytes, frame.version);
             return;
         }
         if(typeof event.data !== 'string' || !event.data.startsWith("{")) return;
