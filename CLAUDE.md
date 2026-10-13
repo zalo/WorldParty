@@ -52,7 +52,7 @@ The world is a sparse grid of 10-unit chunks keyed `"x,y,z"` (chunk x covers [10
 
 ### World Import
 
-`tools/import-world.mjs` turns any GLB into terrain without assuming watertight or consistently oriented input. It reads geometry and base colours with a minimal GLB parser, builds a three-mesh-bvh signed distance field (default `shell` mode: solid within 0.2 m of any surface, so walls get thickness; `signed` uses ray parity for closed meshes), marches it with `Manifold.levelSet`, simplifies, splits by exact chunk-cube intersection, picks each triangle's material from the nearest source triangle, and writes `{world, chunks: {key: {version, bytes}}}`. With the default floor, the model's base sits on implicit rock. The client uploads manifests in `import_begin` / `import_chunks` / `import_end` messages.
+`tools/import-world.mjs` turns any GLB into terrain without assuming watertight or consistently oriented input. It reads geometry and base colours with a minimal GLB parser, builds a three-mesh-bvh signed distance field (`--mode shell`, the default: solid within 0.2 m of any surface, so walls get thickness; `winding`: generalized winding number >= 0.5 with a fast far-field dipole tree, fills closed-ish volumes despite holes and flipped faces; `both`: their union; `parity`: ray parity, closed meshes only), marches it with `Manifold.levelSet`, simplifies, splits by exact chunk-cube intersection, picks each triangle's material from the nearest source triangle, and writes `{world, chunks: {key: {version, bytes}}}`. With the default floor, the model's base sits on implicit rock. The client uploads manifests in `import_begin` / `import_chunks` / `import_end` messages.
 
 ### Networking Protocol
 
