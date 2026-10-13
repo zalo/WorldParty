@@ -150,6 +150,16 @@ export default class Main {
         this.terrainBatch = this.terrain.batch; // raycast target for tools
     }
 
+    /** Probe grid follows the world bounds and rebakes around every chunk change. */
+    attachProbes(probes) {
+        const CHUNK = 10;
+        const bounds = (w) => ({ min: new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), max: new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK)) });
+        let b = bounds(this.terrain.world);
+        probes.setBounds(b.min, b.max);
+        this.terrain.onWorldChanged = (w) => { let nb = bounds(w); probes.setBounds(nb.min, nb.max); };
+        this.terrain.onChunkChanged = (key) => probes.markDirty(this.terrain.bbox(key));
+    }
+
     /** Upload a world manifest written by tools/import-world.mjs to the room, in batches under the message limit. */
     async importWorld(url) {
         let manifest = await (await fetch(url)).json();

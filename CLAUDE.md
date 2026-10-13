@@ -34,6 +34,7 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 ### Key Modules
 
 - **`src/World.js`** - Three.js WebGPU renderer, camera, sun light, SSGI + TRAA post-processing pipeline (ACES tone mapping, exposure 0.55), and the sky setup.
+- **`src/client/ProbeLighting.js`** - Irradiance probe grid (three `LightProbeGrid`, WebGPU only) over the world bounds, baked on the GPU a few probes per frame; `TerrainMirror.onChunkChanged` marks the probes around a changed chunk dirty so destruction rebakes only locally. `?probes=0` disables it. With probes on, `scene.environmentIntensity` is lowered to 0.3 so the sky's diffuse light is not counted twice.
 - **`src/sky/`** - Physically based sky ported from tidewater's three.js/TSL version (commit `3dd589b` there): `Atmosphere` (Hillaire LUTs in compute, sun transmittance / sky irradiance readback), `Sky` (sun disk, stars, moon; no clouds yet), `Environment` (progressive cube capture + PMREM into `scene.environment`), `DayCycle` (time of day, sun direction, key light colour; `?time=<hours>`, `?daylength=<minutes>`). Needs the WebGPU backend; otherwise `World` falls back to the static skybox image and a hemisphere light.
 - **`src/PlayerController.js`** - First-person capsule player with BVH collision against terrain and ECS body meshes. WASD + PointerLock on desktop, nipplejs joysticks on mobile.
 - **`src/terrain/grid.js`** - Sparse chunk grid shared by server and client: keys, world config (bounds + implicit rock box), neighbour lookup, box queries.

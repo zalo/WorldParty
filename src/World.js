@@ -4,6 +4,7 @@ import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import { DayCycle } from './sky/DayCycle.js';
+import { ProbeLighting } from './client/ProbeLighting.js';
 
 /** The fundamental set up and animation structures for 3D Visualization */
 export default class World {
@@ -133,6 +134,12 @@ export default class World {
         this.renderer.init().then(() => {
             if(DayCycle.supported(this.renderer)) {
                 this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
+                if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0')) {
+                    this.probes = new ProbeLighting(this.renderer, this.scene, { spacing: this.isMobile ? 8 : 5 });
+                    // the probes carry the sky's diffuse light; keep the environment map for reflections
+                    this.scene.environmentIntensity = 0.3;
+                    mainObject.attachProbes?.(this.probes);
+                }
                 return;
             }
             console.warn('DayCycle needs WebGPU; using the static skybox');
@@ -151,6 +158,7 @@ export default class World {
     /** Once per frame before rendering. */
     update(dt) {
         if(this.dayCycle) this.dayCycle.update(dt, this.camera);
+        if(this.probes) this.probes.update();
     }
 
     /** **INTERNAL**: This function recalculates the viewport based on the new window size. */

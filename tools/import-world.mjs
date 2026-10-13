@@ -12,10 +12,14 @@
  * chunk faces coincide and the server's connectivity solver works unchanged.
  *
  * Modes:
- *   shell  (default) solid = within `shell` metres of any surface. Robust for
- *          anything; walls and floors get real thickness.
- *   signed solid = inside by ray-parity vote (3 directions). Needs closed input.
- *   both   union of the two.
+ *   shell   (default) solid = within `shell` metres of any surface. Robust for
+ *           anything; walls and floors get real thickness.
+ *   winding solid = generalized winding number >= 0.5 (Jacobson 2013, with the
+ *           far-field dipole approximation of Barill 2018). Fills closed-ish
+ *           volumes even with holes, flipped faces and self-intersections;
+ *           open sheets get nothing, so pair it with the shell (`both`).
+ *   both    union of shell and winding.
+ *   parity  solid = inside by ray-parity vote (3 directions). Needs closed input.
  *
  * Materials: every output triangle takes the palette colour nearest to the base
  * colour of the source material under its centroid (textured materials fall back
@@ -119,6 +123,81 @@ function nearestMaterial(r, g, b) {
     return best;
 }
 
+// ---- generalized winding number over a triangle soup -------------------------
+// Exact solid angles per triangle near the query point, a first-order dipole per cluster far
+// from it (Barill et al. 2018). Clusters are a median-split tree over triangle centroids.
+class WindingNumber {
+    constructor(soup, leafSize = 16, beta = 2.0) {
+        this.beta = beta;
+        let n = soup.length / 9;
+        this.soup = soup;
+        this.cent = new Float64Array(n * 3);
+        this.norm = new Float64Array(n * 3); // area-weighted normal (0.5 * cross)
+        for(let t = 0; t < n; t++) {
+            let o = t * 9;
+            let ax = soup[o], ay = soup[o + 1], az = soup[o + 2], bx = soup[o + 3], by = soup[o + 4], bz = soup[o + 5], cx = soup[o + 6], cy = soup[o + 7], cz = soup[o + 8];
+            this.cent[t * 3] = (ax + bx + cx) / 3; this.cent[t * 3 + 1] = (ay + by + cy) / 3; this.cent[t * 3 + 2] = (az + bz + cz) / 3;
+            let ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx - ax, vy = cy - ay, vz = cz - az;
+            this.norm[t * 3] = 0.5 * (uy * vz - uz * vy); this.norm[t * 3 + 1] = 0.5 * (uz * vx - ux * vz); this.norm[t * 3 + 2] = 0.5 * (ux * vy - uy * vx);
+        }
+        let order = Uint32Array.from({ length: n }, (_, i) => i);
+        this.root = this.build(order, 0, n, leafSize);
+    }
+    build(order, lo, hi, leafSize) {
+        // aggregate: normal sum, area-weighted centre, radius from the centre to the farthest vertex
+        let N = [0, 0, 0], C = [0, 0, 0], A = 0;
+        for(let i = lo; i < hi; i++) {
+            let t = order[i], a = Math.hypot(this.norm[t * 3], this.norm[t * 3 + 1], this.norm[t * 3 + 2]);
+            N[0] += this.norm[t * 3]; N[1] += this.norm[t * 3 + 1]; N[2] += this.norm[t * 3 + 2];
+            C[0] += a * this.cent[t * 3]; C[1] += a * this.cent[t * 3 + 1]; C[2] += a * this.cent[t * 3 + 2]; A += a;
+        }
+        if(A > 0) { C[0] /= A; C[1] /= A; C[2] /= A; } else { let t = order[lo]; C = [this.cent[t * 3], this.cent[t * 3 + 1], this.cent[t * 3 + 2]]; }
+        let r2 = 0;
+        for(let i = lo; i < hi; i++) for(let k = 0; k < 3; k++) {
+            let o = order[i] * 9 + k * 3, dx = this.soup[o] - C[0], dy = this.soup[o + 1] - C[1], dz = this.soup[o + 2] - C[2];
+            r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
+        }
+        let node = { N, C, r: Math.sqrt(r2), lo, hi, order, left: null, right: null };
+        if(hi - lo <= leafSize) return node;
+        // split on the widest axis at the median centroid
+        let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        for(let i = lo; i < hi; i++) for(let k = 0; k < 3; k++) { let v = this.cent[order[i] * 3 + k]; if(v < mn[k]) mn[k] = v; if(v > mx[k]) mx[k] = v; }
+        let axis = 0; for(let k = 1; k < 3; k++) if(mx[k] - mn[k] > mx[axis] - mn[axis]) axis = k;
+        let sub = order.subarray(lo, hi);
+        sub.sort((a, b) => this.cent[a * 3 + axis] - this.cent[b * 3 + axis]);
+        let mid = (lo + hi) >> 1;
+        node.left = this.build(order, lo, mid, leafSize);
+        node.right = this.build(order, mid, hi, leafSize);
+        return node;
+    }
+    /** Exact solid angle of triangle t seen from p (Van Oosterom & Strackee 1983), /4pi. */
+    triangle(t, px, py, pz) {
+        let o = t * 9, s = this.soup;
+        let ax = s[o] - px, ay = s[o + 1] - py, az = s[o + 2] - pz;
+        let bx = s[o + 3] - px, by = s[o + 4] - py, bz = s[o + 5] - pz;
+        let cx = s[o + 6] - px, cy = s[o + 7] - py, cz = s[o + 8] - pz;
+        let la = Math.hypot(ax, ay, az), lb = Math.hypot(bx, by, bz), lc = Math.hypot(cx, cy, cz);
+        let num = ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+        let den = la * lb * lc + (ax * bx + ay * by + az * bz) * lc + (bx * cx + by * cy + bz * cz) * la + (cx * ax + cy * ay + cz * az) * lb;
+        return Math.atan2(num, den) / (2 * Math.PI);
+    }
+    at(px, py, pz) { return this.node(this.root, px, py, pz); }
+    node(nd, px, py, pz) {
+        let dx = nd.C[0] - px, dy = nd.C[1] - py, dz = nd.C[2] - pz;
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if(d2 > (this.beta * nd.r) ** 2) {
+            // far field: the cluster acts as one dipole
+            return (nd.N[0] * dx + nd.N[1] * dy + nd.N[2] * dz) / (4 * Math.PI * d2 * Math.sqrt(d2));
+        }
+        if(!nd.left) {
+            let w = 0;
+            for(let i = nd.lo; i < nd.hi; i++) w += this.triangle(nd.order[i], px, py, pz);
+            return w;
+        }
+        return this.node(nd.left, px, py, pz) + this.node(nd.right, px, py, pz);
+    }
+}
+
 // ---- main ------------------------------------------------------------------
 let t0 = Date.now();
 let { positions, materials } = readGLB(file);
@@ -135,6 +214,13 @@ let bb = geom.boundingBox;
 console.log(`model: ${positions.length / 9} triangles, scale ${scale.toFixed(4)}, bounds ${bb.min.toArray().map(v => v.toFixed(1))} .. ${bb.max.toArray().map(v => v.toFixed(1))}`);
 
 let bvh = new MeshBVH(geom);
+const winding = (mode === 'winding' || mode === 'both') ? new WindingNumber(positions) : null;
+if(winding) {
+    // self-test on a unit cube with outward faces
+    let cube = new THREE.BoxGeometry(1, 1, 1).toNonIndexed().attributes.position.array;
+    let wn = new WindingNumber(cube);
+    console.log(`winding self-test: centre ${wn.at(0, 0, 0).toFixed(3)} (expect 1), outside ${wn.at(2, 0, 0).toFixed(3)} (expect 0)`);
+}
 const target = {}, pt = new THREE.Vector3(), ray = new THREE.Ray();
 const dirs = [new THREE.Vector3(1, 0.13, 0.07).normalize(), new THREE.Vector3(-0.1, 1, 0.2).normalize(), new THREE.Vector3(0.2, -0.3, 1).normalize()];
 function inside(p) {
@@ -156,8 +242,9 @@ function sdf([x, y, z]) {
     let d = target.distance;
     let v;
     if(mode === 'shell') v = shell - d;
-    else if(mode === 'signed') v = inside(pt) ? d : -d;
-    else v = (d < shell || inside(pt)) ? Math.max(d, shell - d) : -d;
+    else if(mode === 'parity') v = inside(pt) ? d : -d;
+    else if(mode === 'winding') v = winding.at(x, y, z) >= 0.5 ? d : -d;
+    else v = (d < shell) ? shell - d : (winding.at(x, y, z) >= 0.5 ? d : -d);
     return Math.max(v, fl);
 }
 

@@ -34,6 +34,8 @@ export class TerrainMirror {
         this.pending = new Map();   // key -> version being fetched
         this.boxes = new Map();     // key -> Box3 (cached)
         this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
+        this.onChunkChanged = null; // (key) => void, after a chunk's geometry is rebuilt
+        this.onWorldChanged = null; // (world) => void, after a new world config is adopted
         this.createBatch();
     }
 
@@ -53,7 +55,10 @@ export class TerrainMirror {
     /** Adopt the server's world config (bounds, implicit rock). */
     configure(world) {
         let w = sanitizeWorld(world);
-        if(w) this.world = w;
+        if(!w) return;
+        let changed = JSON.stringify(w) !== JSON.stringify(this.world);
+        this.world = w;
+        if(changed) this.onWorldChanged?.(w);
     }
 
     /** World-space bounds of a chunk. */
@@ -94,6 +99,7 @@ export class TerrainMirror {
         if(rock) geometry = this.rockFaces(key, rock);
         else if(mesh) geometry = this.culledGeometry(key, mesh, this.cullMask.get(key) || 0);
         this.setGeometry(key, geometry);
+        this.onChunkChanged?.(key);
     }
 
     /** Reconcile with an update's {world, chunks, rock, cull} maps; fetch what we lack. */
