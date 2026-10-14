@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 let bundle = await import('./server.bundle.mjs');
 let { decodeChunkMesh } = await import('../../src/net/codec.js');
 let m = JSON.parse(readFileSync('assets/worlds/castle-exact.json', 'utf8'));
-let server = new bundle.default({ id: 'x', broadcast() {}, storage: { async get() {}, async put() {}, async delete() {}, async list() { return new Map(); } } });
+let server = new bundle.WorldParty({ id: { name: 'x' }, storage: { async get() {}, async put() {}, async delete() {}, async list() { return new Map(); } } });
 clearInterval(server.interval);
 await server.onStart();
 let { physics } = server, px = physics.px;

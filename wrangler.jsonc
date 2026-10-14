@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "worldparty",
+  "main": "src/server.js",
+  "compatibility_date": "2025-10-01",
+  "observability": { "enabled": true },
+  // One Durable Object class per room; the binding name `Main` is what clients address as /parties/main/<room>.
+  "durable_objects": {
+    "bindings": [{ "name": "Main", "class_name": "WorldParty" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorldParty"] }],
+  // The website: `npm run build` assembles public/ (index.html, assets/, dist/main.js).
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/parties/*"]
+  }
+}

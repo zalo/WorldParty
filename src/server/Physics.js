@@ -11,6 +11,7 @@ import PhysXInit from '../../assets/physx/physx-js-webidl.mjs';
 import physxWasm from '../../assets/physx/physx-js-webidl.wasm';
 import { PROP_HULLS } from '../props/PropHulls.js';
 import { decodeSoup } from '../net/codec.js';
+import { chunkCenter, HALF } from '../terrain/grid.js';
 
 const BODY_DENSITY = 500.0;
 const REPLICATE_EVERY_N_TICKS = 2; // 30Hz tick -> 15Hz body replication
@@ -28,12 +29,17 @@ export class Physics {
         this.chunkActors = {};
         this.tick = 0;
         this.lastTime = Date.now();
+        this.wasmMemory = null;
     }
+
+    /** Size of PhysX's WASM heap in MB. */
+    heapMB() { return this.wasmMemory ? this.wasmMemory.buffer.byteLength / 1048576 : 0; }
 
     async init() {
         this.px = await PhysXInit({
             instantiateWasm: (imports, callback) => {
                 const instance = new WebAssembly.Instance(physxWasm, imports);
+                this.wasmMemory = Object.values(instance.exports).find(e => e instanceof WebAssembly.Memory);
                 callback(instance);
                 return instance.exports;
             }
@@ -205,7 +211,7 @@ export class Physics {
     /** Static triangle-mesh collider for a CSG-modified chunk (world-space indexed mesh), or none if `mesh` is null. */
     setChunkCollider(index, mesh) {
         this._removeChunkActor(index);
-        if(!mesh) { this.wakeAll(); return; }
+        if(!mesh) { this.wakeNear(index); return; }
         let px = this.px;
         let { positions, indices } = mesh;
         let numVerts = positions.length / 3;
@@ -222,13 +228,26 @@ export class Physics {
         actor.attachShape(this._shape(new px.PxTriangleMeshGeometry(triMesh)));
         this.scene.addActor(actor);
         this.chunkActors[index] = actor;
-        this.wakeAll();
+        this.wakeNear(index);
     }
 
+    /** Colliders also go away when a region has nothing awake in it; that must not wake what rests on them
+     *  (wakeOnLostTouch = false), or every sleeping body would keep its terrain loaded forever. */
     _removeChunkActor(index) {
         if(this.chunkActors[index]) {
-            this.scene.removeActor(this.chunkActors[index]);
+            this.scene.removeActor(this.chunkActors[index], false);
             delete this.chunkActors[index];
+        }
+    }
+
+    /** Wake the bodies in or just around a chunk whose collider changed. */
+    wakeNear(key, margin = 2) {
+        if(!this._world) return;
+        let c = chunkCenter(key), r = HALF + margin;
+        for(let [, pb, tf] of this._world.each('$PxBody', 'Transform')) {
+            let p = tf.position;
+            if(Math.abs(p.x - c.x) > r || Math.abs(p.y - c.y) > r || Math.abs(p.z - c.z) > r) continue;
+            if(pb.actor.isSleeping()) pb.actor.wakeUp();
         }
     }
 
@@ -369,11 +388,6 @@ export class Physics {
         world.set(id, 'RigidBody', { frozen });
         pb.actor.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, frozen);
         if(!frozen) pb.actor.wakeUp();
-    }
-
-    wakeAll() {
-        // Called after terrain changes; cheap enough at sandbox scale.
-        if(this._world) for(let [, pb] of this._world.each('$PxBody')) if(pb.actor.isSleeping()) pb.actor.wakeUp();
     }
 
     /** Step the scene and write poses back into Transform. Returns true if any body is awake. */

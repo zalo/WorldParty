@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 
 let [manifestPath = 'assets/worlds/castle-exact.json', wantKey = null, carves = '3'] = process.argv.slice(2);
 let bundle = await import('./server.bundle.mjs');
-let PartyServer = bundle.default;
+let PartyServer = bundle.WorldParty;
 let { encodeSoup, decodeChunkMesh } = await import('../../src/net/codec.js');
 let { coords, chunkCenter } = await import('../../src/terrain/grid.js');
 
@@ -17,9 +17,8 @@ for(let key in manifest.chunks) {
     store.set('chunk:' + key, { key, version: c.version, bytes: c.bytes ? new Uint8Array(Buffer.from(c.bytes, 'base64')) : null });
 }
 store.set('world', manifest.world);
-let room = {
-    id: 'profile',
-    broadcast() {},
+let room = { // the Durable Object context
+    id: { name: 'profile' },
     storage: {
         async get(k) { return store.get(k); },
         async put(k, v) { if(typeof k === 'string') store.set(k, v); else for(let kk in k) store.set(kk, k[kk]); },

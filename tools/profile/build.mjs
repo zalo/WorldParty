@@ -7,6 +7,7 @@ import path from 'node:path';
 const wasmAsModule = {
     name: 'wasm-as-module',
     setup(b) {
+        b.onResolve({ filter: /^partyserver$/ }, () => ({ path: path.resolve('tools/profile/partyserver-stub.mjs') }));
         b.onResolve({ filter: /\.wasm$/ }, args => ({ path: path.resolve(args.resolveDir, args.path), namespace: 'wasm-module' }));
         b.onLoad({ filter: /.*/, namespace: 'wasm-module' }, args => ({
             contents: `import { readFileSync } from 'node:fs'; export default new WebAssembly.Module(readFileSync(${JSON.stringify(args.path)}));`,

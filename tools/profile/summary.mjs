@@ -6,7 +6,7 @@ let { decodeChunkMesh } = await import('../../src/net/codec.js');
 let { chunkCenter, CHUNK_SIZE } = await import('../../src/terrain/grid.js');
 let m = JSON.parse(readFileSync(process.argv[2] || 'assets/worlds/castle-exact.json', 'utf8'));
 let keys = process.argv.slice(3); if(!keys.length) keys = ['1,0,-3'];
-let server = new bundle.default({ id: 'x', broadcast() {}, storage: { async get() {}, async put() {}, async delete() {}, async list() { return new Map(); } } });
+let server = new bundle.WorldParty({ id: { name: 'x' }, storage: { async get() {}, async put() {}, async delete() {}, async list() { return new Map(); } } });
 clearInterval(server.interval);
 await server.onStart();
 let { terrain, connectivity } = server;

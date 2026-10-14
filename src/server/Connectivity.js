@@ -30,7 +30,7 @@ export const SKY = 'sky', GROUND = 'ground';
 
 const FULL = new Uint8Array(CELLS).fill(1);
 const ALL_FACES = 63;
-const ROCK = { rock: true, solid: [{ manifold: null, masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES, volume: CHUNK_SIZE ** 3 }], air: [] };
+const ROCK = { rock: true, solid: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES, volume: CHUNK_SIZE ** 3 }], air: [] };
 const OPEN_AIR = { implicit: true, air: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES }], solid: [] }; // unstored air: always sky
 const EMPTY_AIR = { air: [{ masks: [FULL, FULL, FULL, FULL, FULL, FULL], touch: ALL_FACES }], solid: [] };                // stored, carved away: a real island
 
@@ -102,24 +102,27 @@ export class Connectivity {
     summary(key) {
         let c = this.terrain.chunks[key];
         if(!c) return isRockKey(this.terrain.world, key) ? ROCK : OPEN_AIR;
-        if(!c.manifold) return EMPTY_AIR;
+        if(!c.bytes) return EMPTY_AIR;
         let cached = this.cache.get(key);
         if(cached && cached.version === c.version) return cached;
-        if(cached) this.dispose(cached);
+        let manifold = this.terrain.manifoldOf(key);
+        if(!manifold) return EMPTY_AIR; // corrupt chunk, dropped just now
         let center = chunkCenter(key);
-        let solid = c.manifold.decompose().map(m => this.island(m, center, true));
+        // Footprints only: island manifolds are not kept (memory); settle re-decomposes the few it needs,
+        // in this same order, since decompose is deterministic for a given mesh.
+        let solid = manifold.decompose().map(m => { let isl = this.island(m, center); m.delete(); return isl; });
         let cube = this.terrain.withMaterial(this.M.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(center.x, center.y, center.z), 0);
-        let airManifold = cube.subtract(c.manifold);
+        let airManifold = cube.subtract(manifold);
         cube.delete();
-        let air = airManifold.decompose().map(m => { let isl = this.island(m, center, false); m.delete(); return isl; });
+        let air = airManifold.decompose().map(m => { let isl = this.island(m, center); m.delete(); return isl; });
         airManifold.delete();
         let summary = { version: c.version, solid, air };
         this.cache.set(key, summary);
         return summary;
     }
 
-    /** Face footprints of one island. Keeps the manifold alive when `keep` (solid islands may become fragments). */
-    island(m, center, keep) {
+    /** Face footprints of one island (the manifold is not retained). */
+    island(m, center) {
         let mesh = m.getMesh();
         let np = mesh.numProp, props = mesh.vertProperties, tri = mesh.triVerts;
         // positions only (manifolds carry UVs as extra properties)
@@ -143,14 +146,12 @@ export class Connectivity {
             }
             if(mask) { masks[f] = mask; touch |= 1 << f; }
         }
-        return { manifold: keep ? m : null, masks, touch, volume: m.volume() };
+        return { masks, touch, volume: m.volume() };
     }
 
-    dispose(summary) { for(let s of summary.solid) if(s.manifold) s.manifold.delete(); }
+    invalidate(key) { this.cache.delete(key); }
 
-    invalidate(key) { let c = this.cache.get(key); if(c) { this.dispose(c); this.cache.delete(key); } }
-
-    clear() { for(let c of this.cache.values()) this.dispose(c); this.cache.clear(); this.uf = new UnionFind(); this.touch = new Map(); this.keys = new Set(); }
+    clear() { this.cache.clear(); this.uf = new UnionFind(); this.touch = new Map(); this.keys = new Set(); }
 
     // ---- global solve ------------------------------------------------------
 

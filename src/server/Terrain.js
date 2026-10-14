@@ -11,7 +11,11 @@
  *  the world config says which unstored chunks are implicit rock.
  *
  *  Booleans here are purely local to a chunk. Which solid is grounded and
- *  which hollows are reachable is decided afterwards by Connectivity. */
+ *  which hollows are reachable is decided afterwards by Connectivity.
+ *
+ *  Bytes are the source of truth; only a few recently used chunks keep their
+ *  Manifold object alive (RESIDENT_MANIFOLDS), everything else is rebuilt on
+ *  demand through manifoldOf(). */
 import * as THREE from 'three';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ADDITION, INTERSECTION, SUBTRACTION } from 'three-bvh-csg';
@@ -47,6 +51,10 @@ export function interleaveProps(positions, uvs) {
     return out;
 }
 const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
+/** Chunk manifolds kept alive in WASM memory. A Durable Object has 128 MB in total and a dense chunk's
+ *  manifold costs a few MB, so only the most recently used chunks stay resident; the rest are rebuilt
+ *  from their bytes when a carve or a connectivity summary needs them. */
+export const RESIDENT_MANIFOLDS = 6;
 
 export class Terrain {
     constructor() {
@@ -54,15 +62,22 @@ export class Terrain {
         this.chunks = {};
         /** @type {Set<string>} chunk keys changed since last takeDirty() */
         this.dirty = new Set();
+        /** @type {string[]} keys whose manifold is resident, least recently used first */
+        this.resident = [];
         this.manifold = null;
+        this.wasmMemory = null;
         this.world = DEFAULT_WORLD;
     }
+
+    /** Size of Manifold's WASM heap in MB (grows with peak use, never shrinks). */
+    heapMB() { return this.wasmMemory ? this.wasmMemory.buffer.byteLength / 1048576 : 0; }
 
     async init(storedChunks = {}, world = null) {
         this.world = sanitizeWorld(world) || DEFAULT_WORLD;
         this.manifold = await M({
             instantiateWasm: (imports, callback) => {
                 const instance = new WebAssembly.Instance(manMod, imports);
+                this.wasmMemory = Object.values(instance.exports).find(e => e instanceof WebAssembly.Memory); // for memory diagnostics (the heap never shrinks)
                 callback(instance);
                 return instance.exports;
             }
@@ -77,32 +92,55 @@ export class Terrain {
                 this.loadChunk(key, c.bytes, c.version);
             } else if(c.data) {
                 // Legacy gzip+base64 triangle soup
-                let manifold = this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL);
-                this.chunks[key] = { key, version: '', bytes: null, manifold };
-                this._refresh(key);
-                this.dirty.add(key);
+                this.setManifold(key, this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL));
             } else {
                 this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
             }
         }
     }
 
-    /** Install a chunk from encoded bytes (storage or import); the version is the content hash. */
+    /** Install a chunk from encoded bytes (storage or import); the version is the content hash. The manifold
+     *  is built lazily by manifoldOf(). */
     loadChunk(key, bytes, version = null) {
         bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-        let mesh = decodeChunkMesh(bytes);
+        this._evict(key);
+        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold: null };
+    }
+
+    /** The manifold of a stored chunk (null if the chunk is empty), rebuilt from its bytes if it is not
+     *  resident. Owned by the chunk record: do not delete it, and do not hold it across other chunk lookups. */
+    manifoldOf(key) {
         let c = this.chunks[key];
-        if(c && c.manifold) c.manifold.delete();
-        let manifold;
-        try { manifold = this.meshToManifold(mesh.positions, mesh.indices, mesh.materials, mesh.uvs); }
-        catch(e) {
-            // A chunk that cannot be rebuilt as a solid must not take the room down; it becomes empty.
-            console.warn(`chunk ${key}: ${e.message}; dropped`);
-            this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
-            this.dirty.add(key);
-            return;
+        if(!c || !c.bytes) return null;
+        if(!c.manifold) {
+            let mesh = decodeChunkMesh(c.bytes);
+            try { c.manifold = this.meshToManifold(mesh.positions, mesh.indices, mesh.materials, mesh.uvs); }
+            catch(e) {
+                // A chunk that cannot be rebuilt as a solid must not take the room down; it becomes empty.
+                console.warn(`chunk ${key}: ${e.message}; dropped`);
+                this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
+                this.dirty.add(key);
+                return null;
+            }
         }
-        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold };
+        this._touch(key);
+        return c.manifold;
+    }
+
+    /** Mark a chunk's manifold as just used and drop the least recently used ones beyond the budget. */
+    _touch(key) {
+        let i = this.resident.indexOf(key);
+        if(i >= 0) this.resident.splice(i, 1);
+        this.resident.push(key);
+        while(this.resident.length > RESIDENT_MANIFOLDS) this._evict(this.resident[0]);
+    }
+
+    /** Free a chunk's manifold (its bytes remain the source of truth). */
+    _evict(key) {
+        let i = this.resident.indexOf(key);
+        if(i >= 0) this.resident.splice(i, 1);
+        let c = this.chunks[key];
+        if(c && c.manifold) { c.manifold.delete(); c.manifold = null; }
     }
 
     /** Every chunk that can carry solid: implicit rock plus everything stored. */
@@ -114,11 +152,11 @@ export class Terrain {
 
     /** Replace a chunk's manifold (takes ownership; null = explicitly empty). */
     setManifold(key, manifold) {
-        let c = this.chunks[key];
-        if(c && c.manifold) c.manifold.delete();
+        this._evict(key);
         this.chunks[key] = { key, version: '', bytes: null, manifold };
         this._refresh(key);
         this.dirty.add(key);
+        if(this.chunks[key].manifold) this._touch(key);
     }
 
     /** A fresh copy of the implicit rock cube for a chunk (caller owns it). */
@@ -129,8 +167,7 @@ export class Terrain {
 
     /** Current manifold for a chunk, materializing the implicit default. Caller must not delete it. */
     currentManifold(key) {
-        let c = this.chunks[key];
-        if(c) return c.manifold;
+        if(this.chunks[key]) return this.manifoldOf(key);
         return isRockKey(this.world, key) ? this.rockManifold(key) : null;
     }
 
@@ -158,6 +195,7 @@ export class Terrain {
     clear() {
         for(let key in this.chunks) if(this.chunks[key].manifold) this.chunks[key].manifold.delete();
         this.chunks = {};
+        this.resident = [];
         this.dirty.clear();
     }
 

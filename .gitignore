@@ -106,3 +106,5 @@ typings/
 dist/
 .partykit
 tools/profile/server.bundle.mjs
+public/
+.wrangler/

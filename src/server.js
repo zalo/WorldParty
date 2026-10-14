@@ -1,10 +1,9 @@
 /* eslint-env browser */
 // @ts-check
-/** @typedef {import("partykit/server").Room} Room */
-/** @typedef {import("partykit/server").Server} Server */
-/** @typedef {import("partykit/server").Connection} Connection */
-/** @typedef {import("partykit/server").ConnectionContext} ConnectionContext */
+/** @typedef {import("partyserver").Connection} Connection */
+/** @typedef {import("partyserver").ConnectionContext} ConnectionContext */
 
+import { Server, routePartykitRequest } from 'partyserver';
 import { World } from './ecs/World.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
@@ -26,11 +25,13 @@ const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
 const vec3 = (v, d = { x: 0, y: 0, z: 0 }) => v ? { x: num(v.x, d.x), y: num(v.y, d.y), z: num(v.z, d.z) } : { ...d };
 const quat = (q) => q ? { x: num(q.x), y: num(q.y), z: num(q.z), w: num(q.w, 1) } : { x: 0, y: 0, z: 0, w: 1 };
 
-/** @implements {Server} */
-class PartyServer {
-  /** @param {Room} room */
-  constructor(room) {
-    this.room = room;
+/** One room: a Durable Object bound as `Main`, so clients reach it at /parties/main/<room>. The simulation
+ *  lives in memory and ticks on a timer, so the object must not hibernate. */
+export class WorldParty extends Server {
+  static options = { hibernate: false };
+
+  constructor(ctx, env) {
+    super(ctx, env);
     this.world = new World();
     this.physics = new Physics();
     this.terrain = new Terrain();
@@ -68,12 +69,12 @@ class PartyServer {
   // ---- lifecycle ----------------------------------------------------------
 
   async onStart() {
-    let [storedChunks, storedEntities, storedWorld] = await Promise.all([this.loadPrefixed('chunk:'), this.loadPrefixed('ent:'), this.room.storage.get('world')]);
+    let [storedChunks, storedEntities, storedWorld] = await Promise.all([this.loadPrefixed('chunk:'), this.loadPrefixed('ent:'), this.ctx.storage.get('world')]);
     await this.joinChunkParts(storedChunks);
 
     // Legacy single-blob layout
-    let legacyChunks = await this.room.storage.get("chunks");
-    if(legacyChunks) { Object.assign(storedChunks, legacyChunks); await this.room.storage.delete("chunks"); }
+    let legacyChunks = await this.ctx.storage.get("chunks");
+    if(legacyChunks) { Object.assign(storedChunks, legacyChunks); await this.ctx.storage.delete("chunks"); }
     // Legacy numeric chunk indices (x*100+y*10+z over a 10^3 grid centred on the origin) -> "x,y,z" keys
     for(let k of Object.keys(storedChunks)) {
       if(!/^\d+$/.test(k)) continue;
@@ -104,19 +105,19 @@ class PartyServer {
     this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
     this.ready = true;
     this.resolveReady();
-    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
+    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders; wasm heaps: manifold ${this.terrain.heapMB().toFixed(0)} MB, physx ${this.physics.heapMB().toFixed(0)} MB`);
   }
 
   async loadPrefixed(prefix) {
     let out = {};
-    let map = await this.room.storage.list({ prefix });
+    let map = await this.ctx.storage.list({ prefix });
     for(let [key, value] of map) out[key.slice(prefix.length)] = value;
     return out;
   }
 
   /** Chunk records whose bytes were split into parts get them joined back. */
   async joinChunkParts(storedChunks) {
-    let parts = await this.room.storage.list({ prefix: 'chunkpart:' });
+    let parts = await this.ctx.storage.list({ prefix: 'chunkpart:' });
     for(let k in storedChunks) {
       let c = storedChunks[k];
       if(!c || !c.parts) continue;
@@ -135,39 +136,72 @@ class PartyServer {
   /** Solve connectivity and turn every unsupported solid into fragment entities. Returns the number made. */
   settleTerrain() {
     let made = 0;
+    let M = this.terrain.manifold.Manifold;
     for(let pass = 0; pass < 4; pass++) {
       this.connectivity.solve();
       let floating = this.connectivity.floatingComponents();
       if(!floating.length) break;
-      let touched = new Map(); // key -> Set of island k removed
+      floating = floating.filter(comp => {
+        if(comp.volume <= MAX_FRAGMENT_VOLUME) return true;
+        console.log(`Keeping unsupported terrain of volume ${comp.volume.toFixed(0)} (too large to drop)`);
+        return false;
+      });
+      // Which islands leave each chunk, and how many components still need the chunk's islands. The
+      // summaries keep only footprints, so a chunk is decomposed again (same order: decompose is
+      // deterministic for a mesh) when first needed, and rebuilt and freed as soon as its last component
+      // is done, so memory holds a component's chunks at a time rather than every touched chunk.
+      let removed = new Map(), usesLeft = new Map(); // key -> Set of island k; key -> count
       for(let comp of floating) {
-        if(comp.volume > MAX_FRAGMENT_VOLUME) { console.log(`Keeping unsupported terrain of volume ${comp.volume.toFixed(0)} (too large to drop)`); continue; }
-        for(let { key, k } of comp.islands) { if(!touched.has(key)) touched.set(key, new Set()); touched.get(key).add(k); }
-        if(comp.volume < DUST_VOLUME) continue;
-        let M = this.terrain.manifold.Manifold;
-        let pieces = comp.islands.map(({ key, island }) => island.manifold || this.terrain.rockManifold(key));
-        let merged = pieces.length === 1 ? M.compose([pieces[0]]) : M.union(pieces);
-        for(let i = 0; i < pieces.length; i++) if(!comp.islands[i].island.manifold) pieces[i].delete(); // materialized rock copies
-        let comps = this.terrain.fragmentComponents(merged);
-        merged.delete();
-        if(comps) { this.world.create(comps); made++; }
+        for(let { key, k } of comp.islands) { if(!removed.has(key)) removed.set(key, new Set()); removed.get(key).add(k); }
+        for(let key of new Set(comp.islands.map(i => i.key))) usesLeft.set(key, (usesLeft.get(key) || 0) + 1);
       }
-      // Rebuild each touched chunk from the islands that stay
-      for(let [key, removed] of touched) {
-        let S = this.connectivity.summary(key);
-        let keep = S.solid.filter((_, k) => !removed.has(k)).map(s => s.manifold);
-        this.terrain.setManifold(key, keep.length ? this.terrain.manifold.Manifold.compose(keep) : null);
+      let parts = new Map(); // key -> Manifold[] | null (rock chunks have no record; their one island is the cube)
+      let partsOf = key => {
+        if(!parts.has(key)) {
+          let m = this.terrain.chunks[key] ? this.terrain.manifoldOf(key) : null;
+          let p = m ? m.decompose() : null;
+          let S = this.connectivity.summary(key);
+          if(p && p.length !== S.solid.length) console.warn(`chunk ${key}: ${p.length} islands now, ${S.solid.length} in its summary`);
+          parts.set(key, p);
+        }
+        return parts.get(key);
+      };
+      let release = key => { // rebuild the chunk from the islands that stay, free the rest
+        let p = partsOf(key), keep = (p || []).filter((_, k) => !removed.get(key).has(k));
+        this.terrain.setManifold(key, keep.length ? M.compose(keep) : null);
+        if(p) for(let m of p) m.delete();
+        parts.delete(key);
+      };
+      for(let comp of floating) {
+        let keys = new Set(comp.islands.map(i => i.key));
+        if(comp.volume >= DUST_VOLUME) {
+          let temps = [];
+          let pieces = comp.islands.map(({ key, k }) => {
+            let p = partsOf(key);
+            if(p && p[k]) return p[k];
+            let rock = this.terrain.rockManifold(key); temps.push(rock); return rock;
+          });
+          let merged = pieces.length === 1 ? M.compose([pieces[0]]) : M.union(pieces);
+          for(let t of temps) t.delete();
+          let comps = this.terrain.fragmentComponents(merged);
+          merged.delete();
+          if(comps) { this.world.create(comps); made++; }
+        }
+        for(let key of keys) { let n = usesLeft.get(key) - 1; usesLeft.set(key, n); if(n === 0) release(key); }
       }
       // Removing solid can merge hollows, so solve again; normally nothing is left floating.
     }
     return made;
   }
 
-  /** Chunks containing a player or a body, as a sorted key for change detection. */
+  /** Chunks containing a player or an awake body. Sleeping bodies do not keep terrain loaded or collided:
+   *  nothing can reach them except through an active region, and their chunks' colliders come back
+   *  (waking them) as soon as something does. */
   occupiedChunks() {
     let set = new Set();
     for(let [id, tf] of this.world.each('Transform')) {
-      if(this.world.has(id, 'Player') || this.world.has(id, 'RigidBody')) set.add(chunkAt(this.terrain.world, tf.position));
+      let rb = this.world.get(id, 'RigidBody');
+      if(this.world.has(id, 'Player') || (rb && !rb.sleeping)) set.add(chunkAt(this.terrain.world, tf.position));
     }
     return set;
   }
@@ -249,7 +283,7 @@ class PartyServer {
       Transform: Transform(),
     });
     conn.send(JSON.stringify(this.fullUpdate()));
-    console.log(`Connected: ${conn.id} room: ${this.room.id} url: ${new URL(ctx.request.url).pathname}`);
+    console.log(`Connected: ${conn.id} room: ${this.name} url: ${new URL(ctx.request.url).pathname}`);
   }
 
   /** @param {Connection} conn */
@@ -282,13 +316,13 @@ class PartyServer {
 
     if(players > 0) {
       if(this.tickCount % FULL_UPDATE_EVERY === 0) {
-        this.room.broadcast(JSON.stringify(this.fullUpdate()));
+        this.broadcast(JSON.stringify(this.fullUpdate()));
         this.world.takeDirty(); this.chunkDelta = null;
       } else if(this.world.hasDirty() || this.chunkDelta) {
         let { entities, removed } = this.world.takeDirty();
         let d = this.chunkDelta || {};
         this.chunkDelta = null;
-        this.room.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: d.chunks, rock: d.rock, cull: d.cull, serverTickMs: this.serverTickMs }));
+        this.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: d.chunks, rock: d.rock, cull: d.cull, serverTickMs: this.serverTickMs }));
       }
     }
 
@@ -330,9 +364,9 @@ class PartyServer {
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) {
       let batch = {};
       for(let k of keys.slice(i, i + STORAGE_BATCH)) batch[k] = puts[k];
-      await this.room.storage.put(batch);
+      await this.ctx.storage.put(batch);
     }
-    for(let i = 0; i < deletes.length; i += STORAGE_BATCH) await this.room.storage.delete(deletes.slice(i, i + STORAGE_BATCH));
+    for(let i = 0; i < deletes.length; i += STORAGE_BATCH) await this.ctx.storage.delete(deletes.slice(i, i + STORAGE_BATCH));
   }
 
   markChunkPersist(key) { (this.persistChunks ||= new Set()).add(key); }
@@ -366,7 +400,7 @@ class PartyServer {
     let st = this.sentStates.get(key), c = this.terrain.chunks[key];
     if(!st || st.version === undefined || !c || !c.bytes || this.pushed.get(key) === c.version) return;
     this.pushed.set(key, c.version);
-    this.room.broadcast(packChunkFrame(key, c.version, c.bytes));
+    this.broadcast(packChunkFrame(key, c.version, c.bytes));
   }
 
   /** Grounding, colliders and activity for every chunk carved since the last time. */
@@ -429,10 +463,10 @@ class PartyServer {
     for(let id of [...this.world.ids()]) if(!this.world.has(id, 'Player')) this.world.destroy(id);
     this.terrain.clear();
     this.terrain.world = world;
-    if(world === DEFAULT_WORLD) await this.room.storage.delete('world'); else await this.room.storage.put('world', world);
-    let keys = [...(await this.room.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.room.storage.list({ prefix: 'chunkpart:' })).keys(), ...(await this.room.storage.list({ prefix: 'ent:' })).keys()];
+    if(world === DEFAULT_WORLD) await this.ctx.storage.delete('world'); else await this.ctx.storage.put('world', world);
+    let keys = [...(await this.ctx.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'chunkpart:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'ent:' })).keys()];
     this.chunkParts = new Map();
-    for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
+    for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.ctx.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
     this.sentStates = new Map();
     this.pushed = new Map();
@@ -444,7 +478,7 @@ class PartyServer {
     this.connectivity.solve();
     this.refreshActivity(true);
     this.chunkDelta = null;
-    this.room.broadcast(JSON.stringify(this.fullUpdate()));
+    this.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
   }
 
@@ -456,7 +490,7 @@ class PartyServer {
     await this.clearWorld(world);
     this.connectivity.solve();
     this.importing = true;
-    this.room.broadcast(JSON.stringify({ type: "chat", sender: "server", message: `Importing world${data.name ? ' ' + String(data.name).slice(0, 40) : ''}...` }));
+    this.broadcast(JSON.stringify({ type: "chat", sender: "server", message: `Importing world${data.name ? ' ' + String(data.name).slice(0, 40) : ''}...` }));
   }
 
   importChunks(data) {
@@ -493,7 +527,7 @@ class PartyServer {
     this.refreshActivity(true);
     this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
     this.chunkDelta = null;
-    this.room.broadcast(JSON.stringify(this.fullUpdate()));
+    this.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
     await this.persist();
     console.log(`import: ${Object.keys(this.terrain.chunks).length} chunks, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
@@ -501,9 +535,9 @@ class PartyServer {
 
   // ---- messages -----------------------------------------------------------
 
-  /** @param {string} message @param {Connection} sender */
-  async onMessage(message, sender) {
-    if(!this.ready || !message.startsWith("{")) return;
+  /** @param {Connection} sender @param {string | ArrayBuffer | ArrayBufferView} message */
+  async onMessage(sender, message) {
+    if(!this.ready || typeof message !== 'string' || !message.startsWith("{")) return;
     let data; try { data = JSON.parse(message); } catch { return; }
     let w = this.world;
     let me = sender.id;
@@ -572,7 +606,7 @@ class PartyServer {
       case "deletemodel": if(w.has(data.id, 'Model')) w.destroy(String(data.id)); break;
 
       case "chat":
-        this.room.broadcast(JSON.stringify({ type: "chat", sender: me, message: String(data.message || '').slice(0, 500) }));
+        this.broadcast(JSON.stringify({ type: "chat", sender: me, message: String(data.message || '').slice(0, 500) }));
         break;
       case "reset":
         await this.reset();
@@ -586,4 +620,9 @@ class PartyServer {
   }
 }
 
-export default PartyServer;
+/** The Worker: room traffic (/parties/main/<room>/...) goes to the Durable Object, everything else is a static asset. */
+export default {
+  async fetch(request, env) {
+    return (await routePartykitRequest(request, env)) || env.ASSETS.fetch(request);
+  }
+};

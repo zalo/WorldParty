@@ -10,22 +10,22 @@ WorldParty is a multiplayer sandbox for building interactive worlds, similar to 
 
 ```bash
 npm install          # Install dependencies
-npm run dev          # Start PartyKit dev server with live reload (serves at localhost:1999)
-npm run build        # Bundle client with esbuild to ./dist/
-npm run deploy       # Deploy server + website to PartyKit cloud
+npm run dev          # wrangler dev + esbuild watch (tools/dev.mjs); serves the site and rooms at localhost:1999 (PORT=... to change)
+npm run build        # Assemble the static site in ./public/ (index.html, assets/, bundled dist/main.js) via tools/build-site.mjs
+npm run deploy       # Build, then `wrangler deploy` the Worker, Durable Object and site to Cloudflare (https://worldparty.makeshifted.workers.dev)
 node tools/import-world.mjs model.glb --name castle --size 60   # GLB -> destructible world manifest in assets/worlds/
 node tools/profile/build.mjs && node tools/profile/csg.mjs assets/worlds/castle-exact.json [chunkKey] [carves]   # time a carve stage by stage against the real server class in Node (also summary.mjs, cook.mjs)
 ```
 
 Open `?room=<name>&import=/assets/worlds/castle.json` (or call `main.importWorld(url)`) to upload a manifest into a room; the room's terrain, entities and world config are replaced.
 
-Both `npm run dev` and `npm run deploy` serve the website via PartyKit (configured in `partykit.json` `serve` field). The client JS is bundled by PartyKit's built-in esbuild from `src/main.js` into `dist/`. `PARTYKIT_HOST` is injected as a global by the bundler.
+Hosting is a Cloudflare Worker (`wrangler.jsonc`): the room server is a Durable Object class bound as `Main` and routed by [PartyServer](https://github.com/threepointone/partyserver)'s `routePartykitRequest` (so clients still use `/parties/main/<room>`), and everything else is served from `public/` as static assets (SPA fallback). The client JS is bundled by esbuild from `src/main.js` into `public/dist/`; `PARTYKIT_HOST` is injected as a global and is only the fallback host for pages not served over http(s). Rooms persist in SQLite-backed Durable Object storage (2 MiB per value; chunk bytes are still split into parts). The hosted PartyKit platform shut down in October 2026; `partykit.json` is gone.
 
 ## Architecture
 
 ### Client-Server Split
 
-- **`src/server.js`** - PartyKit server (runs on Cloudflare Workers). Owns the authoritative ECS world, PhysX simulation, and terrain. Ticks at 30Hz, broadcasting `partialupdate` (dirty components only) and a `fullupdate` every 10s. Persists entities and chunks under per-key storage (`ent:<id>`, `chunk:<x,y,z>`; legacy numeric chunk keys are migrated on load) every 5s and on disconnect.
+- **`src/server.js`** - Room server: a PartyServer `Server` (Durable Object) plus the Worker `fetch` export. Owns the authoritative ECS world, PhysX simulation, and terrain. Ticks at 30Hz, broadcasting `partialupdate` (dirty components only) and a `fullupdate` every 10s. Persists entities and chunks under per-key storage (`ent:<id>`, `chunk:<x,y,z>`; legacy numeric chunk keys are migrated on load) every 5s and on disconnect.
 - **`src/main.js`** - Client entry point. Mirrors the server's entities into a local ECS world, runs render/interpolation systems, hosts the local `PlayerController`, the terrain mirror, tools, and spawn menu. Connects via `PARTYKIT_HOST` (injected by bundler).
 
 ### Entity Component System
@@ -39,9 +39,9 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 - **`src/sky/`** - Physically based sky ported from tidewater's three.js/TSL version (commit `3dd589b` there): `Atmosphere` (Hillaire LUTs in compute, sun transmittance / sky irradiance readback), `Sky` (sun disk, stars, moon; no clouds yet), `Environment` (progressive cube capture + PMREM into `scene.environment`), `DayCycle` (time of day, sun direction, key light colour; `?time=<hours>`, `?daylength=<minutes>`). Needs the WebGPU backend; otherwise `World` falls back to the static skybox image and a hemisphere light.
 - **`src/PlayerController.js`** - First-person capsule player with BVH collision against terrain and ECS body meshes. WASD + PointerLock on desktop, nipplejs joysticks on mobile.
 - **`src/terrain/grid.js`** - Sparse chunk grid shared by server and client: keys, world config (bounds + implicit rock box), neighbour lookup, box queries.
-- **`src/server/Terrain.js`** - Sparse chunk map with per-chunk Manifold booleans and fragment component extraction.
+- **`src/server/Terrain.js`** - Sparse chunk map with per-chunk Manifold booleans and fragment component extraction. Chunk bytes are the source of truth; only the last few used chunks keep a Manifold object (`RESIDENT_MANIFOLDS`), the rest are rebuilt by `manifoldOf()` on demand.
 - **`src/server/Connectivity.js`** - Cross-chunk connectivity of solid (grounding, fragments) and air (which hollows are active and what to materialize).
-- **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems.
+- **`src/server/Physics.js`** - PhysX WASM setup, chunk colliders, and the ECS physics systems. The vendored `physx-js-webidl.wasm` has its initial memory patched from 64 MB to 16 MB (`tools/patch-wasm-memory.mjs`; it grows on demand).
 - **`src/props/PropRegistry.js`** - Single source of truth for spawnable props (collider shape, size, GLTF url, menu entry).
 - **`src/tools/*`** - Garry's Mod style tools (physgun, CSG brush, rope, weld, hinge). Tools send messages; the server mutates entities.
 - **`src/net/codec.js`** - geometry codecs shared by both sides (brush soups, versioned chunk meshes with per-triangle materials, binary chunk frames).
@@ -49,7 +49,7 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 ### Terrain System
 
-The world is a sparse grid of 10-unit chunks keyed `"x,y,z"` (chunk x covers [10x, 10x+10)). A per-room world config (`src/terrain/grid.js` `DEFAULT_WORLD`, stored under the `world` key, sent in full updates) gives the bounds and the box of implicit rock; the sandbox default is a 100 m cube centred on the origin, solid below y=0. Unstored chunks are implicit (rock inside that box, air elsewhere); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk keys plus the brush soup and transform; the server runs the boolean in Manifold (clipping to the chunk only for additions), re-encodes the chunk and pushes its bytes to every holder as a binary WebSocket frame right away; grounding, fragment shedding, colliders and activity run in a timer callback once the frames are out (`settleNow`), so carving latency is the boolean plus the encode. Unsupported solid becomes `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Updates otherwise carry only `{key: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<x,y,z>?v=<version>`, served immutable). The client `TerrainMirror` keeps one `Mesh` (with its own BVH) per held chunk under a group. Grounding and loading are decided by `src/server/Connectivity.js`: solid and air islands per chunk, face footprints rasterized on a 16x16 grid, union-find across chunks. Unsupported solid becomes fragments (merged across chunks); terrain is only held and collided where it faces an air component containing a player or body, so buried rock and empty sealed caves cost nothing. Updates carry `chunks`/`rock`/`cull` maps and the client holds only what it is told to.
+The world is a sparse grid of 10-unit chunks keyed `"x,y,z"` (chunk x covers [10x, 10x+10)). A per-room world config (`src/terrain/grid.js` `DEFAULT_WORLD`, stored under the `world` key, sent in full updates) gives the bounds and the box of implicit rock; the sandbox default is a 100 m cube centred on the origin, solid below y=0. Unstored chunks are implicit (rock inside that box, air elsewhere); only CSG-modified chunks are stored, as indexed meshes versioned by content hash. A `csg` message lists the overlapped chunk keys plus the brush soup and transform; the server runs the boolean in Manifold (clipping to the chunk only for additions), re-encodes the chunk and pushes its bytes to every holder as a binary WebSocket frame right away; grounding, fragment shedding, colliders and activity run in a timer callback once the frames are out (`settleNow`), so carving latency is the boolean plus the encode. Unsupported solid becomes `RigidBody{shape:'trimesh'} + FragmentMesh` entities with lazy-SDF colliders. Updates otherwise carry only `{key: version}` and clients fetch missing versions over HTTP (`/parties/main/<room>/chunk/<x,y,z>?v=<version>`, served immutable). The client `TerrainMirror` keeps one `Mesh` (with its own BVH) per held chunk under a group. Grounding and loading are decided by `src/server/Connectivity.js`: solid and air islands per chunk, face footprints rasterized on a 16x16 grid, union-find across chunks. Unsupported solid becomes fragments (merged across chunks); terrain is only held and collided where it faces an air component containing a player or an awake body (sleeping bodies keep nothing loaded; removing a collider does not wake what rests on it), so buried rock and empty sealed caves cost nothing. Updates carry `chunks`/`rock`/`cull` maps and the client holds only what it is told to.
 
 ### World Import
 
@@ -64,8 +64,12 @@ JSON over WebSocket. Client → server: `player`, `csg`, `import_begin/chunks/en
 - **three.js** - 3D rendering (bare specifier imports, resolved by esbuild bundler)
 - **three-bvh-csg / three-mesh-bvh** - CSG operations and BVH-accelerated collision
 - **manifold-3d** (3.5.4, vendored in `assets/manifold-3d/` with one patch so the Workers bundler never sees a `node:` import; 3.2.0 faulted on chunks above ~15k triangles) - WASM-based manifold CSG on server and in the importer
-- **partykit / partysocket** - Multiplayer server framework and client WebSocket wrapper
+- **partyserver / partysocket / wrangler** - Durable Object room framework, client WebSocket wrapper, and the Cloudflare CLI used for dev and deploy
 - **nipplejs** (vendored in `assets/nipplejs/`) - Mobile virtual joystick
+
+## Memory budget
+
+A Durable Object gets 128 MB. Measure with `node tools/profile/build.mjs && node --expose-gc tools/profile/mem.mjs` / `heap.mjs` / `heap-steps.mjs`; the `World ready` log line prints both WASM heap sizes. Emscripten heaps never shrink, so peaks matter: the castle (73 chunks, 196k triangles) runs at about 33 MB Manifold, 16 MB PhysX and 35 MB JS. Keep this in mind for anything that holds manifolds for many chunks at once (the settle loop releases each chunk's islands as soon as its last fragment is built for exactly this reason).
 
 ## Notes
 
@@ -73,4 +77,4 @@ JSON over WebSocket. Client → server: `player`, `csg`, `import_begin/chunks/en
 - The server runs three.js headlessly for CSG computations (no rendering).
 - Geometry data is serialized as gzip-compressed base64 (position arrays only), using fflate for compression.
 - Server guards against double-disconnect (onClose/onError both call onDisconnect).
-- Static assets (`index.html`, `assets/`) are served by PartyKit alongside the WebSocket server.
+- Static assets (`index.html`, `assets/`, the bundle) are copied into `public/` by the build and served by Workers Assets; the Worker only sees `/parties/*`.
