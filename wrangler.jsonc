@@ -4,6 +4,8 @@
   "main": "src/server.js",
   "compatibility_date": "2025-10-01",
   "observability": { "enabled": true },
+  // A room import or a cold start of a big world can run well past the 30 s default CPU budget of a request
+  "limits": { "cpu_ms": 120000 },
   // One Durable Object class per room; the binding name `Main` is what clients address as /parties/main/<room>.
   "durable_objects": {
     "bindings": [{ "name": "Main", "class_name": "WorldParty" }]
