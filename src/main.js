@@ -229,9 +229,10 @@ export default class Main {
             let frame = unpackChunkFrame(event.data);
             if(frame) {
                 let t0 = performance.now();
-                this.terrain.setChunk(frame.key, frame.bytes, frame.version);
+                let applied = frame.delta ? this.terrain.applyDelta(frame.key, frame.version, frame.baseVersion, frame.bytes) : (this.terrain.setChunk(frame.key, frame.bytes, frame.version), true);
                 let ms = performance.now() - t0;
-                if(ms > 30) console.log(`chunk ${frame.key}: ${frame.bytes ? (frame.bytes.length / 1024).toFixed(0) : 0} KB decoded and rebuilt in ${ms.toFixed(0)} ms`);
+                if(!applied) console.log(`chunk ${frame.key}: delta against ${frame.baseVersion} not applicable (holding ${this.terrain.versions.get(frame.key)}), waiting for a full version`);
+                else if(ms > 30 || frame.delta) console.log(`chunk ${frame.key}: ${(frame.bytes ? frame.bytes.length / 1024 : 0).toFixed(0)} KB ${frame.delta ? 'delta' : 'full'} applied in ${ms.toFixed(0)} ms`);
             }
             return;
         }

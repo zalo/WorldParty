@@ -11,7 +11,7 @@
  *  {key: faceMask} for the boundary faces of a modified chunk that face
  *  nothing visible. Everything else costs nothing here. */
 import * as THREE from 'three/webgpu';
-import { decodeChunkMesh, EMPTY_VERSION } from '../net/codec.js';
+import { decodeChunkMesh, decodeChunkDelta, EMPTY_VERSION } from '../net/codec.js';
 import { materialColor, materialTable, DEFAULT_MATERIAL } from '../terrain/materials.js';
 import { CHUNK_SIZE, HALF, FACES, DEFAULT_WORLD, chunkCenter as gridCenter, chunkMin, chunksInBox, sanitizeWorld } from '../terrain/grid.js';
 
@@ -72,11 +72,24 @@ export class TerrainMirror {
     /** Keys of in-bounds chunks whose bounds intersect `box`. */
     intersecting(box) { return chunksInBox(this.world, box.min, box.max); }
 
-    /** Apply decoded chunk bytes (or null for an explicitly empty chunk). */
+    /** Apply chunk bytes (or null for an explicitly empty chunk). */
     setChunk(key, bytes, version) {
+        this.setChunkMesh(key, bytes ? decodeChunkMesh(bytes) : null, bytes ? version : EMPTY_VERSION);
+    }
+
+    /** Apply a delta frame against the version we hold; false if we hold something else (the next update's
+     *  version map will have us fetch the chunk in full). */
+    applyDelta(key, version, baseVersion, bytes) {
+        let prev = this.meshes.get(key);
+        if(!prev || this.versions.get(key) !== baseVersion) return false;
+        this.setChunkMesh(key, decodeChunkDelta(prev, bytes), version);
+        return true;
+    }
+
+    setChunkMesh(key, mesh, version) {
         this.pending.delete(key);
-        if(bytes) this.meshes.set(key, decodeChunkMesh(bytes)); else this.meshes.delete(key);
-        this.versions.set(key, bytes ? version : EMPTY_VERSION);
+        if(mesh) this.meshes.set(key, mesh); else this.meshes.delete(key);
+        this.versions.set(key, version);
         this.rockMask.delete(key);
         this.rebuild(key);
         this.onChunkChanged?.(key);

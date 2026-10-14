@@ -153,7 +153,9 @@ export class Terrain {
     /** Replace a chunk's manifold (takes ownership; null = explicitly empty). */
     setManifold(key, manifold) {
         this._evict(key);
-        this.chunks[key] = { key, version: '', bytes: null, manifold };
+        let old = this.chunks[key];
+        // The bytes being replaced are the base for a delta frame to clients holding them (until dropMeshCache)
+        this.chunks[key] = { key, version: '', bytes: null, manifold, prevBytes: old?.bytes || null, prevVersion: old?.bytes ? old.version : null };
         this._refresh(key);
         this.dirty.add(key);
         if(this.chunks[key].manifold) this._touch(key);
@@ -209,9 +211,16 @@ export class Terrain {
         return mesh || decodeChunkMesh(c.bytes);
     }
 
-    /** Forget the decoded meshes kept since their chunks were refreshed (they are large; bytes stay). */
+    /** Forget the decoded meshes and previous bytes kept since their chunks were refreshed (bytes stay). */
     dropMeshCache(keys) {
-        for(let key of keys) { let c = this.chunks[key]; if(c) c.mesh = null; }
+        for(let key of keys) { let c = this.chunks[key]; if(c) { c.mesh = null; c.prevBytes = null; c.prevVersion = null; } }
+    }
+
+    /** Decoded mesh of the current bytes (cached one if present, without consuming it), or null. */
+    currentMesh(key) {
+        let c = this.chunks[key];
+        if(!c || !c.bytes) return null;
+        return c.mesh || (c.mesh = decodeChunkMesh(c.bytes));
     }
 
     /**
@@ -268,15 +277,15 @@ export class Terrain {
         let c = this.chunks[key];
         if(!c.manifold || c.manifold.isEmpty()) {
             if(c.manifold) { c.manifold.delete(); c.manifold = null; }
-            c.bytes = null; c.mesh = null; c.version = EMPTY_VERSION;
+            c.bytes = null; c.mesh = null; c.prevBytes = null; c.prevVersion = null; c.version = EMPTY_VERSION;
             return;
         }
         let mesh = c.manifold.getMesh();
         let { positions, uvs } = splitProps(mesh);
-        let indices = new Uint32Array(mesh.triVerts);
-        c.bytes = encodeChunkMesh(positions, indices, this.triangleMaterials(mesh), uvs);
+        let indices = new Uint32Array(mesh.triVerts), materials = this.triangleMaterials(mesh);
+        c.bytes = encodeChunkMesh(positions, indices, materials, uvs);
         c.version = hashBytes(c.bytes);
-        c.mesh = { positions, indices }; // for the collider cook that follows, so it need not gunzip what we just gzipped
+        c.mesh = { positions, uvs, indices, materials }; // for the collider cook and delta that follow, so they need not gunzip what we just gzipped
     }
 
     /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */

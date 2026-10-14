@@ -11,7 +11,7 @@ import { Terrain, chunkCenter } from './server/Terrain.js';
 import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
 import { chunkAt, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { getPropDef } from './props/PropRegistry.js';
-import { packChunkFrame } from './net/codec.js';
+import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeChunkMesh } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -49,7 +49,7 @@ export class WorldParty extends Server {
     this.persistSummaries = new Set(); // chunk keys whose connectivity summary should be written
     this.connectivity.onSummary = key => this.persistSummaries.add(key);
     this.settleTimer = null;        // pending settleNow() after carves
-    this.csgStats = { ops: 0, booleanMs: 0 };
+    this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
     this.persistChunkDeletes = new Set();
     this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
     this.ready = false;
@@ -433,13 +433,22 @@ export class WorldParty extends Server {
     if(!this.settleTimer) this.settleTimer = setTimeout(() => { this.settleTimer = null; this.settleNow(); }, 0);
   }
 
-  /** Broadcast a chunk's current bytes to everyone who holds it, unless they already got this version.
-   *  Clients that do not hold it learn the version from the next update and fetch over HTTP. */
+  /** Broadcast a chunk's new content to everyone who holds it, unless they already got this version: as
+   *  a delta from the version they hold when the chunk only changed a little (the usual carve), else in
+   *  full. Clients that hold something else learn the version from the next update and fetch over HTTP. */
   pushChunk(key) {
     let st = this.sentStates.get(key), c = this.terrain.chunks[key];
     if(!st || st.version === undefined || !c || !c.bytes || this.pushed.get(key) === c.version) return;
+    let base = this.pushed.get(key) ?? st.version;
+    let frame = null;
+    if(c.prevBytes && c.prevVersion === base) {
+      let delta = encodeChunkDelta(decodeChunkMesh(c.prevBytes), this.terrain.currentMesh(key));
+      if(delta.length < c.bytes.length * 0.75) frame = packChunkDeltaFrame(key, c.version, base, delta);
+      this.csgStats.deltaBytes += frame ? delta.length : 0;
+    }
+    this.csgStats.fullBytes += frame ? 0 : c.bytes.length;
     this.pushed.set(key, c.version);
-    this.broadcast(packChunkFrame(key, c.version, c.bytes));
+    this.broadcast(frame || packChunkFrame(key, c.version, c.bytes));
   }
 
   /** Grounding, colliders and activity for every chunk carved since the last time. */
@@ -454,8 +463,8 @@ export class WorldParty extends Server {
     let changed = this.terrain.takeDirty();
     for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); } // settle may have changed some again
     this.terrain.dropMeshCache(Object.keys(changed));
-    let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0 };
-    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);
+    let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
+    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty). */
