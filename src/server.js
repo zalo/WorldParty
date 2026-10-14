@@ -18,6 +18,8 @@ const FULL_UPDATE_EVERY = 300;      // ticks (10s)
 const PERSIST_INTERVAL_MS = 5000;
 const STORAGE_BATCH = 128;          // Durable Object storage batch limit
 const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across chunkpart:<key>:<i> values (128 KiB value limit)
+const COOKS_NOW = 3;                // mesh colliders cooked immediately when activity changes (nearest first) ...
+const COOKS_PER_TICK = 2;           // ... and per tick for the rest
 
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
@@ -43,6 +45,9 @@ export class WorldParty extends Server {
     this.activeRoots = new Set();
     this.colliderState = new Map(); // key -> 'box' | 'mesh:<version>'
     this.pushed = new Map();        // key -> version last broadcast as a chunk frame
+    this.cookQueue = new Map();     // key -> version of mesh colliders still to cook (nearest to activity first)
+    this.persistSummaries = new Set(); // chunk keys whose connectivity summary should be written
+    this.connectivity.onSummary = key => this.persistSummaries.add(key);
     this.settleTimer = null;        // pending settleNow() after carves
     this.csgStats = { ops: 0, booleanMs: 0 };
     this.persistChunkDeletes = new Set();
@@ -81,12 +86,16 @@ export class WorldParty extends Server {
       let i = parseInt(k), nk = chunkKey(Math.floor(i / 100) - 5, Math.floor(i / 10) % 10 - 5, i % 10 - 5);
       storedChunks[nk] = { ...storedChunks[k], key: nk };
       delete storedChunks[k];
-      this.persistChunkDeletes.add(k);
+      this.persistChunkDeletes.add('chunk:' + k);
       this.markChunkPersist(nk);
     }
 
     await this.terrain.init(storedChunks, storedWorld);
     await this.physics.init();
+    // Stored connectivity summaries spare us rebuilding every chunk's manifold just to start
+    let storedSummaries = await this.loadPrefixed('summary:');
+    let adopted = 0;
+    for(let k in storedSummaries) if(this.connectivity.importSummary(k, storedSummaries[k])) adopted++; else this.persistChunkDeletes.add('summary:' + k);
 
     let maxId = 0;
     for(let id in storedEntities) {
@@ -105,7 +114,7 @@ export class WorldParty extends Server {
     this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
     this.ready = true;
     this.resolveReady();
-    console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders; wasm heaps: manifold ${this.terrain.heapMB().toFixed(0)} MB, physx ${this.physics.heapMB().toFixed(0)} MB`);
+    console.log(`World ready: ${Object.keys(storedChunks).length} chunks (${adopted} summaries stored), ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders (${this.cookQueue.size} queued); wasm heaps: manifold ${this.terrain.heapMB().toFixed(0)} MB, physx ${this.physics.heapMB().toFixed(0)} MB`);
   }
 
   async loadPrefixed(prefix) {
@@ -221,15 +230,38 @@ export class WorldParty extends Server {
     this.queueChunkDelta();
   }
 
+  /** Bring colliders in line with chunk states. Removals and box colliders are immediate; mesh colliders
+   *  are cooked nearest-to-activity first, a few now and the rest over the following ticks, so a region
+   *  becoming active (or a room starting) does not stall on cooking every dense chunk at once. */
   syncColliders() {
     for(let key of new Set([...this.chunkStates.keys(), ...this.colliderState.keys()])) {
       let st = this.chunkStates.get(key);
       let want = !st ? undefined : st.mask !== undefined ? 'box' : 'mesh:' + this.terrain.chunks[key].version;
       if(want === this.colliderState.get(key)) continue;
       if(want) this.colliderState.set(key, want); else this.colliderState.delete(key);
+      this.cookQueue.delete(key);
       if(!want) this.physics._removeChunkActor(key);
       else if(want === 'box') { let c = chunkCenter(key); this.physics.setDefaultChunkCollider(key, c.x, c.y, c.z); }
-      else this.physics.setChunkCollider(key, this.terrain.chunkMesh(key));
+      else this.cookQueue.set(key, this.terrain.chunks[key].version);
+    }
+    this.pumpCooks(COOKS_NOW);
+  }
+
+  /** Cook up to n queued mesh colliders, nearest to a player or awake body first. */
+  pumpCooks(n) {
+    if(!this.cookQueue.size) return;
+    let anchors = [];
+    for(let [id, tf] of this.world.each('Transform')) {
+      let rb = this.world.get(id, 'RigidBody');
+      if(this.world.has(id, 'Player') || (rb && !rb.sleeping)) anchors.push(tf.position);
+    }
+    let dist = key => { let c = chunkCenter(key), d = Infinity; for(let p of anchors) d = Math.min(d, (p.x - c.x) ** 2 + (p.y - c.y) ** 2 + (p.z - c.z) ** 2); return d; };
+    let order = [...this.cookQueue.keys()].sort((a, b) => dist(a) - dist(b));
+    for(let key of order.slice(0, n)) {
+      let version = this.cookQueue.get(key);
+      this.cookQueue.delete(key);
+      if(this.colliderState.get(key) !== 'mesh:' + version) continue; // superseded meanwhile
+      this.physics.setChunkCollider(key, this.terrain.chunkMesh(key));
     }
   }
 
@@ -278,6 +310,8 @@ export class WorldParty extends Server {
   /** @param {Connection} conn @param {ConnectionContext} ctx */
   onConnect(conn, ctx) {
     this.globalPlayerCount += 1;
+    // A client reconnecting with the same id before its old socket closed must not fail with "entity exists"
+    if(this.world.has(conn.id)) this.onDisconnect(conn);
     this.world.create(conn.id, {
       Player: Player({ name: "Player " + this.globalPlayerCount, color: PLAYER_COLORS[this.globalPlayerCount % PLAYER_COLORS.length] }),
       Transform: Transform(),
@@ -287,12 +321,12 @@ export class WorldParty extends Server {
   }
 
   /** @param {Connection} conn */
-  async onDisconnect(conn) {
+  onDisconnect(conn) {
     if(!this.world.has(conn.id)) return;
     // Drop anything this player was holding, then the player itself
     for(let [id, g] of this.world.each('Grabbed')) if(g.by === conn.id) this.world.remove(id, 'Grabbed');
     this.world.destroy(conn.id);
-    await this.persist();
+    this.persist().catch(e => console.error('persist failed: ' + e.message));
   }
   onClose(conn) { this.onDisconnect(conn); }
   onError(conn, error) { console.error(error); this.onDisconnect(conn); }
@@ -305,11 +339,12 @@ export class WorldParty extends Server {
     let players = this.world.query('Player').size;
 
     // Nothing to simulate: no players and everything asleep
-    if(players === 0 && !this.anyAwake && !this.world.hasDirty() && !this.chunkDelta) {
+    if(players === 0 && !this.anyAwake && !this.world.hasDirty() && !this.chunkDelta && !this.cookQueue.size) {
       this.physics.lastTime = start;
       return;
     }
 
+    this.pumpCooks(COOKS_PER_TICK);
     this.anyAwake = this.physics.update(this.world, TICK_MS / 1000);
     this.tickCount++;
     this.refreshActivity();
@@ -348,7 +383,7 @@ export class WorldParty extends Server {
     for(let key of this.persistChunks || []) {
       let c = this.terrain.serializeChunk(key);
       let oldParts = this.chunkParts.get(key) || 0;
-      if(!c) { deletes.push('chunk:' + key); for(let i = 0; i < oldParts; i++) deletes.push(`chunkpart:${key}:${i}`); this.chunkParts.delete(key); continue; }
+      if(!c) { deletes.push('chunk:' + key, 'summary:' + key); for(let i = 0; i < oldParts; i++) deletes.push(`chunkpart:${key}:${i}`); this.chunkParts.delete(key); continue; }
       let n = c.bytes && c.bytes.length > STORAGE_PART ? Math.ceil(c.bytes.length / STORAGE_PART) : 0;
       if(n) {
         puts['chunk:' + key] = { key, version: c.version, parts: n };
@@ -357,8 +392,12 @@ export class WorldParty extends Server {
       for(let i = n; i < oldParts; i++) deletes.push(`chunkpart:${key}:${i}`);
       this.chunkParts.set(key, n);
     }
-    for(let key of this.persistChunkDeletes) deletes.push('chunk:' + key);
-    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
+    for(let key of this.persistSummaries) {
+      let sum = this.connectivity.exportSummary(key);
+      if(sum) puts['summary:' + key] = sum; else deletes.push('summary:' + key);
+    }
+    for(let key of this.persistChunkDeletes) deletes.push(key);
+    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set(); this.persistSummaries = new Set();
 
     let keys = Object.keys(puts);
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) {
@@ -464,12 +503,14 @@ export class WorldParty extends Server {
     this.terrain.clear();
     this.terrain.world = world;
     if(world === DEFAULT_WORLD) await this.ctx.storage.delete('world'); else await this.ctx.storage.put('world', world);
-    let keys = [...(await this.ctx.storage.list({ prefix: 'chunk:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'chunkpart:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'ent:' })).keys()];
+    let keys = [];
+    for(let prefix of ['chunk:', 'chunkpart:', 'summary:', 'ent:']) keys.push(...(await this.ctx.storage.list({ prefix })).keys());
     this.chunkParts = new Map();
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.ctx.storage.delete(keys.slice(i, i + STORAGE_BATCH));
-    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
+    this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set(); this.persistSummaries = new Set();
     this.sentStates = new Map();
     this.pushed = new Map();
+    this.cookQueue = new Map();
     this.connectivity.clear();
   }
 
@@ -622,7 +663,17 @@ export class WorldParty extends Server {
 
 /** The Worker: room traffic (/parties/main/<room>/...) goes to the Durable Object, everything else is a static asset. */
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    let url = new URL(request.url);
+    // Chunk bytes are immutable per version: repeats are served from the edge cache, not the room
+    if(request.method === 'GET' && url.searchParams.has('v') && /\/parties\/main\/[^/]+\/chunk\//.test(url.pathname)) {
+      let cache = caches.default;
+      let hit = await cache.match(request);
+      if(hit) return hit;
+      let res = await routePartykitRequest(request, env);
+      if(res && res.status === 200 && (res.headers.get('Cache-Control') || '').includes('immutable')) ctx.waitUntil(cache.put(request, res.clone()));
+      return res || new Response('Not found', { status: 404 });
+    }
     return (await routePartykitRequest(request, env)) || env.ASSETS.fetch(request);
   }
 };

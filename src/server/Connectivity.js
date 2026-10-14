@@ -93,6 +93,7 @@ export class Connectivity {
         this.uf = new UnionFind();
         this.touch = new Map();   // key -> [face] -> air island keys touching this chunk's solid across that face
         this.keys = new Set();    // chunks covered by the last solve
+        this.onSummary = null;    // (key) => void, after a summary is computed (so it can be persisted)
     }
 
     get M() { return this.terrain.manifold.Manifold; }
@@ -118,7 +119,29 @@ export class Connectivity {
         airManifold.delete();
         let summary = { version: c.version, solid, air };
         this.cache.set(key, summary);
+        this.onSummary?.(key);
         return summary;
+    }
+
+    /** A chunk's cached summary for storage (plain data: masks are byte arrays), or null if not computed. */
+    exportSummary(key) {
+        let c = this.terrain.chunks[key], s = this.cache.get(key);
+        if(!c || !s || s.version !== c.version) return null;
+        let island = i => ({ masks: i.masks.map(m => m || null), touch: i.touch, volume: i.volume });
+        return { version: s.version, solid: s.solid.map(island), air: s.air.map(island) };
+    }
+
+    /** Adopt a stored summary if it still matches the chunk's version (saves rebuilding the manifold at startup). */
+    importSummary(key, s) {
+        let c = this.terrain.chunks[key];
+        if(!c || !s || s.version !== c.version || !c.bytes) return false;
+        let island = i => {
+            let masks = new Array(6);
+            for(let f = 0; f < 6; f++) if(i.masks[f]) { let m = i.masks[f] instanceof Uint8Array ? i.masks[f] : new Uint8Array(i.masks[f]); masks[f] = m.every(v => v) ? FULL : m; }
+            return { masks, touch: i.touch, volume: i.volume };
+        };
+        this.cache.set(key, { version: s.version, solid: s.solid.map(island), air: s.air.map(island) });
+        return true;
     }
 
     /** Face footprints of one island (the manifold is not retained). */
