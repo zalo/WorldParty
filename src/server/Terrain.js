@@ -50,7 +50,7 @@ const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
 
 export class Terrain {
     constructor() {
-        /** @type {Record<string, { key:string, version:string, bytes:Uint8Array|null, manifold:any|null }>} */
+        /** @type {Record<string, { key:string, version:string, bytes:Uint8Array|null, manifold:any|null, mesh?:{positions:Float32Array, indices:Uint32Array}|null }>} */
         this.chunks = {};
         /** @type {Set<string>} chunk keys changed since last takeDirty() */
         this.dirty = new Set();
@@ -161,10 +161,19 @@ export class Terrain {
         this.dirty.clear();
     }
 
-    /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty. */
+    /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty. A chunk refreshed since
+     *  the last dropMeshCache() or chunkMesh() still has its mesh in memory; anything else is decoded from its bytes. */
     chunkMesh(key) {
         let c = this.chunks[key];
-        return c && c.bytes ? decodeChunkMesh(c.bytes) : null;
+        if(!c || !c.bytes) return null;
+        let mesh = c.mesh;
+        c.mesh = null; // one use; keeping decoded meshes for every chunk would cost more memory than it saves time
+        return mesh || decodeChunkMesh(c.bytes);
+    }
+
+    /** Forget the decoded meshes kept since their chunks were refreshed (they are large; bytes stay). */
+    dropMeshCache(keys) {
+        for(let key of keys) { let c = this.chunks[key]; if(c) c.mesh = null; }
     }
 
     /**
@@ -203,13 +212,17 @@ export class Terrain {
         else if(op === SUBTRACTION) result = current.subtract(brush);
         else result = current.intersect(brush);
 
-        // Clip to the chunk's bounds (the cube carries the default material and empty UVs like everything else)
-        let c = chunkCenter(key);
-        let cube = this.withMaterial(this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z), DEFAULT_MATERIAL);
-        let clipped = result.intersect(cube);
-        cube.delete(); result.delete();
+        // Only addition can leave the chunk's bounds; subtraction and intersection stay inside what was there,
+        // so clipping them would be a second full boolean for nothing.
+        if(op === ADDITION) {
+            let c = chunkCenter(key);
+            let cube = this.withMaterial(this.manifold.Manifold.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(c.x, c.y, c.z), DEFAULT_MATERIAL);
+            let clipped = result.intersect(cube);
+            cube.delete(); result.delete();
+            result = clipped;
+        }
         if(current && !this.chunks[key]) current.delete(); // materialized here; stored ones are deleted by setManifold
-        this.setManifold(key, clipped);
+        this.setManifold(key, result);
     }
 
     /** Re-encode a chunk's bytes and version from its manifold. */
@@ -217,13 +230,15 @@ export class Terrain {
         let c = this.chunks[key];
         if(!c.manifold || c.manifold.isEmpty()) {
             if(c.manifold) { c.manifold.delete(); c.manifold = null; }
-            c.bytes = null; c.version = EMPTY_VERSION;
+            c.bytes = null; c.mesh = null; c.version = EMPTY_VERSION;
             return;
         }
         let mesh = c.manifold.getMesh();
         let { positions, uvs } = splitProps(mesh);
-        c.bytes = encodeChunkMesh(positions, new Uint32Array(mesh.triVerts), this.triangleMaterials(mesh), uvs);
+        let indices = new Uint32Array(mesh.triVerts);
+        c.bytes = encodeChunkMesh(positions, indices, this.triangleMaterials(mesh), uvs);
         c.version = hashBytes(c.bytes);
+        c.mesh = { positions, indices }; // for the collider cook that follows, so it need not gunzip what we just gzipped
     }
 
     /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */

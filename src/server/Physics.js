@@ -161,19 +161,9 @@ export class Physics {
         let longest = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
         if(longest < 0.01) return null;
 
-        let verts = new px.PxArray_PxVec3(numVerts);
-        for(let i = 0; i < numVerts; i++) verts.set(i, new px.PxVec3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-        let tris = new px.PxArray_PxU32(numTris * 3);
-        for(let i = 0; i < numTris * 3; i++) tris.set(i, i);
-
-        let points = new px.PxBoundedData();
-        points.set_count(numVerts); points.set_stride(12); points.set_data(verts.begin());
-        let triangles = new px.PxBoundedData();
-        triangles.set_count(numTris); triangles.set_stride(12); triangles.set_data(tris.begin());
-
-        let desc = new px.PxTriangleMeshDesc();
-        desc.set_points(points);
-        desc.set_triangles(triangles);
+        let indices = new Uint32Array(numTris * 3);
+        for(let i = 0; i < indices.length; i++) indices[i] = i;
+        let { desc, free } = this._meshDesc(positions, indices);
         let sdf = new px.PxSDFDesc();
         sdf.set_spacing(longest / 24);               // ~24 voxels along the longest axis
         sdf.set_subgridSize(0);                      // dense grid (required for lazy mode)
@@ -182,9 +172,23 @@ export class Physics {
         desc.set_sdfDesc(sdf);
 
         let triMesh = px.CreateTriangleMesh(this.cookingParams, desc);
-        verts.__destroy__(); tris.__destroy__(); points.__destroy__(); triangles.__destroy__(); desc.__destroy__(); sdf.__destroy__();
+        free(); sdf.__destroy__();
         if(!triMesh) console.warn(`SDF cook failed (${numVerts} verts, ${numTris} tris)`);
         return triMesh;
+    }
+
+    /** An indexed mesh copied straight into the WASM heap as a PxTriangleMeshDesc (one PxVec3 wrapper per
+     *  vertex was most of the cooking time, and leaked). Call free() once the mesh is cooked. */
+    _meshDesc(positions, indices) {
+        let px = this.px;
+        let numVerts = positions.length / 3, numTris = Math.floor(indices.length / 3);
+        let vptr = px._webidl_malloc(numVerts * 12), iptr = px._webidl_malloc(numTris * 12);
+        px.HEAPF32.set(positions.subarray(0, numVerts * 3), vptr >> 2);
+        px.HEAPU32.set(indices.subarray(0, numTris * 3), iptr >> 2);
+        let desc = new px.PxTriangleMeshDesc();
+        desc.points.set_count(numVerts); desc.points.set_stride(12); desc.points.set_data(vptr);
+        desc.triangles.set_count(numTris); desc.triangles.set_stride(12); desc.triangles.set_data(iptr);
+        return { desc, free: () => { desc.__destroy__(); px._webidl_free(vptr); px._webidl_free(iptr); } };
     }
 
     // ---- terrain colliders ------------------------------------------------
@@ -208,17 +212,10 @@ export class Physics {
         let numTris = Math.floor(indices.length / 3);
         if(numTris < 1) return;
 
-        let verts = new px.PxArray_PxVec3(numVerts);
-        for(let i = 0; i < numVerts; i++) verts.set(i, new px.PxVec3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-        let idx = new px.PxArray_PxU32(numTris * 3);
-        for(let i = 0; i < numTris * 3; i++) idx.set(i, indices[i]);
-
-        let desc = new px.PxTriangleMeshDesc();
-        desc.points.set_count(numVerts); desc.points.set_stride(12); desc.points.set_data(verts.begin());
-        desc.triangles.set_count(numTris); desc.triangles.set_stride(12); desc.triangles.set_data(idx.begin());
-        if(!desc.isValid()) { console.warn(`Invalid triangle mesh desc for chunk ${index}`); return; }
+        let { desc, free } = this._meshDesc(positions, indices);
+        if(!desc.isValid()) { console.warn(`Invalid triangle mesh desc for chunk ${index}`); free(); return; }
         let triMesh = px.CreateTriangleMesh(this.cookingParams, desc);
-        verts.__destroy__(); idx.__destroy__(); desc.__destroy__();
+        free();
         if(!triMesh) { console.warn(`Failed to cook triangle mesh for chunk ${index}`); return; }
 
         let actor = this.physics.createRigidStatic(this._pose({ x: 0, y: 0, z: 0 }));

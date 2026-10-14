@@ -41,6 +41,9 @@ class PartyServer {
     this.occupiedKey = '';          // chunks containing players/bodies, for cheap change detection
     this.activeRoots = new Set();
     this.colliderState = new Map(); // key -> 'box' | 'mesh:<version>'
+    this.pushed = new Map();        // key -> version last broadcast as a chunk frame
+    this.settleTimer = null;        // pending settleNow() after carves
+    this.csgStats = { ops: 0, booleanMs: 0 };
     this.persistChunkDeletes = new Set();
     this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
     this.ready = false;
@@ -98,6 +101,7 @@ class PartyServer {
     let shed = this.settleTerrain();
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
+    this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
     this.ready = true;
     this.resolveReady();
     console.log(`World ready: ${Object.keys(storedChunks).length} chunks, ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
@@ -344,11 +348,30 @@ class PartyServer {
     });
   }
 
+  /** Run the boolean and push the new bytes right away; grounding, colliders and activity follow once the
+   *  frames are on the wire (a timer callback), so the cut is visible as early as the boolean allows. */
   applyCsg(data) {
-    let tStart = Date.now();
+    let t0 = Date.now();
     this.terrain.applyCsg(data);
-    let booleanMs = Date.now() - tStart;
+    this.csgStats.booleanMs += Date.now() - t0;
     if(this.terrain.dirty.size === 0) return;
+    this.csgStats.ops++;
+    for(let key of this.terrain.dirty) this.pushChunk(key);
+    if(!this.settleTimer) this.settleTimer = setTimeout(() => { this.settleTimer = null; this.settleNow(); }, 0);
+  }
+
+  /** Broadcast a chunk's current bytes to everyone who holds it, unless they already got this version.
+   *  Clients that do not hold it learn the version from the next update and fetch over HTTP. */
+  pushChunk(key) {
+    let st = this.sentStates.get(key), c = this.terrain.chunks[key];
+    if(!st || st.version === undefined || !c || !c.bytes || this.pushed.get(key) === c.version) return;
+    this.pushed.set(key, c.version);
+    this.room.broadcast(packChunkFrame(key, c.version, c.bytes));
+  }
+
+  /** Grounding, colliders and activity for every chunk carved since the last time. */
+  settleNow() {
+    if(this.importing || this.terrain.dirty.size === 0) return;
     let t0 = Date.now();
     let fragments = this.settleTerrain();
     let settleMs = Date.now() - t0;
@@ -356,13 +379,10 @@ class PartyServer {
     this.refreshActivity(true);
     let activityMs = Date.now() - t0; // includes PhysX cooking of changed chunk colliders
     let changed = this.terrain.takeDirty();
-    for(let key in changed) {
-      this.markChunkPersist(key);
-      // Push the new bytes to everyone who should hold this chunk now; later joiners fetch by version over HTTP.
-      let st = this.sentStates.get(key), c = this.terrain.chunks[key];
-      if(st && st.version !== undefined && c.bytes) this.room.broadcast(packChunkFrame(key, c.version, c.bytes));
-    }
-    console.log(`csg: ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; boolean+encode ${booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms, total ${Date.now() - tStart}ms`);
+    for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); } // settle may have changed some again
+    this.terrain.dropMeshCache(Object.keys(changed));
+    let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0 };
+    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty). */
@@ -415,6 +435,7 @@ class PartyServer {
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.room.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set();
     this.sentStates = new Map();
+    this.pushed = new Map();
     this.connectivity.clear();
   }
 
@@ -470,6 +491,7 @@ class PartyServer {
     let shed = this.settleTerrain();
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
+    this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
     this.chunkDelta = null;
     this.room.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
