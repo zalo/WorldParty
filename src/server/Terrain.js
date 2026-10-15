@@ -23,7 +23,7 @@ import { M } from '../../assets/manifold-3d/manifold.js';
 import manMod from '../../assets/manifold-3d/manifold.wasm';
 import { decodeSoup, encodeChunkMesh, decodeChunkMesh, hashBytes, EMPTY_VERSION } from '../net/codec.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
-import { encodeSoup } from '../net/codec.js';
+import { encodeSoup, encodeHulls } from '../net/codec.js';
 import { DEFAULT_MATERIAL, MAX_MATERIALS, clampMaterial, materialTable } from '../terrain/materials.js';
 
 import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
@@ -55,6 +55,9 @@ const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
  *  manifold costs a few MB, so only the most recently used chunks stay resident; the rest are rebuilt
  *  from their bytes when a carve or a connectivity summary needs them. */
 export const RESIDENT_MANIFOLDS = 6;
+const HULL_CELL = 1.5;             // fragments are split into cells about this big, one convex hull each ...
+const MAX_FRAGMENT_HULLS = 24;     // ... up to this many (cells grow for bigger fragments)
+const HULL_MIN_VOLUME = 1e-3;      // slivers of a cell too small to matter get no hull
 
 export class Terrain {
     constructor() {
@@ -310,11 +313,55 @@ export class Terrain {
                 halfExtent = Math.max(halfExtent, Math.abs(lx), Math.abs(ly), Math.abs(lz));
             }
         }
+        let hulls = null;
+        try { hulls = this.fragmentHulls(manifold, cx, cy, cz); } catch(e) { console.warn('fragment hulls failed: ' + e.message); }
         return {
             Transform: Transform({ position: { x: cx, y: cy, z: cz } }),
             RigidBody: RigidBody({ shape: 'trimesh', halfExtent }),
-            FragmentMesh: FragmentMesh({ data: encodeSoup(soup), mats: Array.from(mats) }),
+            FragmentMesh: FragmentMesh({ data: encodeSoup(soup), mats: Array.from(mats), hulls: hulls && hulls.length ? encodeHulls(hulls) : null }),
         };
+    }
+
+    /** Convex pieces approximating a fragment for PhysX: its bounding box is cut into cells of about HULL_CELL metres
+     *  (at most MAX_FRAGMENT_HULLS, so big slabs get coarser cells) and each non-empty cell contributes the hull of
+     *  its part. A compound of convex shapes simulates ~20x cheaper than a dynamic SDF triangle mesh and sleeps sooner,
+     *  while keeping holes and overhangs at cell resolution. Points are body-local (relative to the centroid). */
+    fragmentHulls(manifold, cx = 0, cy = 0, cz = 0) {
+        let M = this.manifold.Manifold;
+        let box = manifold.boundingBox(), min = box.min, max = box.max;
+        let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        let cell = HULL_CELL, n;
+        for(;;) {
+            n = size.map(sz => Math.max(1, Math.ceil(sz / cell - 1e-6)));
+            if(n[0] * n[1] * n[2] <= MAX_FRAGMENT_HULLS) break;
+            cell *= 1.25;
+        }
+        let pointsOf = m => { // hull vertices, body-local
+            let h = m.hull(), mesh = h.getMesh(), np = mesh.numProp, v = mesh.vertProperties, nv = v.length / np;
+            let pts = new Float32Array(nv * 3);
+            for(let i = 0; i < nv; i++) { pts[i * 3] = v[i * np] - cx; pts[i * 3 + 1] = v[i * np + 1] - cy; pts[i * 3 + 2] = v[i * np + 2] - cz; }
+            h.delete();
+            return pts;
+        };
+        if(n[0] * n[1] * n[2] === 1) return [pointsOf(manifold)];
+        let hulls = [];
+        let step = size.map((sz, a) => sz / n[a]);
+        for(let i = 0; i < n[0]; i++) for(let j = 0; j < n[1]; j++) for(let k = 0; k < n[2]; k++) {
+            let cube = M.cube([step[0], step[1], step[2]], false).translate(min[0] + i * step[0], min[1] + j * step[1], min[2] + k * step[2]);
+            let piece = manifold.intersect(cube);
+            cube.delete();
+            if(!piece.isEmpty() && piece.volume() > HULL_MIN_VOLUME) hulls.push(pointsOf(piece));
+            piece.delete();
+        }
+        return hulls;
+    }
+
+    /** Hulls for a fragment stored before hulls existed: rebuild a manifold from its body-local soup. Returns null when
+     *  the soup cannot be made manifold (the caller falls back to one hull of every vertex). */
+    hullsFromSoup(base64) {
+        let m;
+        try { m = this.soupToManifold(base64); } catch { return null; }
+        try { return m.isEmpty() ? null : this.fragmentHulls(m); } finally { m.delete(); }
     }
 
     // ---- codecs -----------------------------------------------------------

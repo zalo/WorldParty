@@ -11,7 +11,7 @@ import { Terrain, chunkCenter } from './server/Terrain.js';
 import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
 import { chunkAt, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { getPropDef } from './props/PropRegistry.js';
-import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeChunkMesh } from './net/codec.js';
+import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeChunkMesh, decodeSoup, encodeHulls } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -103,8 +103,10 @@ export class WorldParty extends Server {
       let m = /^e(\d+)$/.exec(id); if(m) maxId = Math.max(maxId, parseInt(m[1]));
     }
     this.world.nextId = maxId + 1;
+    let upgraded = this.upgradeFragments();
     this.world.takeDirty(); // loaded state is not "changed"
     this.persistQueue.clear(); this.persistRemoved.clear();
+    for(let id of upgraded) this.persistQueue.add(id);
     // Chunks loaded from the legacy soup format are re-encoded and flagged for re-persist
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     // Ground check with the current algorithm: anything unsupported falls now
@@ -141,6 +143,22 @@ export class WorldParty extends Server {
   }
 
   // ---- terrain connectivity ------------------------------------------------
+
+  /** Fragments stored before hull colliders existed get hulls now (else they would simulate as SDF meshes, which
+   *  is what made ticks crawl whenever a pile woke up). Returns the ids changed, so they can be re-persisted. */
+  upgradeFragments() {
+    let ids = [];
+    for(let [id, f] of this.world.each('FragmentMesh')) {
+      if(f.hulls !== null && f.hulls !== undefined) continue;
+      let hulls = null;
+      try { hulls = this.terrain.hullsFromSoup(f.data); } catch(e) { console.warn(`fragment ${id}: hulls failed: ${e.message}`); }
+      if(!hulls || !hulls.length) hulls = [decodeSoup(f.data)]; // not manifold: one hull of every vertex
+      this.world.set(id, 'FragmentMesh', { hulls: encodeHulls(hulls) });
+      ids.push(id);
+    }
+    if(ids.length) console.log(`upgraded ${ids.length} fragment(s) to hull colliders`);
+    return ids;
+  }
 
   /** Solve connectivity and turn every unsupported solid into fragment entities. Returns the number made. */
   settleTerrain() {
@@ -351,7 +369,7 @@ export class WorldParty extends Server {
 
     if(players > 0) {
       if(this.tickCount % FULL_UPDATE_EVERY === 0) {
-        this.broadcast(JSON.stringify(this.fullUpdate()));
+        this.broadcast(JSON.stringify(this.fullUpdate(false)));
         this.world.takeDirty(); this.chunkDelta = null;
       } else if(this.world.hasDirty() || this.chunkDelta) {
         let { entities, removed } = this.world.takeDirty();
@@ -365,8 +383,12 @@ export class WorldParty extends Server {
     this.serverTickMs = Date.now() - start;
   }
 
-  fullUpdate() {
-    return { type: "fullupdate", entities: this.world.serialize(), removed: [], world: this.terrain.world, ...this.chunkMaps(), serverTickMs: this.serverTickMs };
+  /** Every entity and chunk state. The periodic resync (`withMeshes` false) leaves out FragmentMesh: it never changes
+   *  after creation and clients got it then, and a room with rubble lying around would otherwise ship a megabyte of
+   *  geometry to every client every ten seconds (and carve frames behind it would wait on the wire). */
+  fullUpdate(withMeshes = true) {
+    let entities = withMeshes ? this.world.serialize() : this.world.serialize((id, name) => name !== 'FragmentMesh');
+    return { type: "fullupdate", entities, removed: [], world: this.terrain.world, ...this.chunkMaps(), serverTickMs: this.serverTickMs };
   }
 
   // ---- persistence (per-entity / per-chunk keys) --------------------------
@@ -461,7 +483,7 @@ export class WorldParty extends Server {
     this.refreshActivity(true);
     let activityMs = Date.now() - t0; // includes PhysX cooking of changed chunk colliders
     let changed = this.terrain.takeDirty();
-    for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); } // settle may have changed some again
+    for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); this.physics.wakeNear(key); } // settle may have changed some again
     this.terrain.dropMeshCache(Object.keys(changed));
     let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
     console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);

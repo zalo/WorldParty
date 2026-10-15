@@ -25,6 +25,24 @@ export function decodeSoup(base64String) {
     return new Float32Array(gunzipSync(compressed).buffer);
 }
 
+/** Convex hull point sets (body-local xyz triples per hull) as one gzip+base64 string: [nHulls, n1, xyz*n1, n2, xyz*n2, ...] as f32. */
+export function encodeHulls(hulls) {
+    let total = 1;
+    for(let h of hulls) total += 1 + h.length;
+    let f = new Float32Array(total), o = 0;
+    f[o++] = hulls.length;
+    for(let h of hulls) { f[o++] = h.length / 3; f.set(h, o); o += h.length; }
+    return encodeSoup(f);
+}
+
+/** @returns {Float32Array[]} one xyz-triple array per hull */
+export function decodeHulls(base64String) {
+    let f = decodeSoup(base64String), out = [], o = 0;
+    let n = f[o++];
+    for(let i = 0; i < n && o < f.length; i++) { let count = f[o++] * 3; out.push(f.slice(o, o + count)); o += count; }
+    return out;
+}
+
 const CHUNK_MAGIC = 0x32435057; // "WPC2": version 2 header; version 1 files start with the vertex count
 
 /**

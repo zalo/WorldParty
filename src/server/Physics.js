@@ -10,12 +10,14 @@
 import PhysXInit from '../../assets/physx/physx-js-webidl.mjs';
 import physxWasm from '../../assets/physx/physx-js-webidl.wasm';
 import { PROP_HULLS } from '../props/PropHulls.js';
-import { decodeSoup } from '../net/codec.js';
+import { decodeSoup, decodeHulls } from '../net/codec.js';
 import { chunkCenter, HALF } from '../terrain/grid.js';
 
 const BODY_DENSITY = 500.0;
 const REPLICATE_EVERY_N_TICKS = 2; // 30Hz tick -> 15Hz body replication
 const KILL_PLANE_Y = -100;
+const FRAGMENT_SLEEP_THRESHOLD = 0.02; // mass-normalized kinetic energy below which rubble sleeps (PhysX default 0.005): debris
+                                       // rocking in a pile is what keeps the tick expensive, so it settles a little sooner
 
 export class Physics {
     constructor() {
@@ -141,6 +143,15 @@ export class Physics {
         }
         if(rb.shape === 'trimesh') {
             if(!fragment) return false;
+            // Compound of convex hulls when the fragment has them (cheap, sleeps well); else the exact SDF mesh.
+            if(fragment.hulls) {
+                let attached = 0;
+                for(let pts of decodeHulls(fragment.hulls)) {
+                    let convex = this.cookConvex(pts);
+                    if(convex) { body.attachShape(this._shape(new px.PxConvexMeshGeometry(convex))); attached++; }
+                }
+                if(attached) return true;
+            }
             let positions = decodeSoup(fragment.data);
             let triMesh = this.cookTriangleMeshSDF(positions);
             if(!triMesh) return false;
@@ -149,6 +160,20 @@ export class Physics {
         }
         body.attachShape(this._shape(new px.PxBoxGeometry(half, half, half)));
         return true;
+    }
+
+    /** Cook the convex hull of a point set (xyz triples); null if PhysX cannot (degenerate or too few points). */
+    cookConvex(points) {
+        let px = this.px, numVerts = points.length / 3;
+        if(numVerts < 4) return null;
+        let vptr = px._webidl_malloc(numVerts * 12);
+        px.HEAPF32.set(points.subarray(0, numVerts * 3), vptr >> 2);
+        let desc = new px.PxConvexMeshDesc();
+        desc.points.set_count(numVerts); desc.points.set_stride(12); desc.points.set_data(vptr);
+        desc.flags.raise(px.PxConvexFlagEnum.eCOMPUTE_CONVEX);
+        let convex = px.CreateConvexMesh(this.cookingParams, desc);
+        desc.__destroy__(); px._webidl_free(vptr);
+        return convex || null;
     }
 
     /** Cook a triangle soup with a lazy SDF so it can be used on a dynamic body. */
@@ -208,10 +233,12 @@ export class Physics {
         this.chunkActors[index] = actor;
     }
 
-    /** Static triangle-mesh collider for a CSG-modified chunk (world-space indexed mesh), or none if `mesh` is null. */
+    /** Static triangle-mesh collider for a CSG-modified chunk (world-space indexed mesh), or none if `mesh` is null.
+     *  Does not wake anything: colliders also come and go with activity, and only a geometry change (a carve or a
+     *  shed fragment, see the server's settleNow) should disturb what rests on them. */
     setChunkCollider(index, mesh) {
         this._removeChunkActor(index);
-        if(!mesh) { this.wakeNear(index); return; }
+        if(!mesh) return;
         let px = this.px;
         let { positions, indices } = mesh;
         let numVerts = positions.length / 3;
@@ -228,7 +255,6 @@ export class Physics {
         actor.attachShape(this._shape(new px.PxTriangleMeshGeometry(triMesh)));
         this.scene.addActor(actor);
         this.chunkActors[index] = actor;
-        this.wakeNear(index);
     }
 
     /** Colliders also go away when a region has nothing awake in it; that must not wake what rests on them
@@ -240,12 +266,14 @@ export class Physics {
         }
     }
 
-    /** Wake the bodies in or just around a chunk whose collider changed. */
-    wakeNear(key, margin = 2) {
+    /** Wake the sleeping bodies whose extent reaches into a chunk (plus `margin`) whose geometry changed. Each
+     *  woken body costs tick time until it sleeps again, so this is deliberately tight: a carve wakes the rubble it
+     *  could have undermined, not every pile in the neighbourhood. */
+    wakeNear(key, margin = 0.25) {
         if(!this._world) return;
-        let c = chunkCenter(key), r = HALF + margin;
-        for(let [, pb, tf] of this._world.each('$PxBody', 'Transform')) {
-            let p = tf.position;
+        let c = chunkCenter(key);
+        for(let [, pb, tf, rb] of this._world.each('$PxBody', 'Transform', 'RigidBody')) {
+            let p = tf.position, r = HALF + margin + (rb.halfExtent || 0);
             if(Math.abs(p.x - c.x) > r || Math.abs(p.y - c.y) > r || Math.abs(p.z - c.z) > r) continue;
             if(pb.actor.isSleeping()) pb.actor.wakeUp();
         }
@@ -265,6 +293,7 @@ export class Physics {
                 continue;
             }
             this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, BODY_DENSITY);
+            if(fragment) body.setSleepThreshold(FRAGMENT_SLEEP_THRESHOLD);
             if(rb.frozen || rb.kinematic) body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
             this.scene.addActor(body);
             world.add(id, '$PxBody', { actor: body });

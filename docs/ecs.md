@@ -154,6 +154,17 @@ triangles with a vertex color per face, and fragments carry `mats` in
 their `FragmentMesh` component. The CSG tool cycles materials with `R`
 (or the Material button on mobile).
 
+Fragments also carry `hulls` (see `encodeHulls` in `src/net/codec.js`):
+the server cuts the fragment into cells of about 1.5 m and stores the
+convex hull of each, body-local, and PhysX simulates the body as that
+compound of convex shapes. A dynamic SDF triangle mesh is exact but costs
+PhysX 1 to 3 ms per awake fragment per tick, so a woken pile of rubble used
+to eat the whole 33 ms tick; convex compounds are about 20 times cheaper
+and sleep sooner. The soup in `data` stays the visual (and the client's BVH
+for walking on fragments). Fragments stored before `hulls` existed get them
+when the room loads (`upgradeFragments`); the SDF mesh is the fallback when
+no hull can be cooked.
+
 ## Importing worlds
 
 `tools/import-world.mjs` (see CLAUDE.md) produces a manifest with a world
