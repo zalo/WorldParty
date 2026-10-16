@@ -51,6 +51,12 @@ const CHUNK_MAGIC = 0x32435057; // "WPC2": version 2 header; version 1 files sta
  * @param {Float32Array} [uvs] two floats per vertex (zeros if absent)
  */
 export function encodeChunkMesh(positions, indices, materials = null, uvs = null) {
+    return gzipSync(packChunkMesh(positions, indices, materials, uvs));
+}
+
+/** The uncompressed chunk layout. Versions are hashed from this (so they do not depend on which gzip
+ *  produced the stored bytes), and the gzip can happen later, off the carve path. */
+export function packChunkMesh(positions, indices, materials = null, uvs = null) {
     let nv = positions.length / 3, ni = indices.length, numTris = ni / 3;
     let raw = new Uint8Array(12 + nv * 12 + nv * 8 + ni * 4 + numTris);
     let dv = new DataView(raw.buffer);
@@ -61,12 +67,17 @@ export function encodeChunkMesh(positions, indices, materials = null, uvs = null
     if(uvs) raw.set(new Uint8Array(uvs.buffer, uvs.byteOffset, nv * 8), 12 + nv * 12);
     raw.set(new Uint8Array(indices.buffer, indices.byteOffset, ni * 4), 12 + nv * 20);
     if(materials) raw.set(materials.subarray(0, numTris), 12 + nv * 20 + ni * 4);
-    return gzipSync(raw);
+    return raw;
 }
 
 /** @param {Uint8Array} bytes @returns {{positions: Float32Array, uvs: Float32Array, indices: Uint32Array, materials: Uint8Array}} */
-export function decodeChunkMesh(bytes) {
-    let raw = gunzipSync(bytes);
+export function decodeChunkMesh(bytes) { return unpackChunkMesh(gunzipSync(bytes)); }
+
+/** decodeChunkMesh with the platform's native gzip (DecompressionStream) when there is one. */
+export async function decodeChunkMeshAsync(bytes) { return unpackChunkMesh(await gunzipAsync(bytes)); }
+
+/** @param {Uint8Array} raw uncompressed chunk layout (see packChunkMesh) */
+export function unpackChunkMesh(raw) {
     let dv = new DataView(raw.buffer, raw.byteOffset);
     let v2 = dv.getUint32(0, true) === CHUNK_MAGIC;
     let nv = dv.getUint32(v2 ? 4 : 0, true), ni = dv.getUint32(v2 ? 8 : 4, true);
@@ -81,7 +92,28 @@ export function decodeChunkMesh(bytes) {
     return { positions, uvs, indices, materials };
 }
 
-/** FNV-1a 32-bit hash as 8 hex chars; used as a chunk content version. */
+// ---- native gzip ------------------------------------------------------------------------------------------
+// Workers, browsers and Node all have CompressionStream, implemented natively and off the JS thread; fflate
+// stays for the synchronous paths (delta frames, and anywhere a result is needed right now).
+
+const NATIVE_GZIP = typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+
+async function pump(stream, input) {
+    let w = stream.writable.getWriter();
+    w.write(input); w.close();
+    return new Uint8Array(await new Response(stream.readable).arrayBuffer());
+}
+
+/** @param {Uint8Array} bytes @returns {Promise<Uint8Array>} gzip */
+export async function gzipAsync(bytes) {
+    return NATIVE_GZIP ? pump(new CompressionStream('gzip'), bytes) : gzipSync(bytes);
+}
+
+/** @param {Uint8Array} bytes gzip @returns {Promise<Uint8Array>} */
+export async function gunzipAsync(bytes) {
+    return NATIVE_GZIP ? pump(new DecompressionStream('gzip'), bytes) : gunzipSync(bytes);
+}
+
 export function hashBytes(bytes) {
     let h = 0x811c9dc5;
     for(let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193) >>> 0; }

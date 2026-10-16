@@ -1,0 +1,43 @@
+import { readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
+import { gzipSync } from '../../node_modules/three/examples/jsm/libs/fflate.module.js';
+let codec = await import('../../src/net/codec.js');
+let bundle = await import('./server.bundle.mjs');
+let manifest = JSON.parse(readFileSync('assets/worlds/castle-exact.json', 'utf8'));
+let store = new Map();
+for(let key in manifest.chunks) { let c = manifest.chunks[key]; store.set('chunk:' + key, { key, version: c.version, bytes: c.bytes ? new Uint8Array(Buffer.from(c.bytes, 'base64')) : null }); }
+store.set('world', manifest.world);
+let room = { id: { name: 'profile' }, storage: { async get(k) { return store.get(k); }, async put() {}, async delete() {}, async list({ prefix }) { let m = new Map(); for(let [k, v] of store) if(k.startsWith(prefix)) m.set(k, v); return m; } } };
+let server = new bundle.WorldParty(room); clearInterval(server.interval); await server.onStart();
+let T = server.terrain, key = '0,0,-3';
+let t = () => performance.now();
+let a = t(); let mesh0 = codec.decodeChunkMesh(T.chunks[key].bytes); let decodeMs = t() - a;
+a = t(); let m = T.manifoldOf(key); m.numTri(); let rebuildMs = t() - a;
+let M = T.manifold.Manifold, c = (await import('../../src/terrain/grid.js')).chunkCenter(key);
+let brush = T.withMaterial(M.cube([2, 2, 2], true).translate(c.x, c.y - 2, c.z), 0);
+a = t(); let r = m.subtract(brush); let lazyMs = t() - a;
+a = t(); let n = r.numTri(); let boolMs = t() - a;
+a = t(); let mesh = r.getMesh(); let getMeshMs = t() - a;
+a = t(); let splitProps = null; // emulate _refresh pieces
+let np = mesh.numProp, v = mesh.vertProperties, nv = v.length / np, positions = new Float32Array(nv * 3), uvs = new Float32Array(nv * 2);
+for(let i = 0; i < nv; i++) { positions[i*3] = v[i*np]; positions[i*3+1] = v[i*np+1]; positions[i*3+2] = v[i*np+2]; uvs[i*2] = v[i*np+3]; uvs[i*2+1] = v[i*np+4]; }
+let indices = new Uint32Array(mesh.triVerts); let materials = T.triangleMaterials(mesh); let splitMs = t() - a;
+a = t(); let bytes = codec.encodeChunkMesh(positions, indices, materials, uvs); let encodeMs = t() - a;
+a = t(); let raw = new Uint8Array(positions.byteLength + uvs.byteLength + indices.byteLength + materials.byteLength); gzipSync(raw); let gzipOnlyMs = t() - a;
+a = t(); codec.hashBytes(bytes); let hashMs = t() - a;
+a = t(); let delta = codec.encodeChunkDelta(mesh0, { positions, uvs, indices, materials }); let deltaMs = t() - a;
+a = t(); codec.decodeChunkDelta(mesh0, delta); let deltaDecMs = t() - a;
+a = t(); T.physics; let cook = server.physics.cookTriangleMeshSDF; let desc = server.physics._meshDesc(positions, indices); let tm = server.physics.px.CreateTriangleMesh(server.physics.cookingParams, desc.desc); desc.free(); let cookMs = t() - a;
+a = t(); let S = server.connectivity; S.invalidate?.(key); let s = S.summary(key); let summaryMs = t() - a;
+console.log(`chunk ${key}: ${n} tris after carve, bytes ${bytes.length}, delta ${delta.length}`);
+console.log(`decode stored bytes (gunzip, JS)      ${decodeMs.toFixed(1)} ms`);
+console.log(`rebuild manifold from bytes (JS+WASM) ${rebuildMs.toFixed(1)} ms`);
+console.log(`boolean (WASM, lazy ${lazyMs.toFixed(1)} + eval) ${boolMs.toFixed(1)} ms`);
+console.log(`getMesh WASM->JS copy                 ${getMeshMs.toFixed(1)} ms`);
+console.log(`split props + materials (JS)          ${splitMs.toFixed(1)} ms`);
+console.log(`encodeChunkMesh incl gzip (JS)        ${encodeMs.toFixed(1)} ms   (gzip of same bytes alone ${gzipOnlyMs.toFixed(1)} ms)`);
+console.log(`hash (JS)                             ${hashMs.toFixed(1)} ms`);
+console.log(`encodeChunkDelta (JS)                 ${deltaMs.toFixed(1)} ms; decode ${deltaDecMs.toFixed(1)} ms`);
+console.log(`PhysX static trimesh cook (WASM)      ${cookMs.toFixed(1)} ms`);
+console.log(`connectivity.summary (decompose WASM + footprints JS) ${summaryMs.toFixed(1)} ms`);
+process.exit(0);

@@ -11,7 +11,7 @@
  *  {key: faceMask} for the boundary faces of a modified chunk that face
  *  nothing visible. Everything else costs nothing here. */
 import * as THREE from 'three/webgpu';
-import { decodeChunkMesh, decodeChunkDelta, EMPTY_VERSION } from '../net/codec.js';
+import { decodeChunkMesh, decodeChunkMeshAsync, decodeChunkDelta, EMPTY_VERSION } from '../net/codec.js';
 import { materialColor, materialTable, DEFAULT_MATERIAL } from '../terrain/materials.js';
 import { CHUNK_SIZE, HALF, FACES, DEFAULT_WORLD, chunkCenter as gridCenter, chunkMin, chunksInBox, sanitizeWorld } from '../terrain/grid.js';
 
@@ -136,10 +136,12 @@ export class TerrainMirror {
             if(this.versions.get(key) === version || this.pending.get(key) === version) continue;
             if(version === EMPTY_VERSION) { this.setChunk(key, null, version); continue; }
             this.pending.set(key, version);
-            Promise.resolve(this.fetchChunk?.(key, version)).then(bytes => {
+            Promise.resolve(this.fetchChunk?.(key, version)).then(async bytes => {
                 if(this.pending.get(key) !== version) return; // superseded or unloaded
-                if(bytes) this.setChunk(key, bytes, version);
-                else this.pending.delete(key);
+                if(!bytes) { this.pending.delete(key); return; }
+                let mesh = await decodeChunkMeshAsync(bytes); // native gunzip, off the main thread
+                if(this.pending.get(key) !== version) return;
+                this.setChunkMesh(key, mesh, version);
             }).catch(e => { this.pending.delete(key); console.warn(`chunk ${key} fetch failed: ${e.message}`); });
         }
     }

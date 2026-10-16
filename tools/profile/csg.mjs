@@ -31,7 +31,8 @@ let room = { // the Durable Object context
 let times = new Map();
 function wrap(obj, name, label = name) {
     let f = obj[name];
-    obj[name] = function(...a) { let t = performance.now(); try { return f.apply(this, a); } finally { let d = performance.now() - t; let e = times.get(label) || { ms: 0, n: 0 }; e.ms += d; e.n++; times.set(label, e); } };
+    let record = (t) => { let d = performance.now() - t; let e = times.get(label) || { ms: 0, n: 0 }; e.ms += d; e.n++; times.set(label, e); };
+    obj[name] = function(...a) { let t = performance.now(); let r = f.apply(this, a); if(r && typeof r.then === 'function') return r.finally(() => record(t)); record(t); return r; };
 }
 function report(title) {
     let rows = [...times].sort((a, b) => b[1].ms - a[1].ms).map(([k, v]) => `${k.padEnd(34)} ${v.ms.toFixed(1).padStart(8)} ms  x${v.n}`);
@@ -59,7 +60,7 @@ wrap(Object.getPrototypeOf(physics), 'setChunkCollider', 'physics.setChunkCollid
 wrap(Object.getPrototypeOf(physics), 'setDefaultChunkCollider', 'physics.setDefaultChunkCollider');
 wrap(Object.getPrototypeOf(server), 'settleTerrain', 'server.settleTerrain');
 wrap(Object.getPrototypeOf(server), 'settleNow', 'server.settleNow (deferred)');
-wrap(Object.getPrototypeOf(server), 'applyCsg', 'server.applyCsg (sync)');
+wrap(Object.getPrototypeOf(server), 'applyCsg', 'server.applyCsg (frame out)');
 wrap(Object.getPrototypeOf(server), 'refreshActivity', 'server.refreshActivity');
 wrap(Object.getPrototypeOf(server), 'syncColliders', 'server.syncColliders');
 wrap(Object.getPrototypeOf(server), 'queueChunkDelta', 'server.queueChunkDelta');
@@ -72,8 +73,8 @@ report('startup');
 // Pick the densest chunk unless one was named
 let densest = null, maxTris = 0;
 for(let key in terrain.chunks) {
-    let c = terrain.chunks[key]; if(!c.bytes) continue;
-    let n = decodeChunkMesh(c.bytes).indices.length / 3;
+    if(!terrain.hasSolid(key)) continue;
+    let n = decodeChunkMesh(terrain.bytesOf(key)).indices.length / 3;
     if(n > maxTris) { maxTris = n; densest = key; }
 }
 let key = wantKey || densest;
@@ -96,7 +97,7 @@ let n = parseInt(carves);
 for(let i = 0; i < n; i++) {
     let pos = { x: center.x + (i - 1) * 1.5, y: center.y - 2 + i, z: center.z + (i % 2) };
     let t = performance.now();
-    server.applyCsg({ keys: [key], brush, operation: 1 /* SUBTRACTION */, position: pos, quaternion: { x: 0, y: 0.2, z: 0.1, w: 0.97 }, scale: { x: 2, y: 2, z: 2 }, material: 0 });
+    await server.applyCsg({ keys: [key], brush, operation: 1 /* SUBTRACTION */, position: pos, quaternion: { x: 0, y: 0.2, z: 0.1, w: 0.97 }, scale: { x: 2, y: 2, z: 2 }, material: 0 });
     console.log(`carve ${i}: ${(performance.now() - t).toFixed(1)} ms until the frame is out`);
     await new Promise(r => setTimeout(r, 5)); // let the deferred settle run
     report(`carve ${i}`);

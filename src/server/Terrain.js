@@ -14,14 +14,15 @@
  *  which hollows are reachable is decided afterwards by Connectivity.
  *
  *  Bytes are the source of truth; only a few recently used chunks keep their
- *  Manifold object alive (RESIDENT_MANIFOLDS), everything else is rebuilt on
+ *  Manifold object alive (RESIDENT_TRIS), everything else is rebuilt on
  *  demand through manifoldOf(). */
 import * as THREE from 'three';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ADDITION, INTERSECTION, SUBTRACTION } from 'three-bvh-csg';
 import { M } from '../../assets/manifold-3d/manifold.js';
 import manMod from '../../assets/manifold-3d/manifold.wasm';
-import { decodeSoup, encodeChunkMesh, decodeChunkMesh, hashBytes, EMPTY_VERSION } from '../net/codec.js';
+import { decodeSoup, packChunkMesh, unpackChunkMesh, decodeChunkMesh, decodeChunkMeshAsync, gzipAsync, hashBytes, EMPTY_VERSION } from '../net/codec.js';
+import { gzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup, encodeHulls } from '../net/codec.js';
 import { DEFAULT_MATERIAL, MAX_MATERIALS, clampMaterial, materialTable } from '../terrain/materials.js';
@@ -52,21 +53,33 @@ export function interleaveProps(positions, uvs) {
 }
 const MAX_BRUSH_FLOATS = 60000; // ~6.6k triangles
 /** Chunk manifolds kept alive in WASM memory. A Durable Object has 128 MB in total and a dense chunk's
- *  manifold costs a few MB, so only the most recently used chunks stay resident; the rest are rebuilt
- *  from their bytes when a carve or a connectivity summary needs them. */
-export const RESIDENT_MANIFOLDS = 6;
+ *  manifold costs a few MB, so only the most recently used chunks stay resident, up to a triangle budget
+ *  (about 170 bytes of Manifold heap per triangle: the whole castle, 196k triangles, is 33 MB); the rest are
+ *  rebuilt from their bytes when a carve or a connectivity summary needs them. A resident chunk also keeps
+ *  its decoded mesh (27 bytes per triangle), the delta base and collider source for its next carve. */
+export const RESIDENT_TRIS = 150_000;
+/** Budget while a whole world is being settled at once (import, or a start without stored summaries): every
+ *  chunk gets touched in turn, so a large budget would only raise the heap's peak (which never comes back). */
+export const COLD_RESIDENT_TRIS = 50_000;
 const HULL_CELL = 1.5;             // fragments are split into cells about this big, one convex hull each ...
 const MAX_FRAGMENT_HULLS = 24;     // ... up to this many (cells grow for bigger fragments)
 const HULL_MIN_VOLUME = 1e-3;      // slivers of a cell too small to matter get no hull
 
 export class Terrain {
     constructor() {
-        /** @type {Record<string, { key:string, version:string, bytes:Uint8Array|null, manifold:any|null, mesh?:{positions:Float32Array, indices:Uint32Array}|null }>} */
+        /** Chunk records. `bytes` is the gzip (storage, HTTP, full frames); right after a carve only `raw`
+         *  (the uncompressed layout the version is hashed from) exists until compress() runs. `mesh` is the
+         *  decoded mesh, kept while the chunk is resident; `prev` is the replaced content for a delta frame.
+         *  @type {Record<string, { key:string, version:string, bytes:Uint8Array|null, raw:Uint8Array|null, manifold:any|null, tris:number,
+         *    mesh?:{positions:Float32Array, uvs:Float32Array, indices:Uint32Array, materials:Uint8Array}|null,
+         *    prev?:{ version:string, mesh:object|null, bytes:Uint8Array|null, raw:Uint8Array|null }|null }>} */
         this.chunks = {};
         /** @type {Set<string>} chunk keys changed since last takeDirty() */
         this.dirty = new Set();
         /** @type {string[]} keys whose manifold is resident, least recently used first */
         this.resident = [];
+        this.residentTris = 0;
+        this.residentBudget = RESIDENT_TRIS;
         this.manifold = null;
         this.wasmMemory = null;
         this.world = DEFAULT_WORLD;
@@ -97,34 +110,78 @@ export class Terrain {
                 // Legacy gzip+base64 triangle soup
                 this.setManifold(key, this.withMaterial(this.soupToManifold(c.data), DEFAULT_MATERIAL));
             } else {
-                this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
+                this.chunks[key] = this._empty(key);
             }
         }
     }
+
+    _empty(key) { return { key, version: EMPTY_VERSION, bytes: null, raw: null, manifold: null, tris: 0, mesh: null, prev: null }; }
+
+    /** Does the chunk hold solid (stored bytes, compressed or not)? */
+    hasSolid(key) { let c = this.chunks[key]; return !!(c && (c.bytes || c.raw)); }
+
+    /** The chunk's gzip bytes, compressing now if a carve left them pending (storage, HTTP and full frames
+     *  prefer compress(), which uses the native gzip). */
+    bytesOf(key) {
+        let c = this.chunks[key];
+        if(!c) return null;
+        if(!c.bytes && c.raw) { c.bytes = gzipSync(c.raw); c.raw = null; }
+        return c.bytes;
+    }
+
+    /** Compress the chunks carved since their last compress(), with the platform gzip, off the carve path. */
+    async compress(keys) {
+        await Promise.all([...keys].map(async key => {
+            let c = this.chunks[key];
+            if(!c || c.bytes || !c.raw) return;
+            let raw = c.raw, z = await gzipAsync(raw);
+            if(this.chunks[key] === c && c.raw === raw) { c.bytes = z; c.raw = null; } // not re-carved meanwhile
+        }));
+    }
+
+    /** Run `fn` with the small residency budget (whole-world settles), then restore the normal one. */
+    cold(fn) {
+        this.residentBudget = COLD_RESIDENT_TRIS;
+        try { return fn(); } finally { this.residentBudget = RESIDENT_TRIS; }
+    }
+
+    /** Decode the stored bytes of chunks about to be carved that are not resident, with the native gunzip, so
+     *  the synchronous rebuild in manifoldOf() only has the Manifold construction left to do. */
+    async prepare(keys) {
+        await Promise.all([...keys].map(async key => {
+            let c = this.chunks[key];
+            if(!c || c.manifold || c.mesh || !c.bytes) return;
+            let mesh = await decodeChunkMeshAsync(c.bytes);
+            if(this.chunks[key] === c && !c.mesh) c.mesh = mesh;
+        }));
+    }
+
+    _decode(c) { return c.mesh || (c.raw ? unpackChunkMesh(c.raw) : decodeChunkMesh(c.bytes)); }
 
     /** Install a chunk from encoded bytes (storage or import); the version is the content hash. The manifold
      *  is built lazily by manifoldOf(). */
     loadChunk(key, bytes, version = null) {
         bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
         this._evict(key);
-        this.chunks[key] = { key, version: version || hashBytes(bytes), bytes, manifold: null };
+        this.chunks[key] = { ...this._empty(key), version: version || hashBytes(bytes), bytes };
     }
 
     /** The manifold of a stored chunk (null if the chunk is empty), rebuilt from its bytes if it is not
      *  resident. Owned by the chunk record: do not delete it, and do not hold it across other chunk lookups. */
     manifoldOf(key) {
         let c = this.chunks[key];
-        if(!c || !c.bytes) return null;
+        if(!c || !(c.bytes || c.raw)) return null;
         if(!c.manifold) {
-            let mesh = decodeChunkMesh(c.bytes);
+            let mesh = this._decode(c);
             try { c.manifold = this.meshToManifold(mesh.positions, mesh.indices, mesh.materials, mesh.uvs); }
             catch(e) {
                 // A chunk that cannot be rebuilt as a solid must not take the room down; it becomes empty.
                 console.warn(`chunk ${key}: ${e.message}; dropped`);
-                this.chunks[key] = { key, version: EMPTY_VERSION, bytes: null, manifold: null };
+                this.chunks[key] = this._empty(key);
                 this.dirty.add(key);
                 return null;
             }
+            c.mesh = mesh; c.tris = mesh.indices.length / 3;
         }
         this._touch(key);
         return c.manifold;
@@ -133,17 +190,17 @@ export class Terrain {
     /** Mark a chunk's manifold as just used and drop the least recently used ones beyond the budget. */
     _touch(key) {
         let i = this.resident.indexOf(key);
-        if(i >= 0) this.resident.splice(i, 1);
+        if(i >= 0) this.resident.splice(i, 1); else this.residentTris += this.chunks[key].tris || 0;
         this.resident.push(key);
-        while(this.resident.length > RESIDENT_MANIFOLDS) this._evict(this.resident[0]);
+        while(this.resident.length > 1 && this.residentTris > this.residentBudget) this._evict(this.resident[0]);
     }
 
-    /** Free a chunk's manifold (its bytes remain the source of truth). */
+    /** Free a chunk's manifold and decoded mesh (its bytes remain the source of truth). */
     _evict(key) {
         let i = this.resident.indexOf(key);
-        if(i >= 0) this.resident.splice(i, 1);
         let c = this.chunks[key];
-        if(c && c.manifold) { c.manifold.delete(); c.manifold = null; }
+        if(i >= 0) { this.resident.splice(i, 1); this.residentTris -= c?.tris || 0; }
+        if(c) { if(c.manifold) { c.manifold.delete(); c.manifold = null; } c.mesh = null; }
     }
 
     /** Every chunk that can carry solid: implicit rock plus everything stored. */
@@ -155,10 +212,11 @@ export class Terrain {
 
     /** Replace a chunk's manifold (takes ownership; null = explicitly empty). */
     setManifold(key, manifold) {
-        this._evict(key);
         let old = this.chunks[key];
-        // The bytes being replaced are the base for a delta frame to clients holding them (until dropMeshCache)
-        this.chunks[key] = { key, version: '', bytes: null, manifold, prevBytes: old?.bytes || null, prevVersion: old?.bytes ? old.version : null };
+        let prev = old && (old.bytes || old.raw) ? { version: old.version, mesh: old.mesh || null, bytes: old.bytes, raw: old.raw } : null;
+        this._evict(key);
+        // The content being replaced is the base for a delta frame to clients holding it (until dropPrev)
+        this.chunks[key] = { ...this._empty(key), version: '', manifold, prev };
         this._refresh(key);
         this.dirty.add(key);
         if(this.chunks[key].manifold) this._touch(key);
@@ -191,39 +249,45 @@ export class Terrain {
         return out;
     }
 
-    /** Storage record for a chunk. */
+    /** Storage record for a chunk (compressing now if compress() has not run yet). */
     serializeChunk(key) {
         let c = this.chunks[key];
-        return c ? { key: c.key, version: c.version, bytes: c.bytes } : undefined;
+        return c ? { key: c.key, version: c.version, bytes: this.bytesOf(key) } : undefined;
     }
 
     clear() {
         for(let key in this.chunks) if(this.chunks[key].manifold) this.chunks[key].manifold.delete();
         this.chunks = {};
-        this.resident = [];
+        this.resident = []; this.residentTris = 0;
         this.dirty.clear();
     }
 
-    /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty. A chunk refreshed since
-     *  the last dropMeshCache() or chunkMesh() still has its mesh in memory; anything else is decoded from its bytes. */
+    /** Indexed mesh for a chunk's collider, or null if the chunk is implicit/empty: the resident decoded mesh
+     *  when there is one, else decoded from its bytes (and not kept: only resident chunks cache meshes). */
     chunkMesh(key) {
         let c = this.chunks[key];
-        if(!c || !c.bytes) return null;
-        let mesh = c.mesh;
-        c.mesh = null; // one use; keeping decoded meshes for every chunk would cost more memory than it saves time
-        return mesh || decodeChunkMesh(c.bytes);
+        if(!c || !(c.bytes || c.raw)) return null;
+        return this._decode(c);
     }
 
-    /** Forget the decoded meshes and previous bytes kept since their chunks were refreshed (bytes stay). */
-    dropMeshCache(keys) {
-        for(let key of keys) { let c = this.chunks[key]; if(c) { c.mesh = null; c.prevBytes = null; c.prevVersion = null; } }
+    /** Forget the replaced content kept for delta frames since these chunks were refreshed. */
+    dropPrev(keys) {
+        for(let key of keys) { let c = this.chunks[key]; if(c) c.prev = null; }
     }
 
-    /** Decoded mesh of the current bytes (cached one if present, without consuming it), or null. */
+    /** Decoded mesh of the chunk's current content (cached while resident), or null. */
     currentMesh(key) {
         let c = this.chunks[key];
-        if(!c || !c.bytes) return null;
-        return c.mesh || (c.mesh = decodeChunkMesh(c.bytes));
+        if(!c || !(c.bytes || c.raw)) return null;
+        if(!c.mesh) c.mesh = this._decode(c);
+        return c.mesh;
+    }
+
+    /** The replaced content of a chunk as a decoded mesh, for a delta frame, or null if none is kept. */
+    prevMesh(key) {
+        let p = this.chunks[key]?.prev;
+        if(!p) return null;
+        return p.mesh || (p.mesh = p.raw ? unpackChunkMesh(p.raw) : decodeChunkMesh(p.bytes));
     }
 
     /**
@@ -275,20 +339,23 @@ export class Terrain {
         this.setManifold(key, result);
     }
 
-    /** Re-encode a chunk's bytes and version from its manifold. */
+    /** Re-encode a chunk's content and version from its manifold (compressed later by compress()). */
     _refresh(key) {
         let c = this.chunks[key];
         if(!c.manifold || c.manifold.isEmpty()) {
             if(c.manifold) { c.manifold.delete(); c.manifold = null; }
-            c.bytes = null; c.mesh = null; c.prevBytes = null; c.prevVersion = null; c.version = EMPTY_VERSION;
+            c.bytes = null; c.raw = null; c.mesh = null; c.tris = 0; c.version = EMPTY_VERSION;
             return;
         }
         let mesh = c.manifold.getMesh();
         let { positions, uvs } = splitProps(mesh);
         let indices = new Uint32Array(mesh.triVerts), materials = this.triangleMaterials(mesh);
-        c.bytes = encodeChunkMesh(positions, indices, materials, uvs);
-        c.version = hashBytes(c.bytes);
-        c.mesh = { positions, uvs, indices, materials }; // for the collider cook and delta that follow, so they need not gunzip what we just gzipped
+        // No gzip here: the frame that follows is usually a delta, and the version hashes the raw layout.
+        c.raw = packChunkMesh(positions, indices, materials, uvs);
+        c.bytes = null;
+        c.version = hashBytes(c.raw);
+        c.mesh = { positions, uvs, indices, materials }; // collider cook and delta base for the next carve
+        c.tris = indices.length / 3;
     }
 
     /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */

@@ -23,6 +23,12 @@ let room = { id: { name: 'profile' }, storage: {
 let server = new bundle.WorldParty(room);
 clearInterval(server.interval);
 await server.onStart();
+if(process.env.WARM) { // production path: a second start adopts the stored summaries and builds no manifold
+    await server.persist();
+    server = new bundle.WorldParty(room);
+    clearInterval(server.interval);
+    await server.onStart();
+}
 let { chunkCenter } = await import('../../src/terrain/grid.js');
 let p = carves[0]?.player || chunkCenter(carves[0].keys[0]);
 server.world.create('p1', { Player: { name: 'p', color: '#fff' }, Transform: { position: { x: p.x, y: p.y, z: p.z }, quaternion: { x: 0, y: 0, z: 0, w: 1 } } });
@@ -36,7 +42,7 @@ for(let i = 0; i < carves.length; i++) {
     let c = carves[i];
     let frags0 = server.world.query('FragmentMesh').size;
     let t0 = performance.now();
-    server.applyCsg(c);
+    await server.applyCsg(c);
     let sync = performance.now() - t0;
     let t1 = performance.now();
     await sleep(0); await sleep(0); // settle timer

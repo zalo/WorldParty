@@ -11,7 +11,7 @@ import { Terrain, chunkCenter } from './server/Terrain.js';
 import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
 import { chunkAt, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { getPropDef } from './props/PropRegistry.js';
-import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeChunkMesh, decodeSoup, encodeHulls } from './net/codec.js';
+import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeHulls } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -110,10 +110,10 @@ export class WorldParty extends Server {
     // Chunks loaded from the legacy soup format are re-encoded and flagged for re-persist
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     // Ground check with the current algorithm: anything unsupported falls now
-    let shed = this.settleTerrain();
+    let shed = this.terrain.cold(() => this.settleTerrain());
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
-    this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
+    this.terrain.dropPrev(Object.keys(this.terrain.chunks));
     this.ready = true;
     this.resolveReady();
     console.log(`World ready: ${Object.keys(storedChunks).length} chunks (${adopted} summaries stored), ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders (${this.cookQueue.size} queued); wasm heaps: manifold ${this.terrain.heapMB().toFixed(0)} MB, physx ${this.physics.heapMB().toFixed(0)} MB`);
@@ -395,6 +395,7 @@ export class WorldParty extends Server {
 
   async persist() {
     this.lastPersist = Date.now();
+    await this.terrain.compress(this.persistChunks || []); // normally done already; never gzip synchronously here
     let puts = {};
     for(let id of this.persistQueue) {
       if(!this.world.has(id) || this.world.has(id, 'Player')) continue;
@@ -445,7 +446,9 @@ export class WorldParty extends Server {
 
   /** Run the boolean and push the new bytes right away; grounding, colliders and activity follow once the
    *  frames are on the wire (a timer callback), so the cut is visible as early as the boolean allows. */
-  applyCsg(data) {
+  async applyCsg(data) {
+    // Chunks not resident are decoded with the native gunzip first; the boolean itself is synchronous.
+    await this.terrain.prepare((data.keys || []).filter(k => typeof k === 'string'));
     let t0 = Date.now();
     this.terrain.applyCsg(data);
     this.csgStats.booleanMs += Date.now() - t0;
@@ -460,17 +463,19 @@ export class WorldParty extends Server {
    *  full. Clients that hold something else learn the version from the next update and fetch over HTTP. */
   pushChunk(key) {
     let st = this.sentStates.get(key), c = this.terrain.chunks[key];
-    if(!st || st.version === undefined || !c || !c.bytes || this.pushed.get(key) === c.version) return;
+    if(!st || st.version === undefined || !c || !this.terrain.hasSolid(key) || this.pushed.get(key) === c.version) return;
     let base = this.pushed.get(key) ?? st.version;
     let frame = null;
-    if(c.prevBytes && c.prevVersion === base) {
-      let delta = encodeChunkDelta(decodeChunkMesh(c.prevBytes), this.terrain.currentMesh(key));
-      if(delta.length < c.bytes.length * 0.75) frame = packChunkDeltaFrame(key, c.version, base, delta);
+    if(c.prev && c.prev.version === base) {
+      let delta = encodeChunkDelta(this.terrain.prevMesh(key), this.terrain.currentMesh(key));
+      // Worth it unless it is about as big as the full gzip would be (chunk layouts gzip to ~60%)
+      let fullEstimate = c.bytes ? c.bytes.length : c.raw.length * 0.6;
+      if(delta.length < fullEstimate * 0.75) frame = packChunkDeltaFrame(key, c.version, base, delta);
       this.csgStats.deltaBytes += frame ? delta.length : 0;
     }
-    this.csgStats.fullBytes += frame ? 0 : c.bytes.length;
+    if(!frame) { let bytes = this.terrain.bytesOf(key); this.csgStats.fullBytes += bytes.length; frame = packChunkFrame(key, c.version, bytes); }
     this.pushed.set(key, c.version);
-    this.broadcast(frame || packChunkFrame(key, c.version, c.bytes));
+    this.broadcast(frame);
   }
 
   /** Grounding, colliders and activity for every chunk carved since the last time. */
@@ -484,7 +489,8 @@ export class WorldParty extends Server {
     let activityMs = Date.now() - t0; // includes PhysX cooking of changed chunk colliders
     let changed = this.terrain.takeDirty();
     for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); this.physics.wakeNear(key); } // settle may have changed some again
-    this.terrain.dropMeshCache(Object.keys(changed));
+    this.terrain.dropPrev(Object.keys(changed));
+    this.terrain.compress(Object.keys(changed)).catch(e => console.error('compress failed: ' + e.message)); // native gzip, after the frames are out
     let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
     console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);
   }
@@ -502,9 +508,12 @@ export class WorldParty extends Server {
     let headers = { "X-Chunk-Version": c.version, "Access-Control-Allow-Origin": "*" };
     // A URL that names the exact current version may be cached forever
     headers["Cache-Control"] = url.searchParams.get("v") === c.version ? "public, max-age=31536000, immutable" : "no-store";
-    if(!c.bytes) return new Response(null, { status: 204, headers });
+    if(!this.terrain.hasSolid(key)) return new Response(null, { status: 204, headers });
+    await this.terrain.compress([key]);
+    let bytes = this.terrain.bytesOf(key);
+    if(!bytes || this.terrain.chunks[key].version !== c.version) return new Response("Changed", { status: 409 });
     headers["Content-Type"] = "application/octet-stream";
-    return new Response(c.bytes, { status: 200, headers });
+    return new Response(bytes, { status: 200, headers });
   }
 
   createJoint(data) {
@@ -583,7 +592,7 @@ export class WorldParty extends Server {
       }
       try {
         let bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
-        this.terrain.loadChunk(key, bytes);
+        this.terrain.loadChunk(key, bytes, typeof c.version === 'string' && /^[0-9a-f]{8}$/.test(c.version) ? c.version : null);
         this.markChunkPersist(key);
         n++;
       } catch(e) { console.warn(`import: bad chunk ${key}: ${e.message}`); }
@@ -594,10 +603,10 @@ export class WorldParty extends Server {
   async importEnd() {
     if(!this.importing) return;
     this.importing = false;
-    let shed = this.settleTerrain();
+    let shed = this.terrain.cold(() => this.settleTerrain());
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
-    this.terrain.dropMeshCache(Object.keys(this.terrain.chunks));
+    this.terrain.dropPrev(Object.keys(this.terrain.chunks));
     this.chunkDelta = null;
     this.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
@@ -627,7 +636,7 @@ export class WorldParty extends Server {
         break;
 
       case "csg":
-        this.applyCsg(data);
+        await this.applyCsg(data);
         break;
 
       case "spawnphyscube":

@@ -103,7 +103,7 @@ export class Connectivity {
     summary(key) {
         let c = this.terrain.chunks[key];
         if(!c) return isRockKey(this.terrain.world, key) ? ROCK : OPEN_AIR;
-        if(!c.bytes) return EMPTY_AIR;
+        if(!(c.bytes || c.raw)) return EMPTY_AIR;
         let cached = this.cache.get(key);
         if(cached && cached.version === c.version) return cached;
         let manifold = this.terrain.manifoldOf(key);
@@ -134,7 +134,7 @@ export class Connectivity {
     /** Adopt a stored summary if it still matches the chunk's version (saves rebuilding the manifold at startup). */
     importSummary(key, s) {
         let c = this.terrain.chunks[key];
-        if(!c || !s || s.version !== c.version || !c.bytes) return false;
+        if(!c || !s || s.version !== c.version || !(c.bytes || c.raw)) return false;
         let island = i => {
             let masks = new Array(6);
             for(let f = 0; f < 6; f++) if(i.masks[f]) { let m = i.masks[f] instanceof Uint8Array ? i.masks[f] : new Uint8Array(i.masks[f]); masks[f] = m.every(v => v) ? FULL : m; }

@@ -30,7 +30,7 @@ for(let i = 0; i < 40; i++) {
     let key = keys[i % keys.length];
     let { chunkCenter } = await import('../../src/terrain/grid.js');
     let c = chunkCenter(key);
-    server.applyCsg({ keys: [key], brush, operation: 1, position: { x: c.x + (i % 3) - 1, y: c.y + (i % 5) - 2, z: c.z }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 2, y: 2, z: 2 }, material: 0 });
+    await server.applyCsg({ keys: [key], brush, operation: 1, position: { x: c.x + (i % 3) - 1, y: c.y + (i % 5) - 2, z: c.z }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 2, y: 2, z: 2 }, material: 0 });
     await new Promise(r => setTimeout(r, 2));
     if(i % 10 === 9) line(`after ${i + 1} carves across chunks`);
 }
