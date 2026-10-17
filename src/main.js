@@ -17,6 +17,7 @@ import { TerrainMirror } from './client/TerrainMirror.js';
 import { TerrainTextures } from './client/TerrainTextures.js';
 import { attribute, texture, uv, select, vertexColor, Fn } from 'three/tsl';
 import { getPropDef } from './props/PropRegistry.js';
+import { GRAVITY } from './units.js';
 import { SceneCleanupSystem, SnapshotSystem, BodyRenderSystem, PlayerRenderSystem, JointRenderSystem, ModelRenderSystem } from './client/systems.js';
 
 import { CSGBrushTool } from './tools/CSGBrushTool.js';
@@ -66,7 +67,7 @@ export default class Main {
 
         this.serverTickMs = 0;
         this.world = new World(this, this.isMobile());
-        this.simulationParams = { firstPerson: true, gravity: -80, playerSpeed: 10, physicsSteps: 5, jumpVelocity: 20.0, mobile: this.isMobile() };
+        this.simulationParams = { firstPerson: true, gravity: -GRAVITY, playerSpeed: 10, physicsSteps: 5, jumpVelocity: 20.0, mobile: this.isMobile() };
         this.raycaster = new THREE.Raycaster();
 
         this.gltfLoader = new GLTFLoader();

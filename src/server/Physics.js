@@ -12,12 +12,14 @@ import physxWasm from '../../assets/physx/physx-js-webidl.wasm';
 import { PROP_HULLS } from '../props/PropHulls.js';
 import { decodeSoup, decodeHulls } from '../net/codec.js';
 import { chunkCenter, HALF } from '../terrain/grid.js';
+import { UNITS_PER_METRE, GRAVITY } from '../units.js';
 
 const BODY_DENSITY = 500.0;
 const REPLICATE_EVERY_N_TICKS = 2; // 30Hz tick -> 15Hz body replication
 const KILL_PLANE_Y = -100;
-const FRAGMENT_SLEEP_THRESHOLD = 0.02; // mass-normalized kinetic energy below which rubble sleeps (PhysX default 0.005): debris
-                                       // rocking in a pile is what keeps the tick expensive, so it settles a little sooner
+const FRAGMENT_SLEEP_THRESHOLD = 0.02 * UNITS_PER_METRE * UNITS_PER_METRE; // mass-normalized kinetic energy (units²/s²) below which rubble
+                                       // sleeps, 4x the PhysX default (5e-5 * speed²): debris rocking in a pile is what keeps the tick expensive,
+                                       // so it settles a little sooner
 
 export class Physics {
     constructor() {
@@ -50,10 +52,12 @@ export class Physics {
         let version = px.PHYSICS_VERSION;
         let foundation = px.CreateFoundation(version, new px.PxDefaultAllocator(), new px.PxDefaultErrorCallback());
         let tolerances = new px.PxTolerancesScale();
+        tolerances.set_length(UNITS_PER_METRE);      // typical object size: PhysX's defaults (contact offsets, sleep and
+        tolerances.set_speed(10 * UNITS_PER_METRE);  // bounce thresholds, ...) are written for metres and scale with these
         this.physics = px.CreatePhysics(version, foundation, tolerances);
 
         let sceneDesc = new px.PxSceneDesc(tolerances);
-        sceneDesc.set_gravity(new px.PxVec3(0, -9.81, 0));
+        sceneDesc.set_gravity(new px.PxVec3(0, -GRAVITY, 0));
         sceneDesc.set_cpuDispatcher(px.DefaultCpuDispatcherCreate(0));
         sceneDesc.set_filterShader(px.DefaultFilterShader());
         this.scene = this.physics.createScene(sceneDesc);
