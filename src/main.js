@@ -17,7 +17,7 @@ import { TerrainMirror } from './client/TerrainMirror.js';
 import { TerrainTextures } from './client/TerrainTextures.js';
 import { attribute, texture, uv, select, vertexColor, Fn } from 'three/tsl';
 import { getPropDef } from './props/PropRegistry.js';
-import { GRAVITY } from './units.js';
+import { PLAYER_GRAVITY } from './gravity.js';
 import { SceneCleanupSystem, SnapshotSystem, BodyRenderSystem, PlayerRenderSystem, JointRenderSystem, ModelRenderSystem } from './client/systems.js';
 
 import { CSGBrushTool } from './tools/CSGBrushTool.js';
@@ -59,6 +59,11 @@ export default class Main {
         this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
+        // ?gravity=<m/s²> sets the room's body gravity (persisted with the world config; see src/gravity.js)
+        if(this.queryParams.has("gravity")) {
+            let gravity = parseFloat(this.queryParams.get("gravity"));
+            this.conn.addEventListener("open", () => this.conn.send(JSON.stringify({ type: "setgravity", gravity })), { once: true });
+        }
         // ?import=<manifest url> uploads a world (tools/import-world.mjs output) into the room once connected
         if(this.queryParams.has("import")) {
             let url = this.queryParams.get("import");
@@ -67,7 +72,7 @@ export default class Main {
 
         this.serverTickMs = 0;
         this.world = new World(this, this.isMobile());
-        this.simulationParams = { firstPerson: true, gravity: -GRAVITY, playerSpeed: 10, physicsSteps: 5, jumpVelocity: 20.0, mobile: this.isMobile() };
+        this.simulationParams = { firstPerson: true, gravity: -PLAYER_GRAVITY, playerSpeed: 10, physicsSteps: 5, jumpVelocity: 20.0, mobile: this.isMobile() };
         this.raycaster = new THREE.Raycaster();
 
         this.gltfLoader = new GLTFLoader();

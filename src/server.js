@@ -10,6 +10,7 @@ import { Physics } from './server/Physics.js';
 import { Terrain, chunkCenter } from './server/Terrain.js';
 import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
 import { chunkAt, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
+import { DEFAULT_BODY_GRAVITY, clampGravity } from './gravity.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeHulls } from './net/codec.js';
 
@@ -92,6 +93,7 @@ export class WorldParty extends Server {
 
     await this.terrain.init(storedChunks, storedWorld);
     await this.physics.init();
+    this.applyGravity();
     // Stored connectivity summaries spare us rebuilding every chunk's manifold just to start
     let storedSummaries = await this.loadPrefixed('summary:');
     let adopted = 0;
@@ -537,11 +539,28 @@ export class WorldParty extends Server {
     if(g && g.by === playerId) this.world.remove(bodyId, 'Grabbed');
   }
 
+  /** Body gravity follows the world config (`?gravity=` on the client sets it; an import replaces it). */
+  applyGravity() { this.physics.setGravity(this.world, this.terrain.world.gravity ?? DEFAULT_BODY_GRAVITY); }
+
+  async setGravity(g) {
+    g = clampGravity(g);
+    if(g === null || g === (this.terrain.world.gravity ?? DEFAULT_BODY_GRAVITY)) return;
+    let world = { ...this.terrain.world };
+    if(g === DEFAULT_BODY_GRAVITY) delete world.gravity; else world.gravity = g;
+    this.terrain.world = world;
+    this.applyGravity();
+    await this.ctx.storage.put('world', world);
+    this.broadcast(JSON.stringify({ type: "chat", sender: "server", message: `Gravity is now ${g.toFixed(2)} m/s² (${(g / 9.81).toFixed(2)} g)` }));
+    this.broadcast(JSON.stringify(this.fullUpdate(false)));
+    this.world.takeDirty(); this.chunkDelta = null;
+  }
+
   /** Wipe terrain, entities and their storage; the world config becomes `world` (default: the sandbox). */
   async clearWorld(world = DEFAULT_WORLD) {
     for(let id of [...this.world.ids()]) if(!this.world.has(id, 'Player')) this.world.destroy(id);
     this.terrain.clear();
     this.terrain.world = world;
+    this.applyGravity();
     if(world === DEFAULT_WORLD) await this.ctx.storage.delete('world'); else await this.ctx.storage.put('world', world);
     let keys = [];
     for(let prefix of ['chunk:', 'chunkpart:', 'summary:', 'ent:']) keys.push(...(await this.ctx.storage.list({ prefix })).keys());
@@ -691,6 +710,9 @@ export class WorldParty extends Server {
         break;
       case "reset":
         await this.reset();
+        break;
+      case "setgravity":
+        await this.setGravity(data.gravity);
         break;
       case "import_begin": await this.importBegin(data); break;
       case "import_chunks": this.importChunks(data); break;

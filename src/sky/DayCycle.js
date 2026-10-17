@@ -10,7 +10,6 @@ import * as THREE from 'three/webgpu';
 import { Atmosphere, SUN_ILLUMINANCE } from './Atmosphere.js';
 import { Sky, sunDirectionFromTime } from './Sky.js';
 import { Environment } from './Environment.js';
-import { UNITS_PER_METRE } from '../units.js';
 import { G } from './Globals.js';
 
 const _up = new THREE.Vector3( 0, 1, 0 );
@@ -98,7 +97,7 @@ export class DayCycle {
 		this.sun.position.copy( camera.position ).addScaledVector( this.light, 100 );
 		this.sun.target.updateMatrixWorld();
 
-		this.atmosphere.update( dt, camera.position.y / UNITS_PER_METRE );
+		this.atmosphere.update( dt, camera.position.y );
 		this.applyReadback();
 		this.environment.update( dt );
 

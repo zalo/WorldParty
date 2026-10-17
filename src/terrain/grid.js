@@ -9,6 +9,8 @@ export const CHUNK_SIZE = 10.0;
 export const HALF = CHUNK_SIZE / 2;
 
 /** The sandbox default: a 100 m cube centred on the origin, solid below y=0. */
+import { clampGravity } from '../gravity.js';
+
 export const DEFAULT_WORLD = Object.freeze({
     bounds: { min: [-5, -5, -5], max: [4, 4, 4] },   // inclusive chunk coords
     rock:   { min: [-5, -5, -5], max: [4, -1, 4] },  // implicit solid chunks (null = none)
@@ -78,6 +80,7 @@ export function outsideIsSolid(face) { return face === 2; }
 
 /** Validate a world config from the wire or storage; returns a clean copy or null. */
 export function sanitizeWorld(w) {
+    // (body gravity: see src/gravity.js)
     const box = (b) => {
         if(!b || !Array.isArray(b.min) || !Array.isArray(b.max)) return null;
         let min = b.min.slice(0, 3).map(v => Math.trunc(+v)), max = b.max.slice(0, 3).map(v => Math.trunc(+v));
@@ -89,5 +92,6 @@ export function sanitizeWorld(w) {
     if(!bounds) return null;
     let out = { bounds, rock: box(w.rock) };
     if(Array.isArray(w.materials) && w.materials.length) out.materials = sanitizeMaterials(w.materials);
+    if(w.gravity !== undefined) { let g = clampGravity(w.gravity); if(g !== null) out.gravity = g; }
     return out;
 }

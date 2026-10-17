@@ -12,14 +12,13 @@ import physxWasm from '../../assets/physx/physx-js-webidl.wasm';
 import { PROP_HULLS } from '../props/PropHulls.js';
 import { decodeSoup, decodeHulls } from '../net/codec.js';
 import { chunkCenter, HALF } from '../terrain/grid.js';
-import { UNITS_PER_METRE, GRAVITY } from '../units.js';
+import { DEFAULT_BODY_GRAVITY } from '../gravity.js';
 
 const BODY_DENSITY = 500.0;
 const REPLICATE_EVERY_N_TICKS = 2; // 30Hz tick -> 15Hz body replication
 const KILL_PLANE_Y = -100;
-const FRAGMENT_SLEEP_THRESHOLD = 0.02 * UNITS_PER_METRE * UNITS_PER_METRE; // mass-normalized kinetic energy (units²/s²) below which rubble
-                                       // sleeps, 4x the PhysX default (5e-5 * speed²): debris rocking in a pile is what keeps the tick expensive,
-                                       // so it settles a little sooner
+const FRAGMENT_SLEEP_THRESHOLD = 0.02; // mass-normalized kinetic energy below which rubble sleeps (PhysX default 0.005): debris
+                                       // rocking in a pile is what keeps the tick expensive, so it settles a little sooner
 
 export class Physics {
     constructor() {
@@ -52,12 +51,10 @@ export class Physics {
         let version = px.PHYSICS_VERSION;
         let foundation = px.CreateFoundation(version, new px.PxDefaultAllocator(), new px.PxDefaultErrorCallback());
         let tolerances = new px.PxTolerancesScale();
-        tolerances.set_length(UNITS_PER_METRE);      // typical object size: PhysX's defaults (contact offsets, sleep and
-        tolerances.set_speed(10 * UNITS_PER_METRE);  // bounce thresholds, ...) are written for metres and scale with these
         this.physics = px.CreatePhysics(version, foundation, tolerances);
 
         let sceneDesc = new px.PxSceneDesc(tolerances);
-        sceneDesc.set_gravity(new px.PxVec3(0, -GRAVITY, 0));
+        sceneDesc.set_gravity(new px.PxVec3(0, -DEFAULT_BODY_GRAVITY, 0));
         sceneDesc.set_cpuDispatcher(px.DefaultCpuDispatcherCreate(0));
         sceneDesc.set_filterShader(px.DefaultFilterShader());
         this.scene = this.physics.createScene(sceneDesc);
@@ -411,6 +408,13 @@ export class Physics {
                 pb.actor.wakeUp();
             }
         }
+    }
+
+    /** Body gravity (m/s², positive down); the room's world config decides it. Wakes everything so piles re-settle. */
+    setGravity(world, g) {
+        if(Math.abs(this.scene.getGravity().get_y() + g) < 1e-6) return;
+        this.scene.setGravity(new this.px.PxVec3(0, -g, 0));
+        for(let [, pb] of world.each('$PxBody')) pb.actor.wakeUp();
     }
 
     /** Toggle frozen (kinematic) state on a body entity. */

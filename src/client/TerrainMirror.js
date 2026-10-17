@@ -46,7 +46,8 @@ export class TerrainMirror {
     configure(world) {
         let w = sanitizeWorld(world);
         if(!w) return;
-        let changed = JSON.stringify(w) !== JSON.stringify(this.world);
+        let geometryOf = ({ gravity, ...rest }) => JSON.stringify(rest); // body gravity is the server's business
+        let changed = geometryOf(w) !== geometryOf(this.world);
         this.world = w;
         this.table = materialTable(w);
         if(changed) this.onWorldChanged?.(w);
