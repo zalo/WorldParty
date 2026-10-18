@@ -146,17 +146,23 @@ export class Game {
     eyeOf(id) { let tf = this.world.get(id, 'Transform'); return { x: tf.position.x, y: tf.position.y + 1.0, z: tf.position.z }; }
 
     /** Validate a shot's origin and direction against the player's known position; null if it is nowhere near. */
+    /** PhysX actor pointer of a player's capsule (0 if none yet). */
+    actorPtrOf(id) { return this.world.get(id, '$PxKinematic')?.actor?.ptr || this.world.get(id, '$PxBody')?.actor?.ptr || 0; }
+
     aim(id, data) {
         let eye = this.eyeOf(id);
         let origin = vec3(data.origin, eye), dir = unit(vec3(data.dir, { x: 0, y: 0, z: 1 }));
-        if(dist(origin, eye) > 4) origin = eye;
+        if(dist(origin, eye) > 8) origin = eye; // the server's eye lags a moving (or grappling) player by the round trip
         return { origin, dir };
     }
 
+    /** The client meters its own cooldown and fires the moment it ends; arrival jitter (and Date.now() standing
+     *  still through a busy tick on Cloudflare) made every fourth shot land here "early" and vanish, so a shot
+     *  within a third of the cooldown of being ready is taken and the next cooldown counts from the nominal time. */
     ready(id, weapon, now) {
-        let cd = this.cooldowns.get(id) || {};
-        if((cd[weapon] || 0) > now) return false;
-        cd[weapon] = now + WEAPONS[weapon].cooldownMs;
+        let cd = this.cooldowns.get(id) || {}, readyAt = cd[weapon] || 0, cdMs = WEAPONS[weapon].cooldownMs;
+        if(readyAt - now > cdMs / 3) return false;
+        cd[weapon] = Math.max(now, readyAt) + cdMs;
         this.cooldowns.set(id, cd);
         return true;
     }
@@ -171,6 +177,9 @@ export class Game {
         let { origin, dir } = this.aim(id, data);
         let w = this.world;
         if(weapon === 'rocket') {
+            // point blank: the rocket would be born inside the wall ahead and fly through it, so trace the first metre
+            let pre = this.physics.raycast(origin, dir, 1.3, this.actorPtrOf(id));
+            if(pre) { this.explode({ x: pre.position.x - dir.x * 0.15, y: pre.position.y - dir.y * 0.15, z: pre.position.z - dir.z * 0.15 }, 'rocket', id, now); return; }
             let start = { x: origin.x + dir.x * 1.3, y: origin.y + dir.y * 1.3, z: origin.z + dir.z * 1.3 };
             w.create({
                 Transform: Transform({ position: start }),
@@ -517,11 +526,11 @@ export class Game {
             pr.vel.y -= def.gravity * dt;
             let step = { x: pr.vel.x * dt, y: pr.vel.y * dt, z: pr.vel.z * dt };
             let len = Math.hypot(step.x, step.y, step.z);
-            let hit = len > 1e-4 ? this.physics.raycast(tf.position, { x: step.x / len, y: step.y / len, z: step.z / len }, len + 0.25) : null;
+            // the shooter's own capsule is skipped while the rocket leaves it, without hiding what is behind it
+            let hit = len > 1e-4 ? this.physics.raycast(tf.position, { x: step.x / len, y: step.y / len, z: step.z / len }, len + 0.25, now - pr.bornAt < 250 ? this.actorPtrOf(pr.owner) : 0) : null;
             if(hit) {
                 let hitId = this.physics.entityOfActor(w, hit.actorPtr);
-                if(hitId === pr.owner && now - pr.bornAt < 250) hit = null; // leaving the shooter's own capsule
-                else {
+                {
                     let at = { x: hit.position.x - step.x / len * 0.15, y: hit.position.y - step.y / len * 0.15, z: hit.position.z - step.z / len * 0.15 };
                     if(hitId && w.has(hitId, 'Player')) this.damage(hitId, def.direct, pr.owner, 'rocketed', { x: 0, y: 0, z: 0 }, now);
                     this.explode(at, pr.kind, pr.owner, now);

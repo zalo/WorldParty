@@ -85,13 +85,14 @@ export class Physics {
     // ---- queries and impulses (Fort War) ----------------------------------
 
     /** Closest blocking hit along a ray against everything in the scene (terrain, bodies, player capsules), or null. */
-    raycast(origin, dir, maxDist) {
+    /** Nearest hit along the ray, or null; `ignorePtr` skips one actor (a shooter's own capsule). */
+    raycast(origin, dir, maxDist, ignorePtr = 0) {
         this.rayOrigin.set_x(origin.x); this.rayOrigin.set_y(origin.y); this.rayOrigin.set_z(origin.z);
         this.rayDir.set_x(dir.x); this.rayDir.set_y(dir.y); this.rayDir.set_z(dir.z);
         let r = this.rayResult;
         if(!this.scene.raycast(this.rayOrigin, this.rayDir, maxDist, r, this.rayFlags, this.rayFilter)) return null;
         let best = null, bestD = Infinity, n = r.getNbAnyHits();
-        for(let i = 0; i < n; i++) { let h = r.getAnyHit(i), d = h.get_distance(); if(d < bestD) { bestD = d; best = h; } }
+        for(let i = 0; i < n; i++) { let h = r.getAnyHit(i), d = h.get_distance(); if(d < bestD && !(ignorePtr && h.get_actor().ptr === ignorePtr)) { bestD = d; best = h; } }
         if(!best) return null;
         let p = best.get_position(), nm = best.get_normal();
         return { distance: bestD, position: { x: p.get_x(), y: p.get_y(), z: p.get_z() }, normal: { x: nm.get_x(), y: nm.get_y(), z: nm.get_z() }, actorPtr: best.get_actor().ptr };
