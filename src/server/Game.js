@@ -59,6 +59,16 @@ export class Game {
     }
 
     /** A player connected (entity already exists): pick a team and spawn. */
+    /** A level was (re)imported: start over, whatever the room held before (supplies of the old layout, an old score). */
+    onImported() {
+        if(!this.active) return;
+        let w = this.world;
+        this.resetSupplies();
+        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0 }); this.spawnQueue.add(id); }
+        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round: 1, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, awards: [], vote: null });
+        this.updateScores(true);
+    }
+
     onConnect(id) { if(this.active) this.join(id); }
 
     onDisconnect(id) {

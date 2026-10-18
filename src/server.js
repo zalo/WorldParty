@@ -126,6 +126,7 @@ export class WorldParty extends Server {
     this.refreshActivity(true);
     this.terrain.dropPrev(Object.keys(this.terrain.chunks));
     this.game.onWorldChanged();
+    this.game.onImported(); // a new level means a fresh match: treasure laid out again, clock and scores reset
     this.world.takeDirty();
     this.ready = true;
     this.resolveReady();
