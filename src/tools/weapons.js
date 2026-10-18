@@ -194,6 +194,7 @@ export class GrappleTool extends Weapon {
     onPrimaryFire(main) {
         if(this.anchor) { this.release(main); return; }
         if(main.game?.dead) return;
+        if(main.game?.me?.carrying) { main.game.hud.flashText('Too heavy to grapple with a crate'); return; }
         main.raycaster.setFromCamera(new THREE.Vector2(0, 0), main.world.camera);
         main.raycaster.far = this.def.range;
         let hits = main.raycaster.intersectObjects([main.terrainBatch], true);

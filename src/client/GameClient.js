@@ -104,12 +104,28 @@ export class GameClient {
         return false;
     }
 
+    /** While dead, watch the nearest living teammate (the camera hovers behind them). */
+    spectateTeammate() {
+        let main = this.main, me = this.me, best = null, bestD = Infinity;
+        for(let [id, p, tf] of main.ecs.each('Player', 'Transform')) {
+            if(id === main.conn.id || p.team !== me.team || p.dead) continue;
+            let d = Math.hypot(tf.position.x - main.player.position.x, tf.position.z - main.player.position.z);
+            if(d < bestD) { bestD = d; best = { p, tf }; }
+        }
+        if(!best) { main.player.spectate = null; this.hud.spectating = ''; return; }
+        let m = main.ecs.get(best.p === this.me ? null : [...main.ecs.each('Player')].find(r => r[1] === best.p)?.[0], '$Mesh');
+        let pos = m ? m.object.position : best.tf.position;
+        main.player.spectate = { x: pos.x, y: pos.y + 1, z: pos.z };
+        this.hud.spectating = best.p.name;
+    }
+
     update(dt) {
         let main = this.main, me = this.me;
         this.fx.update(dt);
         if(me) {
             if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; this.carryingNoted = false; for(let t of this.tools) if(t.release) t.release(main); }
-            if(!me.dead && this.wasDead) { main.player.frozen = false; this.hud.killedBy = ''; }
+            if(!me.dead && this.wasDead) { main.player.frozen = false; main.player.spectate = null; this.hud.spectating = ''; this.hud.killedBy = ''; }
+            if(me.dead) this.spectateTeammate();
             this.wasDead = me.dead;
             if(me.dead && performance.now() > this.respawnAt + 500 && !this.askedRespawn) { this.askedRespawn = true; main.conn.send(JSON.stringify({ type: 'respawn' })); setTimeout(() => this.askedRespawn = false, 1000); }
             if(me.team !== this.lastTeam) { this.lastTeam = me.team; main.player.playerMesh.material.color.set(this.teamColor(me.team)); }

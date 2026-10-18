@@ -19,7 +19,7 @@ export const WEAPONS = {
     grenade: { name: 'Grenade',         icon: '💣', key: '2', cooldownMs: 900,  minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
     buster:  { name: 'Bunker Buster',   icon: '☢️', key: '2', cooldownMs: 2000, speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
     drill:   { name: 'Drill',           icon: '⛏️', key: '3', cooldownMs: 420,  width: 1.9, height: 2.5, depth: 2.3, reach: 1.1 },
-    mason:   { name: 'Mason',           icon: '🧱', key: '4', cooldownMs: 300,  budget: 12, regenMs: 4500, maxDistance: 9,
+    mason:   { name: 'Mason',           icon: '🧱', key: '4', cooldownMs: 300,  budget: 12, regenMs: 20000, stonePerDig: 1, maxDistance: 9, // stone comes from digging; the trickle only prevents a dead end
                shapes: { wall: [4, 2.6, 0.6], block: [2, 2, 2], plank: [4, 0.4, 1.4], pillar: [1, 4, 1] } },
     grapple: { name: 'Grapple',         icon: '🪝', key: '5', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
     physgun: { name: 'PhysGun',         icon: '🔫', key: '6', range: 20 },
@@ -40,6 +40,11 @@ export const FRAGMENT_FADE_MS = 40000;    // sleeping rubble fades after this ..
 export const MAX_FRAGMENTS = 110;         // ... or sooner when there is this much of it
 export const MAX_PLAYER_PROPS = 40;       // crates and barrels spawned from the menu, room-wide
 export const GAME_PROPS = ['crate', 'barrel'];
+
+/** End-of-round awards: [title, Player field, higher is better, minimum to qualify] */
+export const AWARDS = [
+    ['Warlord', 'kills', 2], ['Mule', 'carries', 1], ['Tunnel Rat', 'smuggles', 1], ['Demolition', 'blasts', 10], ['Lemming', 'deaths', 3],
+];
 
 export const TEAM_DEFAULTS = {
     red:  { name: 'Red',  color: '#e03a2f' },

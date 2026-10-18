@@ -53,16 +53,19 @@ export class GameHud {
         this.death = el('div', 'position:absolute;inset:0;background:rgba(40,0,0,0.5);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;', root);
         this.deathTitle = el('div', 'font-size:34px;font-weight:bold;', this.death);
         this.deathSub = el('div', 'font-size:18px;', this.death);
+        this.deathSpec = el('div', 'font-size:14px;opacity:0.8;', this.death);
+        this.spectating = '';
         // match overlay
         this.over = el('div', 'position:absolute;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;', root);
         this.overTitle = el('div', 'font-size:40px;font-weight:bold;', this.over);
         this.overSub = el('div', 'font-size:18px;', this.over);
+        this.overAwards = el('div', 'font-size:16px;margin-top:10px;display:flex;flex-direction:column;gap:4px;align-items:center;', this.over);
         // help card (H)
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:18px;font-weight:bold;margin-bottom:6px">Fort War</div>
             <div>Storm the enemy fort, grab a <b style="color:#ffc830">supply crate</b> (walk into it) and carry it into your own vault. Most supplies in your vault when the clock runs out wins. Carrying it home underground earns a bonus crate.</div>
-            <div style="margin-top:8px"><b>1</b> Rocket launcher &nbsp; <b>2</b> Grenade (hold to charge; right click: bunker buster, one per life) &nbsp; <b>3</b> Drill (hold; aim down to burrow) &nbsp; <b>4</b> Mason (place stone; right click: shape, R: turn, scroll: distance) &nbsp; <b>5</b> Grapple (hook terrain; jump to let go) &nbsp; <b>6</b> PhysGun</div>
-            <div style="margin-top:8px">Every wall, floor and bridge is terrain: blast or drill through it, dig under it, or build your own. Unsupported stone falls. Falling rubble and thrown props hurt.</div>
+            <div style="margin-top:8px"><b>1</b> Rocket launcher &nbsp; <b>2</b> Grenade (hold to charge; right click: bunker buster, one per life) &nbsp; <b>3</b> Drill (hold; aim down to burrow; <b>every dig earns a stone</b>) &nbsp; <b>4</b> Mason (place stone; right click: shape, R: turn, scroll: distance) &nbsp; <b>5</b> Grapple (hook terrain; jump to let go) &nbsp; <b>6</b> PhysGun</div>
+            <div style="margin-top:8px">Every wall, floor and bridge is terrain: blast or drill through it, dig under it, or build your own. Unsupported stone falls. Falling rubble and thrown props hurt. A carried crate glows for everyone, and the carrier cannot grapple.</div>
             <div style="margin-top:8px"><b>Enter</b> chat &nbsp; <b>H</b> this card &nbsp; <b>J</b> switch team (if the teams allow it) &nbsp; <b>Q</b> tool menu</div>
             <div style="margin-top:8px;opacity:0.7">Rumour has it loot lies buried beneath the courtyards, under the gorge banks and deep below the bridge.</div>`;
         // chat input
@@ -125,6 +128,8 @@ export class GameHud {
                 this.overTitle.textContent = w ? `${w.name} wins the round!` : 'Draw!';
                 this.overTitle.style.color = w ? w.color : '#fff';
                 this.overSub.textContent = `${m.scores.red} to ${m.scores.blue}. The forts are rebuilt in ${Math.max(0, Math.ceil((MATCH_OVER_MS - (now - (this.overSince ||= now))) / 1000))} s`;
+                let awards = (m.awards || []).map(a => `🏅 ${a.title}: ${a.name} (${a.value})`).join('\n');
+                if(this.overAwards.textContent !== awards) { this.overAwards.textContent = awards; this.overAwards.style.whiteSpace = 'pre'; }
             } else this.overSince = 0;
         }
         // weapon cooldowns and the grenade charge
@@ -142,6 +147,8 @@ export class GameHud {
             this.deathTitle.textContent = this.killedBy || 'You died';
             let left = Math.max(0, Math.ceil((g.respawnAt - now) / 1000));
             this.deathSub.textContent = left > 0 ? `Respawning in ${left}...` : 'Respawning...';
+            this.deathSpec.textContent = this.spectating ? `Watching ${this.spectating}` : '';
+            this.death.style.background = this.spectating ? 'rgba(40,0,0,0.15)' : 'rgba(40,0,0,0.5)';
         } else this.death.style.display = 'none';
         // loot sense: nearest neutral supply
         let best = Infinity, bestDy = 0, mine = this.main.player.position;

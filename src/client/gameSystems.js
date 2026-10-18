@@ -58,7 +58,7 @@ export class SupplyRenderSystem {
     }
     materialFor(team) {
         let key = team || 'loot';
-        if(!this.materials[key]) this.materials[key] = new THREE.MeshBasicMaterial({ color: team ? this.teamColor(team) : '#ffc830' });
+        if(!this.materials[key]) this.materials[key] = new THREE.MeshBasicMaterial({ color: team ? this.teamColor(team) : '#ffc830', depthTest: false, transparent: true, opacity: 0.9 });
         return this.materials[key];
     }
     update(world, dt) {
@@ -68,6 +68,7 @@ export class SupplyRenderSystem {
             if(!fx) {
                 let marker = new THREE.Mesh(this.markerGeometry, this.materialFor(s.team));
                 marker.userData.sharedGeometry = true;
+                marker.renderOrder = 10; // drawn over the terrain: a crate is a beacon for everyone
                 let crate = new THREE.Mesh(this.crateGeometry, this.crateMaterial);
                 crate.userData.sharedGeometry = true;
                 crate.visible = false;
@@ -85,6 +86,7 @@ export class SupplyRenderSystem {
                     fx.crate.position.copy(carrierMesh.position); fx.crate.position.y += 1.9;
                     fx.crate.rotation.y = t * 1.5;
                     fx.marker.position.copy(fx.crate.position); fx.marker.position.y += 0.9;
+                    fx.marker.scale.setScalar(1.6 + Math.sin(t * 6) * 0.3); // a carried crate pulses, visible through walls
                 }
             } else {
                 fx.crate.visible = false;
@@ -92,6 +94,7 @@ export class SupplyRenderSystem {
                 let tf = world.get(id, 'Transform');
                 let hidden = !s.team && tf && tf.position.y < -1.5;
                 fx.marker.visible = !!body && !hidden;
+                fx.marker.scale.setScalar(1);
                 if(body) { fx.marker.position.copy(body.position); fx.marker.position.y += 1.1 + Math.sin(t * 2 + id.length) * 0.1; }
             }
             fx.marker.rotation.y = t;

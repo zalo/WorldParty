@@ -40,8 +40,8 @@ export const Joint = ({ type, bodyA, bodyB, localOffsetA = { x: 0, y: 0, z: 0 },
 
 export const Grabbed = ({ by }) => ({ by });
 
-export const Player = ({ name = 'Player', color = '#ffffff', team = null, health = 100, dead = false, carrying = null, kills = 0, deaths = 0, score = 0, respawnAt = 0, build = 0, buster = 0 } = {}) =>
-    ({ name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster });
+export const Player = ({ name = 'Player', color = '#ffffff', team = null, health = 100, dead = false, carrying = null, kills = 0, deaths = 0, score = 0, respawnAt = 0, build = 0, buster = 0, carries = 0, smuggles = 0, blasts = 0 } = {}) =>
+    ({ name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster, carries, smuggles, blasts });
 
 export const Projectile = ({ kind, team = null, owner = null, vel = { x: 0, y: 0, z: 0 }, bornAt = 0 }) => ({ kind, team, owner, vel: { ...vel }, bornAt });
 
@@ -50,8 +50,8 @@ export const Fuse = ({ kind, team = null, owner = null, at }) => ({ kind, team, 
 export const Supply = ({ team = null, state = 'home', carriedBy = null, home = { x: 0, y: 0, z: 0 }, droppedAt = 0 }) =>
     ({ team, state, carriedBy, home: { ...home }, droppedAt });
 
-export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0 } = {}) =>
-    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt });
+export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [] } = {}) =>
+    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt, awards: [...awards] });
 
 export const Model = ({ url, selectedBy = '' }) => ({ url, selectedBy });
 

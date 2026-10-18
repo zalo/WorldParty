@@ -8,8 +8,9 @@
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
 import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y,
-         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, MAX_PLAYER_PROPS, GAME_PROPS, inBox, otherTeam } from '../game/rules.js';
+         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, MAX_PLAYER_PROPS, GAME_PROPS, AWARDS, inBox, otherTeam } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
+import { chunksInBox } from '../terrain/grid.js';
 
 const MATCH_ID = 'match';
 const SPAWN_PROTECT_MS = 2500;
@@ -179,7 +180,13 @@ export class Game {
         let d = WEAPONS.drill;
         let c = d.reach + d.depth / 2;
         let center = { x: origin.x + dir.x * c, y: origin.y + dir.y * c - 0.3, z: origin.z + dir.z * c };
+        // stone comes from digging: a dig that actually removed material is worth a block (re-digging a hole is not)
+        let T = this.server.terrain, r = Math.hypot(d.width, d.height, d.depth) / 2;
+        let keys = chunksInBox(T.world, { x: center.x - r, y: center.y - r, z: center.z - r }, { x: center.x + r, y: center.y + r, z: center.z + r });
+        let volume = () => keys.reduce((sum, k) => sum + (T.chunks[k] && T.hasSolid(k) ? T.manifoldOf(k).volume() : 0), 0);
+        let before = volume();
         await this.server.carveBox(center, this.yawPitchQuat(dir), { x: d.width, y: d.height, z: d.depth }, 1);
+        if(before - volume() > 0.05 && p.build < WEAPONS.mason.budget) this.world.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + WEAPONS.mason.stonePerDig) });
     }
 
     /** Mason: add a block of the team's stone where the player asked (close by, budget permitting). */
@@ -273,6 +280,7 @@ export class Game {
             this.damage(pid, Math.round(dmg), by, kind === 'buster' ? 'busted' : kind === 'grenade' ? 'fragged' : 'rocketed', impulse, now);
         }
         this.server.broadcast(JSON.stringify({ type: 'explosion', position: center, radius: R, kind }));
+        let shooter = by && w.get(by, 'Player'); if(shooter) w.set(by, 'Player', { blasts: shooter.blasts + 1 });
     }
 
     // ---- supplies ------------------------------------------------------------------
@@ -334,7 +342,7 @@ export class Game {
         let slot = this.freeSlot(team);
         this.place(sid, slot);
         w.set(sid, 'Supply', { team, state: 'home', carriedBy: null, home: slot, droppedAt: 0 });
-        w.set(pid, 'Player', { carrying: null, score: p.score + 2 });
+        w.set(pid, 'Player', { carrying: null, score: p.score + 2, carries: p.carries + 1 });
         this.carried.delete(sid);
         let tname = this.config.teams[team].name;
         this.server.broadcast(JSON.stringify({ type: 'event', kind: 'deposit', text: `${p.name} brought a supply home to ${tname}`, team }));
@@ -347,7 +355,7 @@ export class Game {
                 Prop: Prop({ propId: 'supply', url: null }),
                 Supply: Supply({ team, state: 'home', home: bonus }),
             });
-            w.set(pid, 'Player', { score: p.score + 3 });
+            w.set(pid, 'Player', { score: p.score + 3, smuggles: p.smuggles + 1 });
             this.server.broadcast(JSON.stringify({ type: 'event', kind: 'bonus', text: `Tunnel rat! ${p.name} smuggled it underground: bonus crate for ${tname}`, team }));
         }
         this.updateScores(true);
@@ -539,7 +547,7 @@ export class Game {
             let sweep = total > 0 && (m.scores.red === total || m.scores.blue === total);
             if(m.remainingMs <= 0 || sweep) {
                 let winner = m.scores.red > m.scores.blue ? 'red' : m.scores.blue > m.scores.red ? 'blue' : null;
-                w.set(MATCH_ID, 'Match', { phase: 'over', winner, overAt: now, remainingMs: 0 });
+                w.set(MATCH_ID, 'Match', { phase: 'over', winner, overAt: now, remainingMs: 0, awards: this.awards() });
                 let text = winner ? `${this.config.teams[winner].name} wins the round, ${m.scores.red} to ${m.scores.blue}!` : `Draw, ${m.scores.red} all`;
                 this.server.broadcast(JSON.stringify({ type: 'event', kind: 'match', text }));
                 return;
@@ -550,15 +558,26 @@ export class Game {
         }
     }
 
+    /** Who stood out this round: the best in each category, if anyone qualifies. */
+    awards() {
+        let out = [];
+        for(let [title, field, min] of AWARDS) {
+            let best = null;
+            for(let [, p] of this.world.each('Player')) if(p.team && p[field] >= min && (!best || p[field] > best[field])) best = p;
+            if(best) out.push({ title, name: best.name, value: best[field] });
+        }
+        return out;
+    }
+
     /** Next round: pristine terrain, supplies home, everyone respawned. */
     async newRound(now) {
         let w = this.world, m = w.get(MATCH_ID, 'Match');
         w.set(MATCH_ID, 'Match', { phase: 'resetting' });
         await this.server.restorePristine();
         this.resetSupplies();
-        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget }); this.spawnQueue.add(id); }
+        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0 }); this.spawnQueue.add(id); }
         let round = m.round + 1;
-        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 } });
+        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, awards: [] });
         this.updateScores(true);
         this.server.broadcast(JSON.stringify({ type: 'event', kind: 'match', text: `Round ${round}: the forts stand again` }));
     }

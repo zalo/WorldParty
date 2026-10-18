@@ -66,6 +66,7 @@ export class PlayerController extends THREE.Group {
         this.frozen = false;
         this.grappleTarget = null;
         this.shake = 0;
+        this.spectate = null; // {x,y,z} of a teammate to watch while dead
 
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
@@ -377,7 +378,14 @@ export class PlayerController extends THREE.Group {
             this.walkAnimation = 0;
         }
 
-        // Update camera to follow player
+        // Update camera to follow player (or, while dead, hover behind a teammate)
+        if(this.spectate) {
+            let s = this.spectate, t = this.tempVector.set(s.x, s.y, s.z);
+            let goal = this.tempVector2.set(s.x, s.y + 3.5, s.z + 5.5);
+            this.camera.position.lerp(goal, Math.min(1, delta * 4));
+            this.camera.lookAt(t);
+            return;
+        }
         this.camera.position.copy(this.position);
         this.camera.position.y += 0.5;
         if(this.shake > 0) {

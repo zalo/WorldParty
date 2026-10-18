@@ -7,7 +7,7 @@
  *  (persisted with the world config, replaced by an import), set from the client with `?gravity=<m/s²>`. */
 export const G = 9.81;
 export const PLAYER_GRAVITY = 8 * G;
-export const DEFAULT_BODY_GRAVITY = 60; // about 6 g: 2 g still read as floaty on the castle's metre-sized rubble
+export const DEFAULT_BODY_GRAVITY = 30; // about 3 g (60 read as too fast once the forts' rubble and crates were in play)
 export const MIN_GRAVITY = 0.5, MAX_GRAVITY = 200;
 /** A body gravity from the wire or storage, or null if unusable. */
 export function clampGravity(g) { g = +g; return Number.isFinite(g) ? Math.min(MAX_GRAVITY, Math.max(MIN_GRAVITY, g)) : null; }
