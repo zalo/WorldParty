@@ -3,6 +3,7 @@ import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec4, packN
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
+import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { DayCycle } from './sky/DayCycle.js';
 import { ProbeLighting } from './client/ProbeLighting.js';
 
@@ -29,16 +30,23 @@ export default class World {
         this.dirLight = new THREE.DirectionalLight( 0xffffff, Math.PI * 3.0 );
         this.dirLight.position.set( 30, 60, -70 );
         this.dirLight.castShadow = true;
-        this.dirLight.shadow.camera.near  = -100;
-        this.dirLight.shadow.camera.far   = 100;
-        this.dirLight.shadow.camera.right = 30;
-        this.dirLight.shadow.camera.left  = - 30;
-        this.dirLight.shadow.camera.top	  = 30;
-        this.dirLight.shadow.camera.bottom = - 30;
         this.dirLight.shadow.mapSize.width  = 2048;
         this.dirLight.shadow.mapSize.height = 2048;
         this.dirLight.shadow.bias = -0.0002;
         this.dirLight.shadow.normalBias = 0.02;
+        // Cascaded shadow maps: a single 60 m shadow box around the camera left everything past it unshadowed
+        // (half the view in a 160 m level); three cascades follow the view out to 140 m. ?csm=0 for the plain box.
+        let params = mainObject.queryParams || new URLSearchParams();
+        if(params.get('csm') !== '0') {
+            this.csm = new CSMShadowNode( this.dirLight, { cascades: 3, maxFar: 140, mode: 'practical', lightMargin: 120 } );
+            this.csm.fade = true;
+            this.dirLight.shadow.shadowNode = this.csm;
+        } else {
+            this.dirLight.shadow.camera.near = -150; this.dirLight.shadow.camera.far = 150;
+            this.dirLight.shadow.camera.left = -60; this.dirLight.shadow.camera.right = 60;
+            this.dirLight.shadow.camera.top = 60; this.dirLight.shadow.camera.bottom = -60;
+            this.dirLight.shadow.mapSize.width = this.dirLight.shadow.mapSize.height = 4096;
+        }
         this.scene.add( this.dirLight );
         this.scene.add( this.dirLight.target );
 
@@ -138,8 +146,7 @@ export default class World {
                 this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
                 if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0')) {
                     this.probes = new ProbeLighting(this.renderer, this.scene, { spacing: this.isMobile ? 8 : 5 });
-                    // the probes carry the sky's diffuse light; keep the environment map for reflections
-                    this.scene.environmentIntensity = 0.3;
+                    // the probes carry the sky's diffuse light once baked; until then the environment map does (ProbeLighting.environmentIntensity)
                     mainObject.attachProbes?.(this.probes);
                 }
                 return;
@@ -160,7 +167,7 @@ export default class World {
     /** Once per frame before rendering. */
     update(dt) {
         if(this.dayCycle) this.dayCycle.update(dt, this.camera);
-        if(this.probes) this.probes.update();
+        if(this.probes) { this.probes.update(this.camera); this.scene.environmentIntensity = this.probes.environmentIntensity(); }
     }
 
     /** **INTERNAL**: This function recalculates the viewport based on the new window size. */
@@ -169,6 +176,7 @@ export default class World {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
+        if(this.csm && this.csm.camera) this.csm.updateFrustums();
     }
 
 }

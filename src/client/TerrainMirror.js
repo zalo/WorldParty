@@ -20,6 +20,43 @@ const PLANE_EPS = 1e-3;
 
 export function chunkCenter(key) { let c = gridCenter(key); return new THREE.Vector3(c.x, c.y, c.z); }
 
+/** Flat-triangle geometry for terrain (chunks and fragments alike): see TerrainMirror.buildGeometry. */
+export function buildTerrainGeometry(positions, indices, materials, uvs, table, layers) {
+    let numTris = indices.length / 3;
+    let pos = new Float32Array(numTris * 9);
+    let col = new Float32Array(numTris * 9);
+    let uv = new Float32Array(numTris * 6);
+    let slot = new Float32Array(numTris * 3);
+    let tile = new Float32Array(numTris * 3);
+    let idx = new Uint32Array(numTris * 3);
+    let color = new THREE.Color();
+    for(let t = 0; t < numTris; t++) {
+        let id = materials ? materials[t] : DEFAULT_MATERIAL;
+        let m = table[id] || table[DEFAULT_MATERIAL];
+        let layer = layers.has(id) ? layers.get(id) : -1;
+        // a textured face carries its colour only as a tint; flat faces carry it as the colour itself
+        color.setHex(layer >= 0 && !m.tint ? 0xffffff : m.color);
+        let tiling = layer >= 0 && m.scale ? 1 / m.scale : 0;
+        for(let k = 0; k < 3; k++) {
+            let v = indices[t * 3 + k], o = t * 9 + k * 3, i = t * 3 + k;
+            pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
+            col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
+            if(uvs) { uv[i * 2] = uvs[v * 2]; uv[i * 2 + 1] = uvs[v * 2 + 1]; }
+            slot[i] = layer; tile[i] = tiling;
+            idx[i] = i;
+        }
+    }
+    let geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geometry.setAttribute('slot', new THREE.BufferAttribute(slot, 1));
+    geometry.setAttribute('tile', new THREE.BufferAttribute(tile, 1));
+    geometry.setIndex(new THREE.BufferAttribute(idx, 1));
+    geometry.computeVertexNormals();
+    return geometry;
+}
+
 export class TerrainMirror {
     constructor(scene, material) {
         this.scene = scene;
@@ -197,38 +234,11 @@ export class TerrainMirror {
         return this.buildGeometry(positions, new Uint32Array(keepIdx), new Uint8Array(keepMat), uvs);
     }
 
-    /** Expand an indexed mesh to flat triangles with per-face material colour, per-vertex UV and
-     *  texture slot (-1 = flat colour). Per-face attributes need unshared vertices; a sequential
-     *  index keeps the batch's indexed layout. */
+    /** Expand an indexed mesh to flat triangles with per-face material colour, per-vertex UV, texture slot
+     *  (-1 = flat colour) and tiling (tiles per metre for world-space triplanar textures, 0 = sample by UV).
+     *  Per-face attributes need unshared vertices; a sequential index keeps the batch's indexed layout. */
     buildGeometry(positions, indices, materials, uvs = null) {
-        let numTris = indices.length / 3;
-        let pos = new Float32Array(numTris * 9);
-        let col = new Float32Array(numTris * 9);
-        let uv = new Float32Array(numTris * 6);
-        let slot = new Float32Array(numTris * 3);
-        let idx = new Uint32Array(numTris * 3);
-        let color = new THREE.Color();
-        for(let t = 0; t < numTris; t++) {
-            let id = materials ? materials[t] : DEFAULT_MATERIAL;
-            color.setHex(materialColor(id, this.table));
-            let layer = this.layers.has(id) ? this.layers.get(id) : -1;
-            for(let k = 0; k < 3; k++) {
-                let v = indices[t * 3 + k], o = t * 9 + k * 3, i = t * 3 + k;
-                pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
-                col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
-                if(uvs) { uv[i * 2] = uvs[v * 2]; uv[i * 2 + 1] = uvs[v * 2 + 1]; }
-                slot[i] = layer;
-                idx[i] = i;
-            }
-        }
-        let geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
-        geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-        geometry.setAttribute('slot', new THREE.BufferAttribute(slot, 1));
-        geometry.setIndex(new THREE.BufferAttribute(idx, 1));
-        geometry.computeVertexNormals();
-        return geometry;
+        return buildTerrainGeometry(positions, indices, materials, uvs, this.table, this.layers);
     }
 
     /** Resource summary for diagnostics. */

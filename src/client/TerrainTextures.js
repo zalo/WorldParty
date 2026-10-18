@@ -34,7 +34,7 @@ export class TerrainTextures {
         let data = new Uint8Array(textured.length * SIZE * SIZE * 4);
         await Promise.all(textured.map(async (m, i) => {
             try {
-                let blob = await (await fetch(m.texture)).blob();
+                let blob = await (await fetch(new URL(m.texture, document.baseURI))).blob(); // relative paths resolve under a proxy prefix too
                 let bitmap = await createImageBitmap(blob, { resizeWidth: SIZE, resizeHeight: SIZE, resizeQuality: 'high' });
                 let canvas = new OffscreenCanvas(SIZE, SIZE);
                 let ctx = canvas.getContext('2d');
@@ -53,6 +53,9 @@ export class TerrainTextures {
             }
         }));
         if(this.loading !== token) return this.layers; // superseded by a newer world
+        // The GPU texture was created at the placeholder's size; dispose it so the backend recreates it at the new
+        // dimensions (writing 1024² layers into a 1×1 texture fails validation and leaves every layer white)
+        this.texture.dispose();
         this.texture.image = { data, width: SIZE, height: SIZE, depth: textured.length };
         this.texture.needsUpdate = true;
         this.layers = layers;

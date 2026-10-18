@@ -15,7 +15,7 @@ import { World as EcsWorld } from './ecs/World.js';
 import { encodeSoup, unpackChunkFrame } from './net/codec.js';
 import { TerrainMirror } from './client/TerrainMirror.js';
 import { TerrainTextures } from './client/TerrainTextures.js';
-import { attribute, texture, uv, select, vertexColor, Fn } from 'three/tsl';
+import { makeTerrainMaterial } from './client/terrainMaterial.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { PLAYER_GRAVITY } from './gravity.js';
 import { SceneCleanupSystem, SnapshotSystem, BodyRenderSystem, PlayerRenderSystem, JointRenderSystem, ModelRenderSystem } from './client/systems.js';
@@ -111,7 +111,7 @@ export default class Main {
         this.world.scene.add(this.physBodiesParent, this.modelsParent);
         this.ecs = new EcsWorld();
         this.ecs.addSystem(new SceneCleanupSystem(this.world.scene));
-        this.ecs.addSystem(new BodyRenderSystem(this.physBodiesParent, this.gltfLoader, () => this.terrain.table));
+        this.ecs.addSystem(new BodyRenderSystem(this.physBodiesParent, this.gltfLoader, () => this.terrain.table, () => this.terrain.layers, this.fragmentMaterial));
         this.ecs.addSystem(new ModelRenderSystem(this.modelsParent, this.gltfLoader));
         this.ecs.addSystem(new SnapshotSystem());
         this.ecs.addSystem(new PlayerRenderSystem(this.world.scene, this.world.camera, () => this.conn.id));
@@ -167,13 +167,12 @@ export default class Main {
     // ---- terrain mirror ---------------------------------------------------
 
     setupTerrain() {
-        // Flat-colour materials use the per-face vertex colour; textured ones sample the world's
-        // texture array by the per-vertex layer index (`slot`, -1 = flat) with the chunk's UVs.
+        // Flat-colour materials use the per-face vertex colour; textured ones sample the world's texture array
+        // by the per-vertex layer index (`slot`, -1 = flat), triplanar in world space or by UV (terrainMaterial.js)
         this.textures = new TerrainTextures();
-        this.defaultMaterial = new THREE.MeshStandardNodeMaterial({ roughness: 0.7, metalness: 0.1, flatShading: true });
-        const slot = attribute('slot', 'float');
-        const layer = texture(this.textures.texture, uv()).depth(slot.toInt());
-        this.defaultMaterial.colorNode = select(slot.lessThan(0.0), vertexColor(), layer.rgb);
+        let tridebug = parseInt(this.queryParams.get('tridebug') || '0') || 0;
+        this.defaultMaterial = makeTerrainMaterial(this.textures.texture, 'world', tridebug);
+        this.fragmentMaterial = makeTerrainMaterial(this.textures.texture, 'local', tridebug);
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);

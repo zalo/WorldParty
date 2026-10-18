@@ -11,7 +11,7 @@ export class ProbeLighting {
 
     // LightProbeGrid bakes into render targets one row (or one slice) per probe, so the probe count
     // must stay under the device's 2D texture limit (8192 on most adapters) with room to spare.
-    constructor(renderer, scene, { spacing = 5, maxProbes = 4096, perFrame = 8, cubemapSize = 8 } = {}) {
+    constructor(renderer, scene, { spacing = 5, maxProbes = 1500, perFrame = 8, cubemapSize = 8 } = {}) {
         this.renderer = renderer;
         this.scene = scene;
         this.spacing = spacing;
@@ -65,16 +65,37 @@ export class ProbeLighting {
         for(let iy = i0[1]; iy <= i1[1]; iy++) for(let iz = i0[2]; iz <= i1[2]; iz++) for(let ix = i0[0]; ix <= i1[0]; ix++) this.dirty.add(this.index(ix, iy, iz));
     }
 
-    /** Bake a few dirty probes per frame, grouped into contiguous ranges. The batch size adapts to
-     *  keep the bake around `budgetMs` per frame, so a heavy scene does not stall interaction. */
-    update() {
-        if(!this.grid || this.dirty.size === 0 || this.renderer.initialized === false) return;
-        this.budgetMs ??= 4;
+    /** Fraction of the grid baked so far (unbaked probes contribute black). */
+    bakedFraction() {
+        if(!this.grid) return 0;
+        let n = this.grid.resolution.x * this.grid.resolution.y * this.grid.resolution.z;
+        return n ? 1 - this.dirty.size / n : 1;
+    }
+
+    /** World position of a probe by linear index. */
+    probePosition(i) {
+        let r = this.grid.resolution, ix = i % r.x, iz = Math.floor(i / r.x) % r.z, iy = Math.floor(i / (r.x * r.z));
+        let size = new THREE.Vector3().subVectors(this.max, this.min);
+        return new THREE.Vector3(this.min.x + ix / (r.x - 1) * size.x, this.min.y + iy / (r.y - 1) * size.y, this.min.z + iz / (r.z - 1) * size.z);
+    }
+
+    /** Bake a few dirty probes per frame, nearest the camera first, grouped into contiguous ranges. The batch
+     *  size adapts to keep the bake around `budgetMs` per frame, so a heavy scene does not stall interaction.
+     *  While the grid is still mostly unbaked its intensity is held down (an unbaked probe is black) and the
+     *  caller keeps the sky's image based light up instead; see `environmentIntensity()`. */
+    update(camera = null) {
+        if(!this.grid) return;
+        this.grid.intensity = Math.min(1, this.bakedFraction() * 1.25);
+        if(this.dirty.size === 0 || this.renderer.initialized === false) return;
+        this.budgetMs ??= 5;
         if(this.lastBakeMs !== undefined) {
             if(this.lastBakeMs > this.budgetMs * 1.5) this.perFrame = Math.max(1, Math.floor(this.perFrame / 2));
             else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(32, this.perFrame + 1);
         }
-        let take = [...this.dirty].sort((a, b) => a - b).slice(0, this.perFrame);
+        let order = [...this.dirty];
+        if(camera) { let c = camera.position; order.sort((a, b) => this.probePosition(a).distanceToSquared(c) - this.probePosition(b).distanceToSquared(c)); }
+        else order.sort((a, b) => a - b);
+        let take = order.slice(0, this.perFrame).sort((a, b) => a - b);
         for(let i of take) this.dirty.delete(i);
         let runs = [];
         for(let i of take) {
@@ -93,6 +114,10 @@ export class ProbeLighting {
             this.dirty.clear();
         }
     }
+
+    /** How much of the sky's image based light the scene should still use: all of it until the probes carry the
+     *  diffuse sky light themselves, then 0.45 so it is not counted twice (a little stays: shaded faces read black otherwise). */
+    environmentIntensity() { return 1 - 0.55 * this.bakedFraction(); }
 
     stats() { return this.grid ? { probes: this.grid.resolution.x * this.grid.resolution.y * this.grid.resolution.z, dirty: this.dirty.size } : null; }
 }

@@ -7,7 +7,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { decodeSoup } from '../net/codec.js';
 import { getPropDef } from '../props/PropRegistry.js';
-import { materialColor } from '../terrain/materials.js';
+import { buildTerrainGeometry } from './TerrainMirror.js';
 
 const SNAPSHOT_INTERVAL_MS = 1000 / 15;
 const FROZEN_COLOR = 0x8888ff;
@@ -67,8 +67,10 @@ export class SnapshotSystem {
 
 /** Builds meshes for RigidBody entities (props, cubes, terrain fragments) and keeps a BVH for player collision. */
 export class BodyRenderSystem {
-    constructor(parent, gltfLoader, tableFn = null) {
-        this.tableFn = tableFn; // () => material table of the current world
+    constructor(parent, gltfLoader, tableFn = null, layersFn = null, fragmentMaterial = null) {
+        this.tableFn = tableFn;   // () => material table of the current world
+        this.layersFn = layersFn; // () => material id -> texture layer
+        this.fragmentMaterial = fragmentMaterial; // shared terrain material sampling in body-local space
         this.parent = parent;
         this.gltfLoader = gltfLoader;
         this.boxGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -115,27 +117,18 @@ export class BodyRenderSystem {
         mesh.userData.collisionBVH = sphere ? this.bvhCache.sphere : this.bvhCache.box;
         return mesh;
     }
+    /** A fragment renders with the terrain material (same textures, triplanar in its own local space). */
     makeFragmentMesh(fragment, rb) {
         let positions = decodeSoup(fragment.data);
-        let geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         let indices = new Uint32Array(positions.length / 3);
         for(let i = 0; i < indices.length; i++) indices[i] = i;
-        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-        if(fragment.mats) {
-            let colors = new Float32Array(positions.length);
-            let color = new THREE.Color();
-            for(let t = 0; t < fragment.mats.length && t * 9 + 8 < colors.length; t++) {
-                color.setHex(materialColor(fragment.mats[t], this.tableFn ? this.tableFn() : undefined));
-                for(let k = 0; k < 3; k++) { let o = t * 9 + k * 3; colors[o] = color.r; colors[o + 1] = color.g; colors[o + 2] = color.b; }
-            }
-            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        }
-        geometry.computeVertexNormals();
+        let mats = fragment.mats ? Uint8Array.from(fragment.mats) : null;
+        let table = this.tableFn ? this.tableFn() : [], layers = this.layersFn ? this.layersFn() : new Map();
+        let geometry = buildTerrainGeometry(positions, indices, mats, null, table, layers);
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
-        let mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: !!fragment.mats, roughness: 0.7, metalness: 0.1, flatShading: true }));
+        let mesh = new THREE.Mesh(geometry, this.fragmentMaterial || new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true }));
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.collisionBVH = geometry.boundsTree;
         return mesh;
