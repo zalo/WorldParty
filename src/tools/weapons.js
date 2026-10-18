@@ -65,7 +65,7 @@ export class GrenadeTool extends Weapon {
         this.spend();
         let { origin, dir } = aim(main);
         main.conn.send(JSON.stringify({ type: 'fire', weapon: 'grenade', origin, dir, power }));
-        main.game.sfx.throw();
+        main.game.sfx.throw(power, 'grenade');
     }
     onSecondaryFire(main) {
         let me = main.game?.me;
@@ -74,7 +74,7 @@ export class GrenadeTool extends Weapon {
         this.readyAt = performance.now() + WEAPONS.buster.cooldownMs;
         let { origin, dir } = aim(main);
         main.conn.send(JSON.stringify({ type: 'fire', weapon: 'buster', origin, dir }));
-        main.game.sfx.throw();
+        main.game.sfx.throw(1, 'buster');
     }
     onUnequip(main) { this.charging = null; }
 }
@@ -94,7 +94,7 @@ export class DrillTool extends Weapon {
         }
         this.preview.visible = true;
     }
-    onUnequip(main) { if(this.preview) this.preview.visible = false; }
+    onUnequip(main) { if(this.preview) this.preview.visible = false; main.game?.sfx.drillLoop(false); }
     onPrimaryFire(main) { this.dig(main); }
     dig(main) {
         if(!this.canFire(main)) return;
@@ -105,7 +105,9 @@ export class DrillTool extends Weapon {
         main.player.shake = Math.max(main.player.shake, 0.08);
     }
     update(main) {
-        if(main.primaryHeld && !main.simulationParams.mobile) this.dig(main);
+        let held = main.primaryHeld && !main.simulationParams.mobile;
+        if(held) this.dig(main);
+        main.game?.sfx.drillLoop(held && !main.game.dead); // the motor runs while the button is held; dig() adds a bite per carve
         if(!this.preview) return;
         let c = main.world.camera, d = this.def;
         c.getWorldDirection(_dir);
@@ -151,7 +153,7 @@ export class MasonTool extends Weapon {
         this.spend();
         let p = this.preview.position, q = this.preview.quaternion;
         main.conn.send(JSON.stringify({ type: 'build', shape: this.shape, position: { x: p.x, y: p.y, z: p.z }, quaternion: { x: q.x, y: q.y, z: q.z, w: q.w } }));
-        main.game.sfx.build();
+        main.game.sfx.build(this.def.shapes[this.shape]);
     }
     update(main) {
         if(!this.preview) return;
@@ -214,11 +216,12 @@ export class GrappleTool extends Weapon {
     }
     onSecondaryFire(main) { this.release(main); }
     onKey(main, code) { if(code === 'Space') this.release(main); }
-    release(main) { this.anchor = null; main.player.grappleTarget = null; if(this.rope) this.rope.visible = false; }
+    release(main) { if(this.anchor) main.game?.sfx.unhook(); main.game?.sfx.reel(false); this.anchor = null; main.player.grappleTarget = null; if(this.rope) this.rope.visible = false; }
     update(main, dt) {
         if(!this.anchor) return;
         let g = main.player.grappleTarget;
         if(!g) { this.release(main); return; } // arrived
+        main.game?.sfx.reel(true);
         // let go when pressed against something and not getting closer
         let d = Math.hypot(g.x - main.player.position.x, g.y - main.player.position.y, g.z - main.player.position.z);
         if(d < this.lastDistance - 0.05) { this.lastDistance = d; this.stalledSince = 0; }
