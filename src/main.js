@@ -26,6 +26,7 @@ import { RopeTool } from './tools/RopeTool.js';
 import { WeldTool } from './tools/WeldTool.js';
 import { HingeTool } from './tools/HingeTool.js';
 import { SpawnMenu } from './ui/SpawnMenu.js';
+import { GameClient } from './client/GameClient.js';
 
 
 /** Client entry: rendering world, local player, terrain mirror, ECS mirror of server entities, tools. */
@@ -124,14 +125,22 @@ export default class Main {
         csgTool.init(this);
         this.spawnMenu.onPropSelected = (propId) => this.spawnProp(propId);
 
+        this.primaryHeld = false;
         window.addEventListener('pointerdown', (e) => {
             if(this.spawnMenu.isOpen) return;
             if(this.player.controls && this.player.controls.isLocked) {
                 e.preventDefault();
                 let tool = this.spawnMenu.getCurrentTool();
-                if(e.button === 0) tool.onPrimaryFire(this);
+                if(e.button === 0) { this.primaryHeld = true; tool.onPrimaryFire(this); }
                 else if(e.button === 2) tool.onSecondaryFire(this);
             }
+        });
+        window.addEventListener('pointerup', (e) => {
+            if(e.button !== 0) return;
+            let held = this.primaryHeld;
+            this.primaryHeld = false;
+            let tool = this.spawnMenu.getCurrentTool();
+            if(held && tool.onPrimaryRelease) tool.onPrimaryRelease(this);
         });
         window.addEventListener("wheel", (e) => {
             if(this.player.controls && this.player.controls.isLocked) {
@@ -140,6 +149,7 @@ export default class Main {
             }
         }, { passive: false });
         window.addEventListener('keydown', (e) => {
+            if(e.target && e.target.tagName === 'INPUT') return;
             if(e.code >= 'Digit1' && e.code <= 'Digit9') {
                 let idx = parseInt(e.code.charAt(5)) - 1;
                 if(idx < this.tools.length) this.spawnMenu.selectTool(idx);
@@ -175,6 +185,9 @@ export default class Main {
     onWorldChanged(world) {
         this.textures.load(world).then(layers => this.terrain.setTextureLayers(layers));
         this.probes?.setBounds(...this.probeBounds(world));
+        // Fort War: a level manifest's rules arm the player and bring up the HUD (src/client/GameClient.js)
+        if(world.game && !this.game && this.constructorFinished) this.game = new GameClient(this, world.game);
+        else if(world.game && this.game) this.game.configure(world.game);
     }
 
     probeBounds(w) {
@@ -244,12 +257,16 @@ export default class Main {
         }
         if(typeof event.data !== 'string' || !event.data.startsWith("{")) return;
         let data = JSON.parse(event.data);
-        if(data.type !== "fullupdate" && data.type !== "partialupdate") return;
+        if(data.type !== "fullupdate" && data.type !== "partialupdate") {
+            if(this.game) this.game.onMessage(data);
+            else if(data.type === 'chat') console.log(`chat ${data.sender}: ${data.message}`);
+            return;
+        }
         if(data.serverTickMs !== undefined) this.serverTickMs = data.serverTickMs;
 
         let full = data.type === "fullupdate";
+        if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full); // world config first: the game client wants to exist before its entities arrive
         if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
-        if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full);
     }
 
     /** Entity id for a three.js object created by a render system (walks up parents). */
@@ -272,6 +289,7 @@ export default class Main {
         for(let i = 0; i < physicsSteps; i++) this.player.updatePlayer(Math.min(this.deltaTime / 1000.0, 0.1) / physicsSteps);
 
         this.spawnMenu.getCurrentTool().update(this, this.deltaTime / 1000.0);
+        if(this.game) this.game.update(this.deltaTime / 1000.0);
 
         if(this.lastUpdate + 1000 / 30 < timeMS) {
             this.lastUpdate = timeMS;

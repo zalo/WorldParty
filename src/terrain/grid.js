@@ -10,6 +10,7 @@ export const HALF = CHUNK_SIZE / 2;
 
 /** The sandbox default: a 100 m cube centred on the origin, solid below y=0. */
 import { clampGravity } from '../gravity.js';
+import { sanitizeGame } from '../game/rules.js';
 
 export const DEFAULT_WORLD = Object.freeze({
     bounds: { min: [-5, -5, -5], max: [4, 4, 4] },   // inclusive chunk coords
@@ -93,5 +94,6 @@ export function sanitizeWorld(w) {
     let out = { bounds, rock: box(w.rock) };
     if(Array.isArray(w.materials) && w.materials.length) out.materials = sanitizeMaterials(w.materials);
     if(w.gravity !== undefined) { let g = clampGravity(w.gravity); if(g !== null) out.gravity = g; }
+    if(w.game) { let game = sanitizeGame(w.game); if(game) out.game = game; } // Fort War rules (src/game/rules.js)
     return out;
 }

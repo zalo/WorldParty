@@ -23,8 +23,13 @@ export class SceneCleanupSystem {
             if(name === '$Mesh' || name === '$Line') {
                 data.object.removeFromParent();
                 data.object.traverse?.(o => { if(o.geometry && !o.userData.sharedGeometry) o.geometry.dispose(); });
+                let trail = data.object.userData.trail; if(trail) { trail.removeFromParent(); trail.geometry.dispose(); }
+            } else if(name === '$SupplyFx') {
+                data.marker.removeFromParent(); data.crate.removeFromParent();
             } else if(name === '$Label') {
                 data.el.remove();
+            } else if(name === 'RigidBody' && !world.has(id, 'Player')) {
+                world.remove(id, '$Mesh'); // a supply being carried: the body render system rebuilds it when the body returns
             }
         });
     }
@@ -68,7 +73,9 @@ export class BodyRenderSystem {
         this.gltfLoader = gltfLoader;
         this.boxGeometry = new THREE.BoxGeometry(1, 1, 1);
         this.boxGeometry.computeBoundsTree();
-        this.bvhCache = { box: this.boxGeometry.boundsTree };
+        this.sphereGeometry = new THREE.SphereGeometry(0.5, 12, 8);
+        this.sphereGeometry.computeBoundsTree();
+        this.bvhCache = { box: this.boxGeometry.boundsTree, sphere: this.sphereGeometry.boundsTree };
     }
     init(world) {
         // Frozen highlight
@@ -99,12 +106,13 @@ export class BodyRenderSystem {
     }
     makePlaceholder(rb) {
         let s = rb.halfExtent * 2;
+        let sphere = rb.shape === 'sphere';
         let mat = new THREE.MeshStandardMaterial({ color: rb.frozen ? FROZEN_COLOR : getPropDef(rb.propId).color, roughness: 0.5, metalness: 0.2 });
-        let mesh = new THREE.Mesh(this.boxGeometry, mat);
+        let mesh = new THREE.Mesh(sphere ? this.sphereGeometry : this.boxGeometry, mat);
         mesh.scale.set(s, s, s);
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.sharedGeometry = true;
-        mesh.userData.collisionBVH = this.bvhCache.box;
+        mesh.userData.collisionBVH = sphere ? this.bvhCache.sphere : this.bvhCache.box;
         return mesh;
     }
     makeFragmentMesh(fragment, rb) {
@@ -177,7 +185,11 @@ export class PlayerRenderSystem {
     constructor(scene, camera, localId) { this.scene = scene; this.camera = camera; this.localId = localId; }
     init(world) {
         world.on('set', (id, name, player) => {
-            if(name === 'Player') { let label = world.get(id, '$Label'); if(label) label.el.textContent = player.name || 'Player'; }
+            if(name !== 'Player') return;
+            let label = world.get(id, '$Label');
+            if(label) { label.el.textContent = player.name || 'Player'; label.el.style.background = player.team ? player.color : 'rgba(0,0,0,0.5)'; label.el.style.opacity = player.dead ? '0.4' : '1'; }
+            let m = world.get(id, '$Mesh');
+            if(m && m.object.material) { m.object.material.color.set(player.color || '#ffffff'); m.object.visible = !player.dead; }
         });
     }
     update(world) {
@@ -193,6 +205,7 @@ export class PlayerRenderSystem {
                 let el = document.createElement('div');
                 el.textContent = player.name || 'Player';
                 el.style.cssText = 'position:fixed;color:#fff;font:bold 12px monospace;background:rgba(0,0,0,0.5);padding:2px 6px;border-radius:3px;pointer-events:none;white-space:nowrap;z-index:1500;';
+                if(player.team) el.style.background = player.color;
                 document.body.appendChild(el);
                 world.add(id, '$Label', { el });
             }

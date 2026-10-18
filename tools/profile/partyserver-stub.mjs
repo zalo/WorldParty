@@ -4,6 +4,7 @@ export class Server {
     constructor(ctx, env) { this.ctx = ctx; this.env = env; }
     get name() { return this.ctx.id?.name ?? 'profile'; }
     broadcast() {}
+    getConnection() { return undefined; }
     getConnections() { return []; }
 }
 export function routePartykitRequest() { return null; }

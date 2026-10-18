@@ -62,6 +62,10 @@ export class PlayerController extends THREE.Group {
         this.tempMat = new THREE.Matrix4();
         this.tempSegment = new THREE.Line3();
         this.walkAnimation = 0;
+        // Fort War hooks (src/client/GameClient.js): no input while dead, a grapple anchor pulling us, camera shake
+        this.frozen = false;
+        this.grappleTarget = null;
+        this.shake = 0;
 
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
@@ -105,6 +109,22 @@ export class PlayerController extends THREE.Group {
         this.camera.position.copy(this.position);
         this.camera.position.y += 0.5;
         if(this.controls){ this.controls.update(); }
+    }
+
+    /** Put the player somewhere else, at rest (spawns and respawns). */
+    teleport(p) {
+        this.playerVelocity.set(0, 0, 0);
+        this.grappleTarget = null;
+        this.position.set(p.x, p.y + 1.0, p.z);
+        this.camera.position.copy(this.position);
+        this.camera.position.y += 0.5;
+    }
+
+    /** Add velocity (explosion knockback). */
+    knock(v) {
+        this.playerVelocity.x += v.x; this.playerVelocity.y += v.y; this.playerVelocity.z += v.z;
+        this.playerIsOnGround = false;
+        this.offGroundTimer = OFF_GROUND_GRACE;
     }
 
     updatePlayer(delta) {
@@ -185,8 +205,26 @@ export class PlayerController extends THREE.Group {
             }
         }
 
+        if(this.frozen) { this.walkMovement.set(0, 0); this.jumpRequested = false; }
+
+        // Grapple: pulled toward the anchor, gravity still applies, speed capped. While hooked the player counts
+        // as airborne, so touching the ground does not zero the velocity (the capsule has to be able to lift off).
+        let grappling = !!this.grappleTarget;
+        if(grappling) {
+            let g = this.grappleTarget;
+            let to = this.tempVector.set(g.x - this.position.x, g.y - this.position.y, g.z - this.position.z);
+            let d = to.length();
+            if(d < 1.6) { this.grappleTarget = null; grappling = false; this.playerVelocity.y = Math.max(this.playerVelocity.y, 10); } // a hop onto the ledge you hooked
+            else {
+                to.multiplyScalar(1 / d);
+                this.playerVelocity.addScaledVector(to, g.pull * delta);
+                let speed = this.playerVelocity.length();
+                if(speed > g.maxSpeed) this.playerVelocity.multiplyScalar(g.maxSpeed / speed);
+            }
+        }
+
         // Gravity
-        if (this.playerIsOnGround) {
+        if (this.playerIsOnGround && !grappling) {
             this.playerVelocity.y = delta * this.simulationParams.gravity;
         } else {
             this.playerVelocity.y += delta * this.simulationParams.gravity;
@@ -319,7 +357,7 @@ export class PlayerController extends THREE.Group {
 
         this.position.add(deltaVector);
 
-        if (!this.playerIsOnGround) {
+        if (!this.playerIsOnGround || grappling) {
             // Remove velocity component along collision normal
             deltaVector.normalize();
             this.playerVelocity.addScaledVector(deltaVector, - deltaVector.dot(this.playerVelocity));
@@ -342,10 +380,16 @@ export class PlayerController extends THREE.Group {
         // Update camera to follow player
         this.camera.position.copy(this.position);
         this.camera.position.y += 0.5;
+        if(this.shake > 0) {
+            this.camera.position.x += (Math.random() - 0.5) * this.shake;
+            this.camera.position.y += (Math.random() - 0.5) * this.shake;
+            this.camera.position.z += (Math.random() - 0.5) * this.shake;
+            this.shake = Math.max(0, this.shake - delta * 1.5);
+        }
         if(this.controls){ this.controls.update(); }
 
-        // Reset if fallen too far
-        if (this.position.y < - 100) {
+        // Reset if fallen too far (a Fort War server kills the player before this)
+        if (this.position.y < - 100 && !this.frozen) {
             this.reset();
         }
     }

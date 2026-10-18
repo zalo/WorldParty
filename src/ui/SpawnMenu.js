@@ -122,10 +122,7 @@ export class SpawnMenu {
         this.propsContent = document.createElement('div');
         this.propsContent.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px;';
 
-        PROPS.forEach(prop => {
-            let btn = this.createPropButton(prop.id, prop.name, prop.icon || '📦');
-            this.propsContent.appendChild(btn);
-        });
+        this.setProps(PROPS.filter(p => !p.hidden));
         this.menuPanel.appendChild(this.propsContent);
 
         document.body.appendChild(this.menuPanel);
@@ -139,6 +136,35 @@ export class SpawnMenu {
             pointer-events: none;
         `;
         document.body.appendChild(this.toolLabel);
+    }
+
+    /** Rebuild the props tab (a match allows only a few). */
+    setProps(props) {
+        this.propsContent.innerHTML = '';
+        for(let prop of props) this.propsContent.appendChild(this.createPropButton(prop.id, prop.name, prop.icon || '📦'));
+    }
+
+    /** Swap the tool set (a match arms the player differently from the sandbox). */
+    setTools(tools) {
+        let prev = this.tools[this.currentToolIndex];
+        if(prev) prev.onUnequip(this.main);
+        this.tools = tools;
+        this.main.tools = tools;
+        this.toolsContent.innerHTML = '';
+        this.tools.forEach((tool, i) => {
+            let btn = document.createElement('button');
+            btn.innerHTML = `<span style="font-size:20px">${tool.icon}</span> ${tool.name} <span style="color:#888;font-size:11px">[${i+1}]</span>`;
+            btn.style.cssText = `
+                padding: 10px; border: 2px solid #555; border-radius: 6px;
+                background: rgba(50,50,60,0.8); color: #fff; font: 13px monospace;
+                cursor: pointer; text-align: left;
+            `;
+            btn.addEventListener('click', (e) => { e.stopPropagation(); this.selectTool(i); this.close(); });
+            this.toolsContent.appendChild(btn);
+            tool._menuBtn = btn;
+        });
+        this.currentToolIndex = 0;
+        this.selectTool(0);
     }
 
     createTabButton(label, tabId) {
@@ -191,8 +217,8 @@ export class SpawnMenu {
     selectTool(index) {
         if(index < 0 || index >= this.tools.length) return;
         let prev = this.tools[this.currentToolIndex];
-        if(prev._menuBtn) prev._menuBtn.style.borderColor = '#555';
-        prev.onUnequip(this.main);
+        if(prev && prev._menuBtn) prev._menuBtn.style.borderColor = '#555';
+        if(prev) prev.onUnequip(this.main);
 
         this.currentToolIndex = index;
         let tool = this.tools[index];
@@ -218,7 +244,7 @@ export class SpawnMenu {
                 e.preventDefault();
                 e.stopPropagation();
                 if(action.action === 'primary') {
-                    tool.onPrimaryFire(this.main);
+                    if(tool.onMobilePrimary) tool.onMobilePrimary(this.main); else tool.onPrimaryFire(this.main);
                 } else if(action.action === 'secondary') {
                     tool.onSecondaryFire(this.main);
                 } else if(action.action === 'scrollUp') {

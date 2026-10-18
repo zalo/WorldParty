@@ -12,8 +12,14 @@
  *                                             collider: hulls = encodeHulls() convex pieces (null on legacy fragments: SDF trimesh)
  *   Joint        { type:'rope'|'weld'|'hinge', bodyA, bodyB, localOffsetA, localOffsetB, axis }
  *   Grabbed      { by }                       physgun hold (target pose is transient: $GrabTarget)
- *   Player       { name, color }
+ *   Player       { name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster }
+ *                                             (the Fort War fields are null/zero in a sandbox room)
  *   Model        { url, selectedBy }           legacy static GLB-by-url
+ *   Projectile   { kind, team, owner, vel, bornAt }   server-integrated rocket (no PhysX body; clients dead-reckon from vel)
+ *   Fuse         { kind, team, owner, at }     a RigidBody prop that explodes at time `at` (grenade, bunker buster)
+ *   Supply       { team, state, carriedBy, home, droppedAt }   Fort War loot: team = whose vault it belongs to (null = neutral),
+ *                                             state 'home' | 'loose' | 'carried'; carried supplies have no RigidBody
+ *   Match        { phase, remainingMs, scores, winner, round, overAt }   Fort War match state (entity id 'match')
  *
  * Transient (server):  $PxBody {actor}  $PxJoint {joint}  $Grab {anchor, joint}  $GrabTarget {pos, quat}  $PxKinematic {actor, prev}
  * Transient (client):  $Mesh {object}   $Snapshot {prev, target}  $Label {el}  $Line {line}
@@ -34,10 +40,21 @@ export const Joint = ({ type, bodyA, bodyB, localOffsetA = { x: 0, y: 0, z: 0 },
 
 export const Grabbed = ({ by }) => ({ by });
 
-export const Player = ({ name = 'Player', color = '#ffffff' } = {}) => ({ name, color });
+export const Player = ({ name = 'Player', color = '#ffffff', team = null, health = 100, dead = false, carrying = null, kills = 0, deaths = 0, score = 0, respawnAt = 0, build = 0, buster = 0 } = {}) =>
+    ({ name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster });
+
+export const Projectile = ({ kind, team = null, owner = null, vel = { x: 0, y: 0, z: 0 }, bornAt = 0 }) => ({ kind, team, owner, vel: { ...vel }, bornAt });
+
+export const Fuse = ({ kind, team = null, owner = null, at }) => ({ kind, team, owner, at });
+
+export const Supply = ({ team = null, state = 'home', carriedBy = null, home = { x: 0, y: 0, z: 0 }, droppedAt = 0 }) =>
+    ({ team, state, carriedBy, home: { ...home }, droppedAt });
+
+export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0 } = {}) =>
+    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt });
 
 export const Model = ({ url, selectedBy = '' }) => ({ url, selectedBy });
 
 /** Components that are persisted to durable storage (players and holds are session-only). */
-export const PERSISTED = new Set(['Transform', 'RigidBody', 'Prop', 'FragmentMesh', 'Joint', 'Model']);
+export const PERSISTED = new Set(['Transform', 'RigidBody', 'Prop', 'FragmentMesh', 'Joint', 'Model', 'Supply', 'Fuse', 'Match']);
 export const isPersistedComponent = (id, name) => PERSISTED.has(name);

@@ -36,6 +36,8 @@ the persistent components.
 | `Grabbed` | `$Grab` (anchor + D6 drive), `$GrabTarget` | |
 | `Player` | `$PxKinematic` (capsule) | `$Mesh`, `$Label` |
 | `Model` | | `$Mesh` |
+| `Supply`, `Fuse`, `Match` (Fort War) | | `$SupplyFx`, `$FuseFx` |
+| `Projectile` (Fort War rocket, not persisted) | | `$Mesh` (dead-reckoned) |
 
 Shapes and defaults are in `src/ecs/components.js`. `PERSISTED` lists the
 components written to storage; player entities are never persisted.

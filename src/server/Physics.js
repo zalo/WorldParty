@@ -73,6 +73,46 @@ export class Physics {
         this.tmpVec = new px.PxVec3(0, 0, 0);
         this.tmpQuat = new px.PxQuat(0, 0, 0, 1);
         this.tmpPose = new px.PxTransform(this.tmpVec, this.tmpQuat);
+        this.velVec = new px.PxVec3(0, 0, 0);
+        // scene queries (rockets)
+        this.rayOrigin = new px.PxVec3(0, 0, 0);
+        this.rayDir = new px.PxVec3(0, 0, 1);
+        this.rayResult = new px.PxRaycastResult(); // hits come back as touches with the default filter, so collect them all and keep the nearest
+        this.rayFlags = new px.PxHitFlags(px.PxHitFlagEnum.ePOSITION | px.PxHitFlagEnum.eNORMAL);
+        this.rayFilter = new px.PxQueryFilterData();
+    }
+
+    // ---- queries and impulses (Fort War) ----------------------------------
+
+    /** Closest blocking hit along a ray against everything in the scene (terrain, bodies, player capsules), or null. */
+    raycast(origin, dir, maxDist) {
+        this.rayOrigin.set_x(origin.x); this.rayOrigin.set_y(origin.y); this.rayOrigin.set_z(origin.z);
+        this.rayDir.set_x(dir.x); this.rayDir.set_y(dir.y); this.rayDir.set_z(dir.z);
+        let r = this.rayResult;
+        if(!this.scene.raycast(this.rayOrigin, this.rayDir, maxDist, r, this.rayFlags, this.rayFilter)) return null;
+        let best = null, bestD = Infinity, n = r.getNbAnyHits();
+        for(let i = 0; i < n; i++) { let h = r.getAnyHit(i), d = h.get_distance(); if(d < bestD) { bestD = d; best = h; } }
+        if(!best) return null;
+        let p = best.get_position(), nm = best.get_normal();
+        return { distance: bestD, position: { x: p.get_x(), y: p.get_y(), z: p.get_z() }, normal: { x: nm.get_x(), y: nm.get_y(), z: nm.get_z() }, actorPtr: best.get_actor().ptr };
+    }
+
+    /** The entity whose body or player capsule a raycast hit, or null for terrain. */
+    entityOfActor(world, ptr) {
+        for(let [id, pb] of world.each('$PxBody')) if(pb.actor.ptr === ptr) return id;
+        for(let [id, kin] of world.each('$PxKinematic')) if(kin.actor.ptr === ptr) return id;
+        return null;
+    }
+
+    addVelocity(actor, v) {
+        this.velVec.set_x(v.x); this.velVec.set_y(v.y); this.velVec.set_z(v.z);
+        actor.addForce(this.velVec, this.px.PxForceModeEnum.eVELOCITY_CHANGE, true);
+    }
+
+    setVelocity(actor, v, angular = null) {
+        this.velVec.set_x(v.x); this.velVec.set_y(v.y); this.velVec.set_z(v.z);
+        actor.setLinearVelocity(this.velVec, true);
+        if(angular) { this.velVec.set_x(angular.x); this.velVec.set_y(angular.y); this.velVec.set_z(angular.z); actor.setAngularVelocity(this.velVec, true); }
     }
 
     /** Hook entity lifecycle so PhysX objects are released with their components. */

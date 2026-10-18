@@ -16,6 +16,10 @@ export const PROPS = [
     { id: "tower",    name: "Tower",        icon: "🏰",  mass: 30,  halfExtent: 0.6,  shape: 'hulls',  url: MARKET + "tower/model.gltf",         color: 0xdd8844 },
     { id: "board",    name: "Board",        icon: "🪵",  mass: 5,   halfExtent: 0.3,  shape: 'box',    url: MARKET + "cutting-board/model.gltf", color: 0xCD853F },
     { id: "sword",    name: "Sword",        icon: "⚔️",  mass: 4,   halfExtent: 0.2,  shape: 'hulls',  url: MARKET + "sword/model.gltf",         color: 0xdd8844 },
+    // Fort War (src/game/rules.js): not in the spawn menu
+    { id: "supply",   name: "Supply",       icon: "💰",  mass: 30,  halfExtent: 0.45, shape: 'box',    url: null, color: 0xffc830, hidden: true },
+    { id: "grenade",  name: "Grenade",      icon: "💣",  mass: 3,   halfExtent: 0.22, shape: 'sphere', url: null, color: 0x3d5a2a, hidden: true },
+    { id: "buster",   name: "Bunker Buster", icon: "☢️", mass: 60,  halfExtent: 0.42, shape: 'sphere', url: null, color: 0x202020, hidden: true },
 ];
 
 /** @type {Record<string, typeof PROPS[0]>} */

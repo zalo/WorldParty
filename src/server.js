@@ -4,15 +4,18 @@
 /** @typedef {import("partyserver").ConnectionContext} ConnectionContext */
 
 import { Server, routePartykitRequest } from 'partyserver';
+import * as THREE from 'three';
+import { ADDITION, SUBTRACTION } from 'three-bvh-csg';
 import { World } from './ecs/World.js';
+import { Game } from './server/Game.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
 import { Terrain, chunkCenter } from './server/Terrain.js';
 import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
-import { chunkAt, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
+import { chunkAt, chunksInBox, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { DEFAULT_BODY_GRAVITY, clampGravity } from './gravity.js';
 import { getPropDef } from './props/PropRegistry.js';
-import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeHulls } from './net/codec.js';
+import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeSoup, encodeHulls } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -21,6 +24,10 @@ const STORAGE_BATCH = 128;          // Durable Object storage batch limit
 const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across chunkpart:<key>:<i> values (128 KiB value limit)
 const COOKS_NOW = 3;                // mesh colliders cooked immediately when activity changes (nearest first) ...
 const COOKS_PER_TICK = 2;           // ... and per tick for the rest
+
+// Brushes the server carves with itself (explosions, the drill, the mason): unit shapes, scaled per use
+const SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 1).attributes.position.array);
+const CUBE_SOUP = encodeSoup(new THREE.BoxGeometry(1, 1, 1).toNonIndexed().attributes.position.array);
 
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
@@ -69,6 +76,8 @@ export class WorldParty extends Server {
     this.lastPersist = Date.now();
 
     this.physics.attach(this.world);
+    this.conns = new Map();         // connection id -> Connection (for messages to one player)
+    this.game = new Game(this);     // Fort War rules; active when the world config carries `game`
     this.interval = setInterval(() => this.tick(), TICK_MS);
   }
 
@@ -116,8 +125,12 @@ export class WorldParty extends Server {
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
     this.terrain.dropPrev(Object.keys(this.terrain.chunks));
+    this.game.onWorldChanged();
+    this.world.takeDirty();
     this.ready = true;
     this.resolveReady();
+    // A Fort War room imported before pristine copies existed gets one now (rounds restore the terrain from it)
+    if(this.game.active && (await this.ctx.storage.list({ prefix: 'pristine:', limit: 1 })).size === 0) await this.savePristine();
     console.log(`World ready: ${Object.keys(storedChunks).length} chunks (${adopted} summaries stored), ${Object.keys(storedEntities).length} entities, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders (${this.cookQueue.size} queued); wasm heaps: manifold ${this.terrain.heapMB().toFixed(0)} MB, physx ${this.physics.heapMB().toFixed(0)} MB`);
   }
 
@@ -230,7 +243,7 @@ export class WorldParty extends Server {
     let set = new Set();
     for(let [id, tf] of this.world.each('Transform')) {
       let rb = this.world.get(id, 'RigidBody');
-      if(this.world.has(id, 'Player') || (rb && !rb.sleeping)) set.add(chunkAt(this.terrain.world, tf.position));
+      if(this.world.has(id, 'Player') || this.world.has(id, 'Projectile') || (rb && !rb.sleeping)) set.add(chunkAt(this.terrain.world, tf.position));
     }
     return set;
   }
@@ -265,6 +278,16 @@ export class WorldParty extends Server {
       else this.cookQueue.set(key, this.terrain.chunks[key].version);
     }
     this.pumpCooks(COOKS_NOW);
+  }
+
+  /** Colliders for the chunks around `positions` right now (bodies are about to be created there). */
+  cookAround(positions) {
+    if(!positions.length) return;
+    this.refreshActivity(true);
+    for(let p of positions) for(let dy of [0, -1]) {
+      let key = chunkAt(this.terrain.world, { x: p.x, y: p.y + dy * 2, z: p.z });
+      if(key && this.cookQueue.has(key)) { let v = this.cookQueue.get(key); this.cookQueue.delete(key); this.physics.setChunkCollider(key, this.terrain.chunkMesh(key)); if(this.colliderState.get(key) !== 'mesh:' + v) this.colliderState.set(key, 'mesh:' + v); }
+    }
   }
 
   /** Cook up to n queued mesh colliders, nearest to a player or awake body first. */
@@ -332,18 +355,22 @@ export class WorldParty extends Server {
     this.globalPlayerCount += 1;
     // A client reconnecting with the same id before its old socket closed must not fail with "entity exists"
     if(this.world.has(conn.id)) this.onDisconnect(conn);
+    this.conns.set(conn.id, conn);
     this.world.create(conn.id, {
       Player: Player({ name: "Player " + this.globalPlayerCount, color: PLAYER_COLORS[this.globalPlayerCount % PLAYER_COLORS.length] }),
       Transform: Transform(),
     });
     conn.send(JSON.stringify(this.fullUpdate()));
+    this.game.onConnect(conn.id); // team and spawn point follow in the next partial update
     console.log(`Connected: ${conn.id} room: ${this.name} url: ${new URL(ctx.request.url).pathname}`);
   }
 
   /** @param {Connection} conn */
   onDisconnect(conn) {
+    this.conns.delete(conn.id);
     if(!this.world.has(conn.id)) return;
     // Drop anything this player was holding, then the player itself
+    this.game.onDisconnect(conn.id);
     for(let [id, g] of this.world.each('Grabbed')) if(g.by === conn.id) this.world.remove(id, 'Grabbed');
     this.world.destroy(conn.id);
     this.persist().catch(e => console.error('persist failed: ' + e.message));
@@ -366,6 +393,7 @@ export class WorldParty extends Server {
 
     this.pumpCooks(COOKS_PER_TICK);
     this.anyAwake = this.physics.update(this.world, TICK_MS / 1000);
+    this.game.update(TICK_MS / 1000, start);
     this.tickCount++;
     this.refreshActivity();
 
@@ -400,7 +428,7 @@ export class WorldParty extends Server {
     await this.terrain.compress(this.persistChunks || []); // normally done already; never gzip synchronously here
     let puts = {};
     for(let id of this.persistQueue) {
-      if(!this.world.has(id) || this.world.has(id, 'Player')) continue;
+      if(!this.world.has(id) || this.world.has(id, 'Player') || this.world.has(id, 'Projectile')) continue;
       let s = this.world.serializeEntity(id, (_, name) => PERSISTED.has(name));
       if(s && Object.keys(s).length > 0) puts['ent:' + id] = s;
     }
@@ -436,6 +464,57 @@ export class WorldParty extends Server {
   markChunkPersist(key) { (this.persistChunks ||= new Set()).add(key); }
 
   // ---- gameplay helpers ---------------------------------------------------
+
+  /** Send a JSON message to one connection. */
+  send(id, msg) { let c = this.conns.get(id); if(c) try { c.send(JSON.stringify(msg)); } catch(e) { console.warn(`send to ${id} failed: ${e.message}`); } }
+
+  /** Server-side carves and additions reuse the client's csg path with the server's own unit brushes. */
+  carveSphere(center, radius, material = 1) {
+    let min = { x: center.x - radius, y: center.y - radius, z: center.z - radius }, max = { x: center.x + radius, y: center.y + radius, z: center.z + radius };
+    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius } });
+  }
+  carveBox(center, quaternion, size, material = 1) { return this.boxCsg(center, quaternion, size, material, SUBTRACTION); }
+  addBox(center, quaternion, size, material = 0) { return this.boxCsg(center, quaternion, size, material, ADDITION); }
+  boxCsg(center, quaternion, size, material, operation) {
+    let r = Math.hypot(size.x, size.y, size.z) / 2; // a sphere around the rotated box bounds the chunks it can touch
+    let min = { x: center.x - r, y: center.y - r, z: center.z - r }, max = { x: center.x + r, y: center.y + r, z: center.z + r };
+    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: CUBE_SOUP, operation, material, position: center, quaternion, scale: size });
+  }
+
+  /** Fort War keeps the imported terrain so every round can start from it. */
+  async savePristine() {
+    let keys = [...(await this.ctx.storage.list({ prefix: 'pristine:' })).keys()];
+    for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.ctx.storage.delete(keys.slice(i, i + STORAGE_BATCH));
+    await this.terrain.compress(Object.keys(this.terrain.chunks));
+    let puts = {};
+    for(let key in this.terrain.chunks) { let c = this.terrain.serializeChunk(key); if(c && c.bytes) puts['pristine:' + key] = c; }
+    let names = Object.keys(puts);
+    for(let i = 0; i < names.length; i += STORAGE_BATCH) { let batch = {}; for(let k of names.slice(i, i + STORAGE_BATCH)) batch[k] = puts[k]; await this.ctx.storage.put(batch); }
+    console.log(`pristine terrain saved: ${names.length} chunks`);
+  }
+
+  /** Put the terrain back as it was imported (new round); entities other than players and the match go away. */
+  async restorePristine() {
+    let stored = await this.loadPrefixed('pristine:');
+    if(!Object.keys(stored).length) return false;
+    for(let id of [...this.world.ids()]) if(!this.world.has(id, 'Player') && id !== 'match') this.world.destroy(id);
+    for(let key of Object.keys(this.terrain.chunks)) this.markChunkPersist(key); // stale ones get deleted, kept ones rewritten
+    this.terrain.clear();
+    this.connectivity.clear();
+    for(let key of Object.keys(this.physics.chunkActors)) this.physics._removeChunkActor(key);
+    this.colliderState = new Map(); this.cookQueue = new Map(); this.sentStates = new Map(); this.pushed = new Map();
+    for(let k in stored) { let c = stored[k]; if(!isValidKey(k) || !c.bytes) continue; this.terrain.loadChunk(k, c.bytes, c.version); this.markChunkPersist(k); }
+    let shed = this.terrain.cold(() => this.settleTerrain());
+    for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
+    this.refreshActivity(true);
+    this.terrain.dropPrev(Object.keys(this.terrain.chunks));
+    this.chunkDelta = null;
+    this.broadcast(JSON.stringify(this.fullUpdate()));
+    this.world.takeDirty();
+    await this.persist();
+    console.log(`terrain restored: ${Object.keys(this.terrain.chunks).length} chunks, ${shed} fragment(s) shed`);
+    return true;
+  }
 
   spawnProp(propId, position, quaternion) {
     let def = getPropDef(propId);
@@ -563,7 +642,7 @@ export class WorldParty extends Server {
     this.applyGravity();
     if(world === DEFAULT_WORLD) await this.ctx.storage.delete('world'); else await this.ctx.storage.put('world', world);
     let keys = [];
-    for(let prefix of ['chunk:', 'chunkpart:', 'summary:', 'ent:']) keys.push(...(await this.ctx.storage.list({ prefix })).keys());
+    for(let prefix of ['chunk:', 'chunkpart:', 'summary:', 'ent:', 'pristine:']) keys.push(...(await this.ctx.storage.list({ prefix })).keys());
     this.chunkParts = new Map();
     for(let i = 0; i < keys.length; i += STORAGE_BATCH) await this.ctx.storage.delete(keys.slice(i, i + STORAGE_BATCH));
     this.persistQueue.clear(); this.persistRemoved.clear(); this.persistChunks = new Set(); this.persistChunkDeletes = new Set(); this.persistSummaries = new Set();
@@ -577,6 +656,7 @@ export class WorldParty extends Server {
     await this.clearWorld();
     this.connectivity.solve();
     this.refreshActivity(true);
+    this.game.onWorldChanged();
     this.chunkDelta = null;
     this.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
@@ -626,11 +706,13 @@ export class WorldParty extends Server {
     for(let k in this.terrain.takeDirty()) this.markChunkPersist(k);
     this.refreshActivity(true);
     this.terrain.dropPrev(Object.keys(this.terrain.chunks));
+    this.game.onWorldChanged();
     this.chunkDelta = null;
     this.broadcast(JSON.stringify(this.fullUpdate()));
     this.world.takeDirty();
     await this.persist();
-    console.log(`import: ${Object.keys(this.terrain.chunks).length} chunks, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders`);
+    if(this.game.active) await this.savePristine();
+    console.log(`import: ${Object.keys(this.terrain.chunks).length} chunks, ${shed} fragment(s) shed, ${Object.keys(this.physics.chunkActors).length} chunk colliders${this.game.active ? ', Fort War on' : ''}`);
   }
 
   // ---- messages -----------------------------------------------------------
@@ -641,6 +723,7 @@ export class WorldParty extends Server {
     let data; try { data = JSON.parse(message); } catch { return; }
     let w = this.world;
     let me = sender.id;
+    if(await this.game.onMessage(me, data)) return; // Fort War messages, and sandbox ones a match forbids
 
     switch(data.type) {
       case "player": {
