@@ -82,14 +82,14 @@ export class BodyRenderSystem {
     init(world) {
         // Frozen highlight
         world.on('set', (id, name, rb) => {
-            if(name !== 'RigidBody' || world.has(id, 'FragmentMesh')) return;
+            if(name !== 'RigidBody' || world.has(id, 'FragmentMesh') || world.has(id, 'GlowRock')) return;
             let obj = world.get(id, '$Mesh')?.object;
             if(obj?.material) obj.material.color.setHex(rb.frozen ? FROZEN_COLOR : getPropDef(rb.propId).color);
         });
     }
     update(world) {
         for(let [id, rb, tf] of world.each('RigidBody', 'Transform')) {
-            if(world.has(id, '$Mesh')) continue;
+            if(world.has(id, '$Mesh') || world.has(id, 'GlowRock')) continue; // glow rocks draw themselves (gameSystems.js)
             let fragment = world.get(id, 'FragmentMesh');
             let object = fragment ? this.makeFragmentMesh(fragment, rb) : this.makePlaceholder(rb);
             object.position.copy(toVec3(tf.position));

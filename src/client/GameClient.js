@@ -6,7 +6,7 @@ import { RocketTool, GrenadeTool, DrillTool, MasonTool, GrappleTool } from '../t
 import { PhysGunTool } from '../tools/PhysGunTool.js';
 import { GameHud } from './GameHud.js';
 import { Sfx } from './Sfx.js';
-import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, ExplosionFx, teamColorOf } from './gameSystems.js';
+import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, GlowRockRenderSystem, ExplosionFx, teamColorOf } from './gameSystems.js';
 import { PROPS } from '../props/PropRegistry.js';
 import { GAME_PROPS, RESPAWN_MS, VOTE } from '../game/rules.js';
 
@@ -31,6 +31,7 @@ export class GameClient {
         ecs.addSystem(new ProjectileRenderSystem(main.world.scene));
         ecs.addSystem(new SupplyRenderSystem(main.world.scene, main.world.camera, () => main.conn.id, t => this.teamColor(t)));
         ecs.addSystem(new FuseFxSystem());
+        ecs.addSystem(new GlowRockRenderSystem(main.physBodiesParent, main.world.scene, main.world.camera, () => this.config.glowRocks));
         ecs.on('set', (id, name, s) => {
             if(name === 'Supply' && s.state === 'carried' && s.carriedBy === main.conn.id && !this.carryingNoted) { this.carryingNoted = true; this.sfx.pickup(); this.hud.flashText('Supply grabbed! Get it to your vault', 2000); }
             if(name === 'Supply' && s.state !== 'carried' && s.carriedBy !== main.conn.id) this.carryingNoted = false;

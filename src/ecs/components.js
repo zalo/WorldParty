@@ -20,6 +20,9 @@
  *   Supply       { team, state, carriedBy, home, droppedAt }   Fort War loot: team = whose vault it belongs to (null = neutral),
  *                                             state 'home' | 'loose' | 'carried'; carried supplies have no RigidBody
  *   Match        { phase, remainingMs, scores, winner, round, overAt }   Fort War match state (entity id 'match')
+ *   GlowRock     { cell, exposure, free }    Fort War glow rock materialized from the virtual field (src/game/rules.js
+ *                                             virtualRock gives its radius and colour from `cell`): static and partly in the
+ *                                             ground while exposure < 1; free ones carry a sphere RigidBody and roll
  *
  * Transient (server):  $PxBody {actor}  $PxJoint {joint}  $Grab {anchor, joint}  $GrabTarget {pos, quat}  $PxKinematic {actor, prev}
  * Transient (client):  $Mesh {object}   $Snapshot {prev, target}  $Label {el}  $Line {line}
@@ -53,8 +56,10 @@ export const Supply = ({ team = null, state = 'home', carriedBy = null, home = {
 export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [], vote = null } = {}) =>
     ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt, awards: [...awards], vote });
 
+export const GlowRock = ({ cell, exposure = 0, free = false }) => ({ cell, exposure, free });
+
 export const Model = ({ url, selectedBy = '' }) => ({ url, selectedBy });
 
 /** Components that are persisted to durable storage (players and holds are session-only). */
-export const PERSISTED = new Set(['Transform', 'RigidBody', 'Prop', 'FragmentMesh', 'Joint', 'Model', 'Supply', 'Fuse', 'Match']);
+export const PERSISTED = new Set(['Transform', 'RigidBody', 'Prop', 'FragmentMesh', 'Joint', 'Model', 'Supply', 'Fuse', 'Match', 'GlowRock']);
 export const isPersistedComponent = (id, name) => PERSISTED.has(name);

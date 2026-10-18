@@ -51,6 +51,46 @@ export const MAX_FRAGMENTS = 110;         // ... or sooner when there is this mu
 export const MAX_PLAYER_PROPS = 40;       // crates and barrels spawned from the menu, room-wide
 export const GAME_PROPS = ['crate', 'barrel'];
 
+/** Glow rocks: luminous pebbles sown through the ground below the surface. They are a virtual field, not a list: a
+ *  jittered grid whose cells decide from a hash of their coordinates and the level's seed whether they hold a rock,
+ *  where in the cell, how big and which colour, so every host agrees without shipping one entry per rock. The server
+ *  materializes a rock as an entity once a dig or a blast (or an existing tunnel, found by a lazy scan near players)
+ *  opens air onto it: embedded and static while part of it is still in the ground, a physics sphere once nothing holds
+ *  it (`freeAt`). Only below `surfaceY - margin`: the forts, the grass skin and a crater on open ground stay dark. */
+export const GLOW_ROCK = {
+    margin: 0.9,                    // no rocks in the first metre under the surface
+    minRadius: 0.15, maxRadius: 0.35,
+    freeAt: 0.97,                   // exposure (fraction of the rock out of the ground) at which it becomes a body
+    colors: ['#ffb24a', '#4fe3d6', '#b07cff'],
+    maxFree: 200,                   // freed pebbles beyond this: the oldest sleeping ones vanish, like rubble
+    scanPerTick: 150,               // virtual rocks measured per tick by the lazy scan around players ...
+    scanRange: 24,                  // ... in chunks this close to one
+    light: { count: 12, distance: 10, decay: 2, intensity: 14 },   // real point lights on the nearest rocks
+    emissive: 2.2,                  // emissive intensity of the rock material (ACES, exposure 0.55: 4 washed them out to white)
+};
+export const DEFAULT_GLOW_FIELD = { seed: 1, cell: 1.1, density: 0.8 };
+
+function hash32(x) { x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b); return (x ^ (x >>> 16)) >>> 0; }
+/** The virtual rock of a field cell (null when the cell holds none): position, radius, colour index and spin. */
+export function virtualRock(field, i, j, k) {
+    let h = hash32(Math.imul(i, 0x9E3779B1) ^ Math.imul(j, 0x85EBCA77) ^ Math.imul(k, 0xC2B2AE3D) ^ (field.seed | 0));
+    let u = () => { h = hash32(h + 0x9E3779B9); return h / 4294967296; };
+    if(u() >= field.density) return null;
+    let c = field.cell, r = GLOW_ROCK.minRadius + u() * (GLOW_ROCK.maxRadius - GLOW_ROCK.minRadius);
+    let pad = r + 0.02, span = Math.max(0, c - 2 * pad); // a rock stays inside its cell, so rocks never overlap
+    return { cell: `${i},${j},${k}`, x: i * c + pad + u() * span, y: j * c + pad + u() * span, z: k * c + pad + u() * span,
+             radius: r, color: Math.floor(u() * GLOW_ROCK.colors.length), spin: u() * Math.PI * 2, axis: u() * 6 | 0 };
+}
+/** Highest cell row allowed under a surface: the whole cell lies below surfaceY - margin. */
+export const glowRowMax = (field, surfaceY) => Math.floor((surfaceY - GLOW_ROCK.margin) / field.cell) - 1;
+/** Every virtual rock whose cell overlaps the box (world units), below the surface. */
+export function* virtualRocksIn(field, surfaceY, min, max) {
+    let c = field.cell;
+    let i0 = Math.floor(min.x / c), i1 = Math.floor(max.x / c), k0 = Math.floor(min.z / c), k1 = Math.floor(max.z / c);
+    let j0 = Math.floor(min.y / c), j1 = Math.min(Math.floor(max.y / c), glowRowMax(field, surfaceY));
+    for(let i = i0; i <= i1; i++) for(let j = j0; j <= j1; j++) for(let k = k0; k <= k1; k++) { let r = virtualRock(field, i, j, k); if(r) yield r; }
+}
+
 /** End-of-round awards: [title, Player field, higher is better, minimum to qualify] */
 export const AWARDS = [
     ['Warlord', 'kills', 2], ['Mule', 'carries', 1], ['Tunnel Rat', 'smuggles', 1], ['Demolition', 'blasts', 10], ['Lemming', 'deaths', 3],
@@ -93,6 +133,11 @@ export function sanitizeGame(g) {
         teams,
         caches: vecs(g.caches, 32),
         scatter: vecs(g.scatter, 32),
+        glowRocks: g.glowRocks && typeof g.glowRocks === 'object' ? {
+            seed: num(g.glowRocks.seed, DEFAULT_GLOW_FIELD.seed) | 0,
+            cell: Math.max(0.6, Math.min(4, num(g.glowRocks.cell, DEFAULT_GLOW_FIELD.cell))),
+            density: Math.max(0, Math.min(1, num(g.glowRocks.density, DEFAULT_GLOW_FIELD.density))),
+        } : null,
         hints: Array.isArray(g.hints) ? g.hints.slice(0, 8).map(h => String(h).slice(0, 200)) : [],
     };
 }

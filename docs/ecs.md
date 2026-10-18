@@ -37,6 +37,7 @@ the persistent components.
 | `Player` | `$PxKinematic` (capsule) | `$Mesh`, `$Label` |
 | `Model` | | `$Mesh` |
 | `Supply`, `Fuse`, `Match` (Fort War) | | `$SupplyFx`, `$FuseFx` |
+| `GlowRock` (Fort War: `{cell, exposure, free}`, a pebble of the virtual field materialized by `src/server/GlowRocks.js` once air meets it; static and partly in the ground until `free`, then a sphere `RigidBody` too) | `$PxBody` once free | `$GlowInst` (slot in an instanced mesh) while embedded, `$Mesh` once free |
 | `Projectile` (Fort War rocket, not persisted) | | `$Mesh` (dead-reckoned) |
 
 Shapes and defaults are in `src/ecs/components.js`. `PERSISTED` lists the

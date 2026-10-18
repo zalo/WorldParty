@@ -57,6 +57,7 @@ export class WorldParty extends Server {
     this.persistSummaries = new Set(); // chunk keys whose connectivity summary should be written
     this.connectivity.onSummary = key => this.persistSummaries.add(key);
     this.settleTimer = null;        // pending settleNow() after carves
+    this.carveBoxes = [];           // bounds of the brushes run since the last settleNow (the glow rocks they can uncover)
     this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
     this.persistChunkDeletes = new Set();
     this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
@@ -416,9 +417,11 @@ export class WorldParty extends Server {
 
   /** Every entity and chunk state. The periodic resync (`withMeshes` false) leaves out FragmentMesh: it never changes
    *  after creation and clients got it then, and a room with rubble lying around would otherwise ship a megabyte of
-   *  geometry to every client every ten seconds (and carve frames behind it would wait on the wire). */
+   *  geometry to every client every ten seconds (and carve frames behind it would wait on the wire). The Transforms of
+   *  embedded glow rocks stay out for the same reason: hundreds of them, none moving. */
   fullUpdate(withMeshes = true) {
-    let entities = withMeshes ? this.world.serialize() : this.world.serialize((id, name) => name !== 'FragmentMesh');
+    let entities = withMeshes ? this.world.serialize()
+      : this.world.serialize((id, name) => name !== 'FragmentMesh' && !(name === 'Transform' && this.world.has(id, 'GlowRock') && !this.world.has(id, 'RigidBody'))); // nor where an embedded glow rock lies: it does not move
     return { type: "fullupdate", entities, removed: [], world: this.terrain.world, ...this.chunkMaps(), serverTickMs: this.serverTickMs };
   }
 
@@ -535,6 +538,10 @@ export class WorldParty extends Server {
     this.terrain.applyCsg(data);
     this.csgStats.booleanMs += Date.now() - t0;
     if(this.terrain.dirty.size === 0) return;
+    if(data.position && data.scale) { // the brush's bounds, generously: the unit brushes fit a unit sphere or cube
+      let p = vec3(data.position), s = vec3(data.scale, { x: 1, y: 1, z: 1 }), R = Math.hypot(s.x, s.y, s.z);
+      this.carveBoxes.push({ min: { x: p.x - R, y: p.y - R, z: p.z - R }, max: { x: p.x + R, y: p.y + R, z: p.z + R } });
+    }
     this.csgStats.ops++;
     for(let key of this.terrain.dirty) this.pushChunk(key);
     if(!this.settleTimer) this.settleTimer = setTimeout(() => { this.settleTimer = null; this.settleNow(); }, 0);
@@ -563,6 +570,7 @@ export class WorldParty extends Server {
   /** Grounding, colliders and activity for every chunk carved since the last time. */
   settleNow() {
     if(this.importing || this.terrain.dirty.size === 0) return;
+    let carved = new Set(this.terrain.dirty);
     let t0 = Date.now();
     let fragments = this.settleTerrain();
     let settleMs = Date.now() - t0;
@@ -571,10 +579,12 @@ export class WorldParty extends Server {
     let activityMs = Date.now() - t0; // includes PhysX cooking of changed chunk colliders
     let changed = this.terrain.takeDirty();
     for(let key in changed) { this.markChunkPersist(key); this.pushChunk(key); this.physics.wakeNear(key); } // settle may have changed some again
+    let boxes = this.carveBoxes; this.carveBoxes = [];
+    let rocks = this.game.onTerrainChanged(boxes, carved, Object.keys(changed)); // before dropPrev: it compares against the replaced content
     this.terrain.dropPrev(Object.keys(changed));
     this.terrain.compress(Object.keys(changed)).catch(e => console.error('compress failed: ' + e.message)); // native gzip, after the frames are out
     let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
-    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms`);
+    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms${rocks ? `; glow rocks: ${rocks.made} new, ${rocks.freed} freed, ${rocks.updated} updated (${rocks.measured} measured, ${rocks.rays} rays, ${rocks.bvhBuilds} BVHs) ${rocks.ms}ms` : ''}`);
   }
 
   /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty). */

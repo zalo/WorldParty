@@ -4,13 +4,15 @@
  *  respawns, weapons (rockets integrated here against PhysX raycasts; grenades and busters are RigidBody props with a
  *  Fuse), explosions (a sphere carve plus a radial velocity change on bodies and knockback and damage on players),
  *  the supplies (physics crates: steal, carry, deposit, drop on death, return when abandoned), rubble damage, rubble
- *  fading, the mason's build budget, and the match timer with terrain restored from the pristine import between rounds.
+ *  fading, the mason's build budget, the glow rocks in the ground (src/server/GlowRocks.js), and the match timer with
+ *  terrain restored from the pristine import between rounds.
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
 import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y, VOTE,
          SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, MAX_PLAYER_PROPS, GAME_PROPS, AWARDS, inBox, otherTeam } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
 import { chunksInBox } from '../terrain/grid.js';
+import { GlowRocks } from './GlowRocks.js';
 
 const MATCH_ID = 'match';
 const SPAWN_PROTECT_MS = 2500;
@@ -35,6 +37,7 @@ export class Game {
         this.spawnQueue = new Set();   // players to (re)spawn on the next tick, after the update that told them about the game
         this.spawnedAt = new Map();
         this.lastActive = new Map(); // player id -> last heartbeat (votes count only players who are there)    // player id -> time of the last spawn (brief protection)
+        this.rocks = new GlowRocks(server); // the glow rock field: materialized as digging (or walking up to a tunnel) exposes them
     }
 
     get config() { return this.server.terrain.world.game || null; }
@@ -50,11 +53,13 @@ export class Game {
             for(let id of [...w.query('Supply')]) w.destroy(id);
             for(let id of [...w.query('Projectile')]) w.destroy(id);
             if(w.has(MATCH_ID)) w.destroy(MATCH_ID);
+            this.rocks.reset();
             for(let [id, p] of w.each('Player')) if(p.team) w.set(id, 'Player', { team: null, health: MAX_HEALTH, dead: false, carrying: null });
             return;
         }
         if(!w.has(MATCH_ID)) w.create(MATCH_ID, { Match: Match({ remainingMs: this.config.matchMinutes * 60000 }) });
         if(w.query('Supply').size === 0) this.resetSupplies();
+        this.rocks.adopt(); // rocks loaded from storage keep their exposure; the field fills in around them as before
         for(let id of [...w.query('Player')]) if(!w.get(id, 'Player').team) this.join(id);
     }
 
@@ -141,6 +146,10 @@ export class Game {
         }
         return false;
     }
+
+    /** The terrain changed (settleNow, with the replaced chunk content still around): the glow rocks a brush can have
+     *  uncovered are measured, new ones appear, free ones become bodies. Returns the counts and cost, for the log. */
+    onTerrainChanged(boxes, carved, changed) { return this.active ? this.rocks.onTerrainChanged(boxes, carved, changed) : null; }
 
     /** Where the player's eye is on the server (its Transform is the capsule centre minus half a metre). */
     eyeOf(id) { let tf = this.world.get(id, 'Transform'); return { x: tf.position.x, y: tf.position.y + 1.0, z: tf.position.z }; }
@@ -455,7 +464,9 @@ export class Game {
         this.playerSystem(dt, now);
         this.rubbleSystem(now);
         this.fadeSystem(now);
+        this.rocks.scan();
         if(++this.scoreTick % 15 === 0) this.updateScores();
+        if(this.scoreTick % 30 === 0) this.rocks.trimFree();
         this.matchSystem(dt, now, players);
         this.voteSystem(now);
     }
@@ -646,6 +657,7 @@ export class Game {
         let w = this.world, m = w.get(MATCH_ID, 'Match');
         w.set(MATCH_ID, 'Match', { phase: 'resetting' });
         await this.server.restorePristine();
+        this.rocks.reset(); // back in the ground with the terrain; the scan and the digging bring them out again
         this.resetSupplies();
         for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0 }); this.spawnQueue.add(id); }
         let round = m.round + 1;
