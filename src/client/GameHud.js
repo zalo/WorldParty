@@ -35,6 +35,7 @@ export class GameHud {
         let bar = el('div', 'width:200px;height:14px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.4);border-radius:4px;overflow:hidden;', left);
         this.health = el('div', 'height:100%;width:100%;background:#6c4;transition:width 0.15s;', bar);
         this.stats = el('div', 'font-size:12px;margin-top:4px;text-shadow:0 1px 2px #000;opacity:0.85;', left);
+        this.sound = el('div', 'font-size:11px;margin-top:2px;text-shadow:0 1px 2px #000;opacity:0.55;', left); // 🔊 / 🔇, M toggles
         this.voteLine = el('div', 'font-size:13px;margin-top:8px;text-shadow:0 1px 2px #000;color:#fc3;', left);
         // bottom centre, above the tool bar: weapon slots
         this.slots = el('div', 'position:absolute;bottom:58px;left:50%;transform:translateX(-50%);display:flex;gap:6px;', root);
@@ -69,7 +70,7 @@ export class GameHud {
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
             <div>Walk into a crate to carry it. Bring it to your vault. The light beeps when treasure is near.</div>
-            <div style="margin-top:8px;opacity:0.8"><b>1-6</b> or <b>scroll</b> weapons &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
+            <div style="margin-top:8px;opacity:0.8"><b>1-6</b> or <b>scroll</b> weapons &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
         this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
         let title = el('div', 'font-weight:bold;font-size:16px;', this.votePanel); title.textContent = 'Call a vote';
@@ -121,6 +122,8 @@ export class GameHud {
             this.health.style.width = (h * 100).toFixed(0) + '%';
             this.health.style.background = h > 0.5 ? '#6c4' : h > 0.25 ? '#dc3' : '#d33';
             this.stats.textContent = `stone ${me.build}/${WEAPONS.mason.budget}`;
+            let sound = g.sfx.muted ? '🔇 M' : '🔊 M';
+            if(this.sound.textContent !== sound) this.sound.textContent = sound;
             this.carry.textContent = me.carrying ? '💰 Carrying treasure: take it to your vault!' : '';
         }
         // scores and clock
