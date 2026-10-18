@@ -819,6 +819,26 @@ export default {
       if(res && res.status === 200 && (res.headers.get('Cache-Control') || '').includes('immutable')) ctx.waitUntil(cache.put(request, res.clone()));
       return res || new Response('Not found', { status: 404 });
     }
+    if(url.pathname === '/api/discord/token') return discordToken(request, env);
     return (await routePartykitRequest(request, env)) || env.ASSETS.fetch(request);
   }
 };
+
+/** Discord Activity sign-in: the client trades the OAuth2 code it got from the Embedded App SDK for an access
+ *  token here, where the app's client secret lives (`wrangler secret put DISCORD_CLIENT_SECRET`). The client id
+ *  comes from the proxy hostname the activity runs under unless DISCORD_CLIENT_ID is set. */
+async function discordToken(request, env) {
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  if(request.method !== 'POST') return json({ error: 'POST a {code}' }, 405);
+  if(!env.DISCORD_CLIENT_SECRET) return json({ error: 'DISCORD_CLIENT_SECRET is not configured on the Worker' }, 501);
+  let body = await request.json().catch(() => ({}));
+  let client_id = env.DISCORD_CLIENT_ID || body.client_id;
+  if(!body.code || !client_id) return json({ error: 'code and client_id are required' }, 400);
+  let res = await fetch('https://discord.com/api/oauth2/token', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id, client_secret: env.DISCORD_CLIENT_SECRET, grant_type: 'authorization_code', code: body.code }),
+  });
+  if(!res.ok) return json({ error: `Discord token exchange failed (${res.status})` }, 502);
+  let { access_token } = await res.json();
+  return json({ access_token });
+}

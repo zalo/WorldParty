@@ -10,6 +10,7 @@ import { PlayerController } from './PlayerController.js';
 import { Brush } from 'three-bvh-csg';
 import { computeBoundsTree, disposeBoundsTree, computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import PartySocket from "partysocket";
+import { discordMode, connectDiscord } from './client/Discord.js';
 
 import { World as EcsWorld } from './ecs/World.js';
 import { encodeSoup, unpackChunkFrame } from './net/codec.js';
@@ -44,7 +45,19 @@ export default class Main {
 
     async deferredConstructor() {
         this.queryParams = new URLSearchParams(window.location.search || window.location.hash.substr(1));
-        if(this.queryParams.has("room")){
+        // Reach the server through whatever served this page (a reverse proxy may add a path
+        // prefix); the bundler's PARTYKIT_HOST is only the fallback for non-http origins.
+        let proxied = /^https?:$/.test(window.location.protocol);
+        this.basePath = proxied ? window.location.pathname.replace(/\/[^/]*$/, '') : '';
+        this.serverHost = proxied ? window.location.host : PARTYKIT_HOST;
+        // As a Discord Activity (src/client/Discord.js) the room is the activity instance, so everyone who
+        // launched it from the same channel plays together, and the room starts as Fort War (importFortWarIfEmpty)
+        let discord = discordMode();
+        if(discord) {
+            this.discord = await connectDiscord(discord, this.basePath);
+            this.curRoom = 'discord-' + this.discord.instanceId;
+            this.autoImport = './assets/worlds/fortwar.json';
+        } else if(this.queryParams.has("room")){
             this.curRoom = this.queryParams.get('room') || "global";
         }else{
             this.curRoom = "global";
@@ -52,14 +65,11 @@ export default class Main {
             window.history.replaceState({}, "", `${window.location.pathname}?${this.queryParams.toString()}`);
         }
 
-        // Reach the server through whatever served this page (a reverse proxy may add a path
-        // prefix); the bundler's PARTYKIT_HOST is only the fallback for non-http origins.
-        let proxied = /^https?:$/.test(window.location.protocol);
-        this.basePath = proxied ? window.location.pathname.replace(/\/[^/]*$/, '') : '';
-        this.serverHost = proxied ? window.location.host : PARTYKIT_HOST;
         this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
+        // every (re)connection is a new server-side player: name it after the Discord user each time
+        if(this.discord?.name) this.conn.addEventListener("open", () => this.conn.send(JSON.stringify({ type: "name", name: this.discord.name })));
         // ?gravity=<m/s²> sets the room's body gravity (persisted with the world config; see src/gravity.js)
         if(this.queryParams.has("gravity")) {
             let gravity = parseFloat(this.queryParams.get("gravity"));
@@ -266,6 +276,17 @@ export default class Main {
         let full = data.type === "fullupdate";
         if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full); // world config first: the game client wants to exist before its entities arrive
         if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
+        if(full && this.autoImport) this.importIfEmpty(data);
+    }
+
+    /** A fresh Discord room has no level yet: the first full update without game rules makes the player with the
+     *  lowest connection id (so two simultaneous launchers agree on one) upload the Fort War manifest. */
+    importIfEmpty(data) {
+        if(this.terrain.world?.game) { this.autoImport = null; return; }
+        let players = Object.entries(data.entities || {}).filter(([, e]) => e.Player).map(([id]) => id).sort();
+        if(players.length && players[0] !== this.conn.id) return;
+        let url = this.autoImport; this.autoImport = null;
+        this.importWorld(url).catch(e => console.error('importWorld failed: ' + e.message));
     }
 
     /** Entity id for a three.js object created by a render system (walks up parents). */
