@@ -34,12 +34,14 @@ const out = opt('out', 'assets/worlds/fortwar.json');
 
 // ---- materials ----------------------------------------------------------------
 const STONE = 0, DIRT = 1, GRASS = 2, SAND = 3;
-const EXTRA = [ // textured triplanar (see src/terrain/materials.js); the team stones are one light block texture tinted
-    { name: 'Red Stone',  color: 0xc0574a, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
-    { name: 'Blue Stone', color: 0x4d78c4, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
+const EXTRA = [ // textured triplanar (see src/terrain/materials.js); the team stones are one light block texture tinted.
+    // The tint multiplies the texture in linear light, so a saturated colour makes the walls read as unlit whatever the
+    // sun does (0x4d78c4 is 0.07/0.19/0.55 linear): keep the tints pale.
+    { name: 'Red Stone',  color: 0xe3a094, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
+    { name: 'Blue Stone', color: 0xa3bdea, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
     { name: 'Wood',       color: 0x8a5a2b, texture: 'assets/textures/weathered_brown_planks.jpg', scale: 3 },
     { name: 'Cobble',     color: 0x6f6f78, texture: 'assets/textures/cobblestone_floor_08.jpg', scale: 4 },
-    { name: 'Dark Rock',  color: 0x4e4a48, texture: 'assets/textures/dark_rock.jpg', scale: 7 },
+    { name: 'Dark Rock',  color: 0x8a8480, texture: 'assets/textures/dark_rock.jpg', scale: 7, tint: true }, // the texture alone reads as pitch black at a distance; tinted lighter
 ];
 const RED_STONE = MATERIALS.length, BLUE_STONE = RED_STONE + 1, WOOD = RED_STONE + 2, COBBLE = RED_STONE + 3, DARK = RED_STONE + 4;
 

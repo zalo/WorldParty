@@ -34,17 +34,20 @@ export default class World {
         this.dirLight.shadow.mapSize.height = 2048;
         this.dirLight.shadow.bias = -0.0002;
         this.dirLight.shadow.normalBias = 0.02;
-        // Cascaded shadow maps: a single 60 m shadow box around the camera left everything past it unshadowed
-        // (half the view in a 160 m level); three cascades follow the view out to 140 m. ?csm=0 for the plain box.
+        // One 180 m shadow box (4096², soft PCF) centred on the player (DayCycle moves it): it spans the whole
+        // level, so nothing in view goes unshadowed, at 4 cm texels. The cascaded CSMShadowNode (?csm=1) rendered
+        // no shadows at all under the post-processing pipeline in this three version, even bound to the view
+        // camera, so it is only kept for experiments. The sun sits 150 m out, so the depth range must reach past
+        // the target: far objects on the sun's far side were clipped by the old -150..150.
         let params = mainObject.queryParams || new URLSearchParams();
-        if(params.get('csm') !== '0') {
+        if(params.get('csm') === '1') {
             this.csm = new CSMShadowNode( this.dirLight, { cascades: 3, maxFar: 140, mode: 'practical', lightMargin: 120 } );
             this.csm.fade = true;
             this.dirLight.shadow.shadowNode = this.csm;
         } else {
-            this.dirLight.shadow.camera.near = -150; this.dirLight.shadow.camera.far = 150;
-            this.dirLight.shadow.camera.left = -60; this.dirLight.shadow.camera.right = 60;
-            this.dirLight.shadow.camera.top = 60; this.dirLight.shadow.camera.bottom = -60;
+            this.dirLight.shadow.camera.near = 1; this.dirLight.shadow.camera.far = 400;
+            this.dirLight.shadow.camera.left = -90; this.dirLight.shadow.camera.right = 90;
+            this.dirLight.shadow.camera.top = 90; this.dirLight.shadow.camera.bottom = -90;
             this.dirLight.shadow.mapSize.width = this.dirLight.shadow.mapSize.height = 4096;
         }
         this.scene.add( this.dirLight );
@@ -57,6 +60,7 @@ export default class World {
         this.renderer = new THREE.WebGPURenderer();
         this.renderer.setPixelRatio( pixelRatio );
         this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 0.55;
         this.container.appendChild(this.renderer.domElement);
@@ -92,24 +96,21 @@ export default class World {
             return unpackRGBToNormal( scenePassNormal.sample( uv ) );
         } );
 
-        // SSGI pass with temporal filtering enabled
-        this.giPass = ssgi( scenePassColor, scenePassDepth, sceneNormal, this.camera );
-        // Debug toggles: ?traa=0 skips the temporal AA, ?gi=0 skips SSGI, ?probes=0 skips the probe grid
+        // Toggles: ?traa=0 skips the temporal AA, ?probes=0 skips the probe grid, ?gi=1 adds screen-space GI on top.
+        // SSGI is off by default: the probe grid carries the bounce light, and the screen-space pass cost a large
+        // share of the frame for a smeary, view-dependent gain.
         let flags = mainObject.queryParams || new URLSearchParams();
-        this.giPass.useTemporalFiltering = flags.get('gitemporal') !== '0';
-        if(this.isMobile) {
-            this.giPass.sliceCount.value = 1;
+        let compositePass = scenePassColor;
+        if(flags.get('gi') === '1') {
+            this.giPass = ssgi( scenePassColor, scenePassDepth, sceneNormal, this.camera );
+            this.giPass.useTemporalFiltering = flags.get('gitemporal') !== '0';
+            this.giPass.sliceCount.value = this.isMobile ? 1 : 2;
             this.giPass.stepCount.value = 8;
-        } else {
-            this.giPass.sliceCount.value = 2;
-            this.giPass.stepCount.value = 8;
+            const gi = this.giPass.getGINode();
+            const ao = this.giPass.getAONode();
+            // Composite: direct lighting * AO + diffuse * GI
+            compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
         }
-
-        const gi = this.giPass.getGINode();
-        const ao = this.giPass.getAONode();
-
-        // Composite: direct lighting * AO + diffuse * GI
-        const compositePass = flags.get('gi') === '0' ? scenePassColor : vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
 
         // TRAA: temporal resolve anti-aliasing using velocity buffer
         const traaPass = traa( compositePass, scenePassDepth, scenePassVelocity, this.camera );
@@ -145,7 +146,7 @@ export default class World {
             if(DayCycle.supported(this.renderer)) {
                 this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
                 if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0')) {
-                    this.probes = new ProbeLighting(this.renderer, this.scene, { spacing: this.isMobile ? 8 : 5 });
+                    this.probes = new ProbeLighting(this.renderer, this.scene, { spacing: this.isMobile ? 8 : 6, maxProbes: this.isMobile ? 1500 : 4000 }); // a probe costs ~5 ms to bake, so ~2300 probes for Twin Forts' band
                     // the probes carry the sky's diffuse light once baked; until then the environment map does (ProbeLighting.environmentIntensity)
                     mainObject.attachProbes?.(this.probes);
                 }
@@ -168,6 +169,10 @@ export default class World {
     update(dt) {
         if(this.dayCycle) this.dayCycle.update(dt, this.camera);
         if(this.probes) { this.probes.update(this.camera); this.scene.environmentIntensity = this.probes.environmentIntensity(); }
+        // The cascade node adopts whichever camera first builds a material with it, which here is a probe or
+        // environment cube camera: its cascades then followed that camera and nothing in the player's view was
+        // ever shadowed. Point it at the view camera once it exists.
+        if(this.csm && this.csm.camera && this.csm.camera !== this.camera) { this.csm.camera = this.camera; this.csm.updateFrustums(); }
     }
 
     /** **INTERNAL**: This function recalculates the viewport based on the new window size. */

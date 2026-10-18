@@ -207,9 +207,26 @@ export default class Main {
         else if(world.game && this.game) this.game.configure(world.game);
     }
 
+    /** The probe volume: the world bounds, clipped vertically to the rows of chunks the client holds, so a
+     *  deep world's probes are spent on the band with terrain in it rather than on empty sky and buried rock
+     *  (Twin Forts: 40 m of content inside 80 m of bounds, 3x the probe density for the same count). */
     probeBounds(w) {
         const CHUNK = 10;
-        return [new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK))];
+        let min = new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), max = new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK));
+        let rows = [...this.terrain.versions.keys()].map(k => +k.split(',')[1]);
+        if(rows.length) { min.y = Math.max(min.y, Math.min(...rows) * CHUNK); max.y = Math.min(max.y, (Math.max(...rows) + 1) * CHUNK); }
+        return [min, max];
+    }
+
+    /** Re-fit the probe grid when the held chunks reach rows it does not cover (debounced: chunks arrive in bursts). */
+    refitProbes() {
+        if(!this.probes) return;
+        clearTimeout(this.probeRefit);
+        this.probeRefit = setTimeout(() => {
+            let [min, max] = this.probeBounds(this.terrain.world);
+            if(this.probes.min.equals(min) && this.probes.max.equals(max)) return;
+            this.probes.setBounds(min, max);
+        }, 1500);
     }
 
     /** Probe grid follows the world bounds and rebakes around every chunk change. */
@@ -286,6 +303,7 @@ export default class Main {
         if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
         if(full && this.autoImport) this.importIfEmpty(data);
         if(full && !this.roomKnown) { this.roomKnown = true; this.spawnMenu.setVisible(true); }
+        if(full) this.refitProbes();
     }
 
     /** A fresh Discord room has no level yet: the first full update without game rules makes the player with the

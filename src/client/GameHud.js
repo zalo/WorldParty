@@ -67,7 +67,7 @@ export class GameHud {
         this.overAwards = el('div', 'font-size:16px;margin-top:10px;display:flex;flex-direction:column;gap:4px;align-items:center;', this.over);
         // help card (H)
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
-        this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
+        this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
             <div>Walk into a crate to carry it. Bring it to your vault. The light beeps when treasure is near.</div>
             <div style="margin-top:8px;opacity:0.8"><b>1-6</b> or <b>scroll</b> weapons &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
