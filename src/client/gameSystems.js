@@ -56,9 +56,10 @@ export class SupplyRenderSystem {
         this.crateMaterial = new THREE.MeshStandardMaterial({ color: 0xffc830, emissive: 0x664400, roughness: 0.4 });
         this.materials = {};
     }
-    materialFor(team) {
-        let key = team || 'loot';
-        if(!this.materials[key]) this.materials[key] = new THREE.MeshBasicMaterial({ color: team ? this.teamColor(team) : '#ffc830', depthTest: false, transparent: true, opacity: 0.9 });
+    /** Marker material per team; the beacon variant (a carried crate) draws through walls. */
+    materialFor(team, beacon = false) {
+        let key = (team || 'loot') + (beacon ? ':beacon' : '');
+        if(!this.materials[key]) this.materials[key] = new THREE.MeshBasicMaterial({ color: team ? this.teamColor(team) : '#ffc830', depthTest: !beacon, transparent: beacon, opacity: beacon ? 0.9 : 1 });
         return this.materials[key];
     }
     update(world, dt) {
@@ -68,14 +69,15 @@ export class SupplyRenderSystem {
             if(!fx) {
                 let marker = new THREE.Mesh(this.markerGeometry, this.materialFor(s.team));
                 marker.userData.sharedGeometry = true;
-                marker.renderOrder = 10; // drawn over the terrain: a crate is a beacon for everyone
+                marker.renderOrder = 10; // a carried crate's marker is drawn over the terrain
                 let crate = new THREE.Mesh(this.crateGeometry, this.crateMaterial);
                 crate.userData.sharedGeometry = true;
                 crate.visible = false;
                 this.scene.add(marker, crate);
                 fx = world.add(id, '$SupplyFx', { marker, crate, team: s.team });
             }
-            if(fx.team !== s.team) { fx.marker.material = this.materialFor(s.team); fx.team = s.team; }
+            let beacon = s.state === 'carried';
+            if(fx.team !== s.team || fx.beacon !== beacon) { fx.marker.material = this.materialFor(s.team, beacon); fx.team = s.team; fx.beacon = beacon; }
             let body = world.get(id, '$Mesh')?.object;
             if(s.state === 'carried') {
                 let carrierMesh = world.get(s.carriedBy, '$Mesh')?.object;

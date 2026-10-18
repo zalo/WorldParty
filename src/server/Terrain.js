@@ -303,12 +303,14 @@ export class Terrain {
 
         let soup = decodeSoup(msg.brush);
         if(soup.length > MAX_BRUSH_FLOATS || soup.length % 9 !== 0) return;
+        // how far the brush may be simplified (m); the server's own round brushes ask for less so craters stay round
+        let tolerance = typeof msg.tolerance === 'number' && msg.tolerance >= 0.005 && msg.tolerance <= 0.5 ? msg.tolerance : 0.1;
         let brush;
         try {
             brush = this.withMaterial(this.soupToManifold(msg.brush,
                 new THREE.Vector3(msg.position.x, msg.position.y, msg.position.z),
                 new THREE.Quaternion(msg.quaternion.x, msg.quaternion.y, msg.quaternion.z, msg.quaternion.w),
-                new THREE.Vector3(s.x, s.y, s.z)), clampMaterial(msg.material, materialTable(this.world).length));
+                new THREE.Vector3(s.x, s.y, s.z), tolerance), clampMaterial(msg.material, materialTable(this.world).length));
         } catch(e) { console.warn('Rejected brush: ' + e.message); return; }
 
         let keys = [...new Set((msg.keys || []).filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))];
@@ -486,7 +488,7 @@ export class Terrain {
         return new this.manifold.Manifold(mesh);
     }
 
-    soupToManifold(base64, position = new THREE.Vector3(), quaternion = new THREE.Quaternion(), scale = new THREE.Vector3(1, 1, 1)) {
+    soupToManifold(base64, position = new THREE.Vector3(), quaternion = new THREE.Quaternion(), scale = new THREE.Vector3(1, 1, 1), tolerance = 0.1) {
         let geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.BufferAttribute(decodeSoup(base64), 3));
         geometry = mergeVertices(geometry, 1e-4);
@@ -500,7 +502,7 @@ export class Terrain {
         }
         let mesh = new this.manifold.Mesh({ numProp: 3, vertProperties, triVerts: new Uint32Array(geometry.index.array) });
         let raw = new this.manifold.Manifold(mesh);
-        let out = raw.simplify(0.1); // returns a copy
+        let out = raw.simplify(tolerance); // returns a copy
         raw.delete();
         return out;
     }

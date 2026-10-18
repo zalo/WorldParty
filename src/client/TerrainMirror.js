@@ -20,9 +20,29 @@ const PLANE_EPS = 1e-3;
 
 export function chunkCenter(key) { let c = gridCenter(key); return new THREE.Vector3(c.x, c.y, c.z); }
 
-/** Flat-triangle geometry for terrain (chunks and fragments alike): see TerrainMirror.buildGeometry. */
+const SMOOTH_ANGLE = Math.cos(70 * Math.PI / 180); // faces of smooth materials meeting within this blend their normals
+
+/** Flat-triangle geometry for terrain (chunks and fragments alike): see TerrainMirror.buildGeometry. Normals are
+ *  per face, except across adjacent faces of smooth materials (carved dirt, sand) within SMOOTH_ANGLE, which blend
+ *  so a crater reads as a bowl rather than a cut gem. */
 export function buildTerrainGeometry(positions, indices, materials, uvs, table, layers) {
     let numTris = indices.length / 3;
+    // face normals, and which faces meet at each vertex position (vertices are shared by index in the chunk mesh,
+    // but seams split them, so group by position)
+    let faceN = new Float32Array(numTris * 3), smoothFace = new Uint8Array(numTris);
+    let byPos = new Map();
+    for(let t = 0; t < numTris; t++) {
+        let a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3;
+        let ux = positions[b] - positions[a], uy = positions[b + 1] - positions[a + 1], uz = positions[b + 2] - positions[a + 2];
+        let vx = positions[c] - positions[a], vy = positions[c + 1] - positions[a + 1], vz = positions[c + 2] - positions[a + 2];
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, l = Math.hypot(nx, ny, nz) || 1;
+        faceN[t * 3] = nx / l; faceN[t * 3 + 1] = ny / l; faceN[t * 3 + 2] = nz / l;
+        let id = materials ? materials[t] : DEFAULT_MATERIAL, m = table[id] || table[DEFAULT_MATERIAL];
+        smoothFace[t] = m.smooth && l > 1e-9 ? 1 : 0;
+        if(!smoothFace[t]) continue;
+        for(let k = 0; k < 3; k++) { let v = indices[t * 3 + k] * 3, key = positions[v].toFixed(4) + ',' + positions[v + 1].toFixed(4) + ',' + positions[v + 2].toFixed(4); let list = byPos.get(key); if(list) list.push(t); else byPos.set(key, [t]); }
+    }
+    let nrm = new Float32Array(numTris * 9);
     let pos = new Float32Array(numTris * 9);
     let col = new Float32Array(numTris * 9);
     let uv = new Float32Array(numTris * 6);
@@ -41,6 +61,14 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
             let v = indices[t * 3 + k], o = t * 9 + k * 3, i = t * 3 + k;
             pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
             col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
+            let nx = faceN[t * 3], ny = faceN[t * 3 + 1], nz = faceN[t * 3 + 2];
+            if(smoothFace[t]) {
+                let list = byPos.get(positions[v * 3].toFixed(4) + ',' + positions[v * 3 + 1].toFixed(4) + ',' + positions[v * 3 + 2].toFixed(4));
+                let sx = 0, sy = 0, sz = 0;
+                for(let f of list) { let fx = faceN[f * 3], fy = faceN[f * 3 + 1], fz = faceN[f * 3 + 2]; if(fx * nx + fy * ny + fz * nz >= SMOOTH_ANGLE) { sx += fx; sy += fy; sz += fz; } }
+                let l = Math.hypot(sx, sy, sz); if(l > 1e-6) { nx = sx / l; ny = sy / l; nz = sz / l; }
+            }
+            nrm[o] = nx; nrm[o + 1] = ny; nrm[o + 2] = nz;
             if(uvs) { uv[i * 2] = uvs[v * 2]; uv[i * 2 + 1] = uvs[v * 2 + 1]; }
             slot[i] = layer; tile[i] = tiling;
             idx[i] = i;
@@ -52,8 +80,8 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
     geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geometry.setAttribute('slot', new THREE.BufferAttribute(slot, 1));
     geometry.setAttribute('tile', new THREE.BufferAttribute(tile, 1));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     geometry.setIndex(new THREE.BufferAttribute(idx, 1));
-    geometry.computeVertexNormals();
     return geometry;
 }
 

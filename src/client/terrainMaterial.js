@@ -8,7 +8,8 @@ import { attribute, texture, uv, select, vertexColor, positionWorld, positionLoc
 /** @param {THREE.DataArrayTexture} arrayTexture the world's texture layers (TerrainTextures)
  *  @param {'world'|'local'} space which position (and normal) the triplanar projection uses */
 export function makeTerrainMaterial(arrayTexture, space = 'world', debug = false) {
-    let material = debug === 6 ? new THREE.MeshBasicNodeMaterial() : new THREE.MeshStandardNodeMaterial({ roughness: 0.75, metalness: 0.05, flatShading: true }); // 6: unlit
+    // normals come from the geometry (per face, blended across smooth materials: buildTerrainGeometry), not from derivatives
+    let material = debug === 6 ? new THREE.MeshBasicNodeMaterial() : new THREE.MeshStandardNodeMaterial({ roughness: 0.75, metalness: 0.05 }); // 6: unlit
     const slot = attribute('slot', 'float');
     const tile = attribute('tile', 'float');
     const layer = slot.add(0.5).toInt(); // round: the interpolated float lands a hair under the integer on some pixels, which truncation turned into the previous layer
