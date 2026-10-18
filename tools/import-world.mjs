@@ -240,7 +240,12 @@ let scale = scaleOpt * (targetSize > 0 ? targetSize / Math.max(size.x, size.y, s
 geom.scale(scale, scale, scale);
 geom.computeBoundingBox();
 let shift = [offset[0], offset[1], offset[2]];
-if(center) { let c = geom.boundingBox.getCenter(new THREE.Vector3()); shift[0] -= c.x; shift[1] -= geom.boundingBox.min.y; shift[2] -= c.z; }
+// The base sits at y = BASE_Y, not 0: a floor lying exactly on a chunk plane leaves a zero-thickness sheet in the chunk
+// above when the mesh is split (a Manifold coplanar artifact), and carves then stretch its pieces across holes.
+// The footprint centre is likewise nudged off the origin: models tend to have walls at round offsets from their
+// centre, and after scaling those can land on x or z = k * 10 as well.
+const BASE_Y = 0.1, NUDGE_XZ = 0.13;
+if(center) { let c = geom.boundingBox.getCenter(new THREE.Vector3()); shift[0] -= c.x - NUDGE_XZ; shift[1] -= geom.boundingBox.min.y - BASE_Y; shift[2] -= c.z - NUDGE_XZ; }
 geom.translate(shift[0], shift[1], shift[2]);
 geom.computeBoundingBox();
 let bb = geom.boundingBox;
@@ -275,7 +280,8 @@ function inside(p) {
 // With --floor (default) everything below the model's base is solid ground, so the lowest layer of
 // stored chunks is rock up to the base and sits flush on the implicit rock below it.
 const floorY = bb.min.y;
-const lowestLayer = Math.floor((floorY - 1e-6) / CHUNK_SIZE);
+// The base was seated BASE_Y above the chunk plane (see `center`); the floor layer is the row under that plane
+const lowestLayer = Math.floor((floorY - (center ? BASE_Y : 0) - 1e-6) / CHUNK_SIZE);
 let calls = 0;
 function sdf([x, y, z]) {
     calls++;

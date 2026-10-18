@@ -120,7 +120,12 @@ export class TerrainMirror {
     applyDelta(key, version, baseVersion, bytes) {
         let prev = this.meshes.get(key);
         if(!prev || this.versions.get(key) !== baseVersion) return false;
-        this.setChunkMesh(key, decodeChunkDelta(prev, bytes), version);
+        let mesh = decodeChunkDelta(prev, bytes);
+        // A delta that references vertices the mesh does not have would draw stretched triangles; never show one,
+        // fetch the chunk in full instead (the next update names the version)
+        let nv = mesh.positions.length / 3;
+        for(let i = 0; i < mesh.indices.length; i++) if(mesh.indices[i] >= nv) { console.error(`chunk ${key}: delta ${baseVersion}->${version} references vertex ${mesh.indices[i]} of ${nv}; refetching`); this.unload(key); return false; }
+        this.setChunkMesh(key, mesh, version);
         return true;
     }
 
@@ -265,11 +270,9 @@ export class TerrainMirror {
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
-        if(mesh) {
-            mesh.geometry.dispose();
-            mesh.geometry = geometry;
-            return;
-        }
+        // Always a fresh Mesh: swapping the geometry of a live mesh leaves the renderer's per-object state (buffers,
+        // bundles) to catch up, and a draw with the old index buffer over new vertices is exactly a stretched sliver
+        if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
         mesh = new THREE.Mesh(geometry, this.material);
         mesh.castShadow = true;
         mesh.receiveShadow = true;

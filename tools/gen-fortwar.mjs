@@ -107,13 +107,14 @@ const X = 80, Z = 40;              // half extents (chunk aligned)
 const SURFACE = 0, BOTTOM = -40;
 const WALL_H = 6.5, MERLON_H = 7.6, WALK_Y = 5.5, TOWER_H = 9.5;
 const GORGE_W = 8, GORGE_D = 6, BED = -GORGE_D - 0.6;
+const NUDGE = 0.1;
 
 let t0 = Date.now();
 let adds = [], cuts = [], late = [], lateCuts = [], last = [];
 
 // Ground: dirt with a grass skin
-adds.push(box(-X, X, BOTTOM, SURFACE - 0.6, -Z, Z, DIRT));
-adds.push(box(-X, X, SURFACE - 0.6, SURFACE, -Z, Z, GRASS));
+adds.push(box(-X - 1, X, BOTTOM - 1, SURFACE - 0.6, -Z - 1, Z, DIRT));
+adds.push(box(-X - 1, X, SURFACE - 0.6, SURFACE, -Z - 1, Z, GRASS));
 // Border rim behind the forts
 adds.push(box(-X, -X + 2, 0, 4, -Z, Z, DARK));
 adds.push(box(X - 2, X, 0, 4, -Z, Z, DARK));
@@ -214,6 +215,11 @@ for(let wx of [-28, -12, 12, 28]) lateCuts.push(box(wx - 1, wx + 1, 1, 3, -26.5,
 lateCuts.push(box(-2, 2, -15, -12, -2, 2, STONE));
 S = sub(S, union(lateCuts));
 S = add(S, union(last));
+// Nothing may lie exactly on a chunk plane: where a solid only touches a chunk face from outside (the ground's top
+// under the chunk above, a wall face on x = -50), Manifold's chunk intersection leaves a zero-thickness sheet that
+// later carves retriangulate into slivers across the hole. Shifting the whole design by NUDGE takes every designed
+// floor, wall and ceiling off the multiples of 10 (the generator's numbers stay round; config coordinates shift too).
+S = S.translate([NUDGE, NUDGE, NUDGE]);
 console.log(`solid: ${S.numTri()} triangles, ${S.volume().toFixed(0)} m³, ${Date.now() - t0} ms`);
 
 // ---- chunks -------------------------------------------------------------------
@@ -247,19 +253,20 @@ for(let x = bounds.min[0]; x <= bounds.max[0]; x++) for(let y = bounds.min[1]; y
 S.delete();
 
 // ---- game rules ----------------------------------------------------------------
+const nudge = p => p.map(v => v + NUDGE);
 const team = (s, name, color, material) => ({
     name, color, material,
-    spawns: [-6, -2, 2, 6].map(z => [s * 57, 0.6, z]),
-    vault: { min: [Math.min(s * 60, s * 50), -7, -5], max: [Math.max(s * 60, s * 50), -1.5, 5] },
-    slots: [[57.5, -2], [55, -2], [52.5, -2], [57.5, 2], [55, 2], [52.5, 2]].map(([x, z]) => [s * x, -5.5, z]),
+    spawns: [-6, -2, 2, 6].map(z => nudge([s * 57, 0.6, z])),
+    vault: { min: nudge([Math.min(s * 60, s * 50), -7, -5]), max: nudge([Math.max(s * 60, s * 50), -1.5, 5]) },
+    slots: [[57.5, -2], [55, -2], [52.5, -2], [57.5, 2], [55, 2], [52.5, 2]].map(([x, z]) => nudge([s * x, -5.5, z])),
 });
 const game = {
     mode: 'fortwar',
-    surfaceY: SURFACE,
+    surfaceY: SURFACE + NUDGE,
     matchMinutes: 10,
     teams: { red: team(-1, 'Red', '#e03a2f', RED_STONE), blue: team(+1, 'Blue', '#3a7be0', BLUE_STONE) },
     // neutral supplies in sealed pockets: find them by digging
-    caches: [[-46, -9.5, 6.5], [46, -9.5, 6.5], [-14, -10.5, -11.5], [14, -10.5, -11.5], [-0.8, -14.5, 0.8], [0.8, -14.5, -0.8]],
+    caches: [[-46, -9.5, 6.5], [46, -9.5, 6.5], [-14, -10.5, -11.5], [14, -10.5, -11.5], [-0.8, -14.5, 0.8], [0.8, -14.5, -0.8]].map(nudge),
     hints: [
         'Steal supplies from the enemy vault and carry them to yours. Most supplies in your vault when time runs out wins.',
         'Every wall is terrain: blast it, drill it, or tunnel under it. Supplies carried home underground earn a bonus crate.',
