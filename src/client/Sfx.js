@@ -39,6 +39,8 @@ export class Sfx {
     throw() { this.noise(0.15, { freq: 1400, gain: 0.25, type: 'highpass' }); }
     hit() { this.tone(520, 0.08, { gain: 0.3, type: 'square' }); }
     hurt() { this.noise(0.3, { freq: 400, gain: 0.5 }); this.tone(120, 0.25, { gain: 0.3, type: 'sawtooth', slide: 50 }); }
+    /** The treasure light's beep: higher and louder the closer (0..1). */
+    beep(near) { this.tone(420 + near * 900, 0.06, { gain: 0.05 + near * 0.12, type: 'square' }); }
     pickup() { this.tone(660, 0.1, { gain: 0.25 }); setTimeout(() => this.tone(990, 0.15, { gain: 0.25 }), 90); }
     deposit() { for(let i = 0; i < 4; i++) setTimeout(() => this.tone(523 * Math.pow(1.26, i), 0.18, { gain: 0.25 }), i * 90); }
     drill() { this.noise(0.3, { freq: 350, q: 2, gain: 0.35, type: 'bandpass' }); }

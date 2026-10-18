@@ -54,6 +54,7 @@ export class CSGBrushTool extends BaseTool {
 
     onScroll(main, delta) {
         main.brush2.scale.multiplyScalar(1.0 + (delta * -0.001));
+        return true;
     }
 
     update(main, delta) {

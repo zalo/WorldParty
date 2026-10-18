@@ -138,6 +138,15 @@ export class SpawnMenu {
         document.body.appendChild(this.toolLabel);
     }
 
+    /** Show or hide the whole menu UI (hidden until the room says what kind of world it is). */
+    setVisible(v) {
+        this.bottomBar.style.display = v ? 'flex' : 'none';
+        this.toolLabel.style.display = v ? 'block' : 'none';
+        this.mobileActionArea.style.display = v && this.isMobile ? 'flex' : 'none';
+        if(this.jumpBtn) this.jumpBtn.style.display = v ? 'block' : 'none';
+        if(!v && this.isOpen) this.toggle();
+    }
+
     /** Rebuild the props tab (a match allows only a few). */
     setProps(props) {
         this.propsContent.innerHTML = '';
@@ -248,9 +257,9 @@ export class SpawnMenu {
                 } else if(action.action === 'secondary') {
                     tool.onSecondaryFire(this.main);
                 } else if(action.action === 'scrollUp') {
-                    tool.onScroll(this.main, -120);
+                    tool.onScroll(this.main, -120, { shiftKey: true }); // the buttons mean the tool's own scroll action, never a tool switch
                 } else if(action.action === 'scrollDown') {
-                    tool.onScroll(this.main, 120);
+                    tool.onScroll(this.main, 120, { shiftKey: true });
                 } else if(tool.onAction) {
                     tool.onAction(this.main, action.action);
                 }

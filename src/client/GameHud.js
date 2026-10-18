@@ -1,5 +1,7 @@
-/** Fort War HUD: scores and clock, health, weapon cooldowns, the event feed, death and match-over overlays, hints. */
-import { WEAPONS, SUPPLY, MATCH_OVER_MS } from '../game/rules.js';
+/** Fort War HUD: scores and clock, health, weapon cooldowns, the event feed, death and match-over overlays, the
+ *  treasure light (blinks and beeps faster, and warms from blue to red, the closer the nearest neutral supply),
+ *  and the vote panel (V). The only instruction is "Find the Treasure." */
+import { WEAPONS, SUPPLY, MATCH_OVER_MS, VOTE } from '../game/rules.js';
 
 const FONT = "font-family: 'Segoe UI', system-ui, sans-serif;";
 const el = (tag, css, parent = document.body) => { let e = document.createElement(tag); e.style.cssText = css; parent.appendChild(e); return e; };
@@ -33,14 +35,17 @@ export class GameHud {
         let bar = el('div', 'width:200px;height:14px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.4);border-radius:4px;overflow:hidden;', left);
         this.health = el('div', 'height:100%;width:100%;background:#6c4;transition:width 0.15s;', bar);
         this.stats = el('div', 'font-size:12px;margin-top:4px;text-shadow:0 1px 2px #000;opacity:0.85;', left);
+        this.voteLine = el('div', 'font-size:13px;margin-top:8px;text-shadow:0 1px 2px #000;color:#fc3;', left);
         // bottom centre, above the tool bar: weapon slots
         this.slots = el('div', 'position:absolute;bottom:58px;left:50%;transform:translateX(-50%);display:flex;gap:6px;', root);
         this.slotEls = [];
-        // bottom right: carrying, loot sense, hints
+        // bottom right: carrying, and the one instruction with the treasure light
         let right = el('div', 'position:absolute;right:10px;bottom:60px;text-align:right;font-size:13px;text-shadow:0 1px 2px #000;', root);
         this.carry = el('div', 'font-size:16px;font-weight:bold;color:#ffc830;', right);
-        this.sense = el('div', 'color:#ffc830;opacity:0.9;', right);
-        this.hint = el('div', 'max-width:320px;opacity:0.75;margin-top:6px;', right);
+        let task = el('div', 'display:flex;align-items:center;justify-content:flex-end;gap:10px;font-size:18px;font-weight:bold;', right);
+        task.appendChild(document.createTextNode('Find the Treasure.'));
+        this.light = el('div', 'width:16px;height:16px;border-radius:50%;background:#334;box-shadow:0 0 4px #000;transition:background 0.25s;', task);
+        this.lightOn = 0; this.nextBeep = 0;
         // right: event feed
         this.feed = el('div', 'position:absolute;right:10px;top:70px;width:300px;font-size:13px;text-shadow:0 1px 2px #000;display:flex;flex-direction:column;gap:3px;', root);
         // centre flashes
@@ -62,12 +67,18 @@ export class GameHud {
         this.overAwards = el('div', 'font-size:16px;margin-top:10px;display:flex;flex-direction:column;gap:4px;align-items:center;', this.over);
         // help card (H)
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
-        this.help.innerHTML = `<div style="font-size:18px;font-weight:bold;margin-bottom:6px">Fort War</div>
-            <div>Storm the enemy fort, grab a <b style="color:#ffc830">supply crate</b> (walk into it) and carry it into your own vault. Most supplies in your vault when the clock runs out wins. Carrying it home underground earns a bonus crate.</div>
-            <div style="margin-top:8px"><b>1</b> Rocket launcher &nbsp; <b>2</b> Grenade (hold to charge; right click: bunker buster, one per life) &nbsp; <b>3</b> Drill (hold; aim down to burrow; <b>every dig earns a stone</b>) &nbsp; <b>4</b> Mason (place stone; right click: shape, R: turn, scroll: distance) &nbsp; <b>5</b> Grapple (hook terrain; jump to let go) &nbsp; <b>6</b> PhysGun</div>
-            <div style="margin-top:8px">Every wall, floor and bridge is terrain: blast or drill through it, dig under it, or build your own. Unsupported stone falls. Falling rubble and thrown props hurt. A carried crate glows for everyone, and the carrier cannot grapple.</div>
-            <div style="margin-top:8px"><b>Enter</b> chat &nbsp; <b>H</b> this card &nbsp; <b>J</b> switch team (if the teams allow it) &nbsp; <b>Q</b> tool menu</div>
-            <div style="margin-top:8px;opacity:0.7">Rumour has it loot lies buried beneath the courtyards, under the gorge banks and deep below the bridge.</div>`;
+        this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
+            <div>Walk into a crate to carry it. Bring it to your vault. The light beeps when treasure is near.</div>
+            <div style="margin-top:8px;opacity:0.8"><b>1-6</b> or <b>scroll</b> weapons &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
+        // vote panel (V)
+        this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
+        let title = el('div', 'font-weight:bold;font-size:16px;', this.votePanel); title.textContent = 'Call a vote';
+        for(let action in VOTE.actions) {
+            let b = el('button', 'padding:8px 14px;border:1px solid #666;border-radius:6px;background:rgba(60,60,80,0.9);color:#fff;font-size:14px;cursor:pointer;text-align:left;', this.votePanel);
+            b.textContent = VOTE.actions[action];
+            b.addEventListener('click', () => { this.game.vote(action); this.toggleVote(false); });
+        }
+        let note = el('div', 'font-size:12px;opacity:0.7;', this.votePanel); note.textContent = 'A majority of the players present passes it; alone, it just happens.';
         // chat input
         this.chat = el('input', 'position:absolute;bottom:110px;left:50%;transform:translateX(-50%);width:360px;padding:6px 10px;border:1px solid #666;border-radius:6px;background:rgba(0,0,0,0.7);color:#fff;font-size:14px;display:none;pointer-events:auto;', root);
         this.chat.placeholder = 'say something, Enter to send, Esc to cancel';
@@ -98,6 +109,7 @@ export class GameHud {
     openChat() { this.chat.style.display = 'block'; this.chat.value = ''; this.chat.focus(); this.main.player.controls?.unlock(); }
     closeChat() { this.chat.style.display = 'none'; this.chat.blur(); }
     toggleHelp(force) { this.helpOpen = force ?? !this.helpOpen; this.help.style.display = this.helpOpen ? 'block' : 'none'; }
+    toggleVote(force) { this.voteOpen = force ?? !this.voteOpen; this.votePanel.style.display = this.voteOpen ? 'flex' : 'none'; if(this.voteOpen) this.main.player.controls?.unlock(); }
 
     update() {
         let g = this.game, me = g.me, now = performance.now(), ecs = this.main.ecs;
@@ -108,8 +120,8 @@ export class GameHud {
             let h = Math.max(0, me.health) / 100;
             this.health.style.width = (h * 100).toFixed(0) + '%';
             this.health.style.background = h > 0.5 ? '#6c4' : h > 0.25 ? '#dc3' : '#d33';
-            this.stats.textContent = `${Math.ceil(me.health)} hp · ${me.kills} kills · stone ${me.build}/${WEAPONS.mason.budget} · buster ${me.buster}`;
-            this.carry.textContent = me.carrying ? '💰 Carrying a supply: take it to your vault!' : '';
+            this.stats.textContent = `stone ${me.build}/${WEAPONS.mason.budget}`;
+            this.carry.textContent = me.carrying ? '💰 Carrying treasure: take it to your vault!' : '';
         }
         // scores and clock
         let m = ecs.get('match', 'Match');
@@ -120,7 +132,9 @@ export class GameHud {
             this.clock.textContent = m.phase === 'live' ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : m.phase === 'over' ? 'ROUND OVER' : 'resetting';
             this.scoreRed.textContent = m.scores.red; this.scoreRed.style.color = g.teamColor('red');
             this.scoreBlue.textContent = m.scores.blue; this.scoreBlue.style.color = g.teamColor('blue');
-            this.round.textContent = `round ${m.round} · supplies in each vault`;
+            this.round.textContent = `round ${m.round}`;
+            let v = m.vote;
+            this.voteLine.textContent = v ? `Vote: ${VOTE.actions[v.action] || v.action} ${v.count}/${v.needed} · press V` : '';
             let over = m.phase === 'over' || m.phase === 'resetting';
             this.over.style.display = over ? 'flex' : 'none';
             if(over) {
@@ -150,28 +164,27 @@ export class GameHud {
             this.deathSpec.textContent = this.spectating ? `Watching ${this.spectating}` : '';
             this.death.style.background = this.spectating ? 'rgba(40,0,0,0.15)' : 'rgba(40,0,0,0.5)';
         } else this.death.style.display = 'none';
-        // loot sense: nearest neutral supply
-        let best = Infinity, bestDy = 0, mine = this.main.player.position;
+        // the treasure light: nearest neutral supply (buried ones included: that is what the drill is for)
+        let best = Infinity, mine = this.main.player.position;
         for(let [, s, tf] of ecs.each('Supply', 'Transform')) {
             if(s.team || s.state === 'carried') continue;
             let d = Math.hypot(tf.position.x - mine.x, tf.position.y - mine.y, tf.position.z - mine.z);
-            if(d < best) { best = d; bestDy = tf.position.y - mine.y; }
+            if(d < best) best = d;
         }
-        this.sense.textContent = best < SUPPLY.senseRange ? `💰 buried loot ${best.toFixed(0)} m away, ${Math.abs(bestDy).toFixed(0)} m ${bestDy < 0 ? 'below' : 'above'}` : '';
+        let near = best < SUPPLY.senseRange && me && !me.dead && !me.carrying ? Math.max(0, Math.min(1, 1 - best / SUPPLY.senseRange)) : 0;
+        if(near > 0) {
+            let period = 1800 - 1600 * near * near; // slow blue blink far away, a fast red flutter on top of it
+            if(now >= this.nextBeep) { this.nextBeep = now + period; this.lightOn = now; this.game.sfx.beep(near); }
+            let on = now - this.lightOn < Math.min(140, period * 0.5);
+            let hue = 215 - 215 * near, l = on ? 65 : 28;
+            this.light.style.background = `hsl(${hue.toFixed(0)},90%,${l}%)`;
+            this.light.style.boxShadow = on ? `0 0 ${(6 + near * 14).toFixed(0)}px hsl(${hue.toFixed(0)},90%,60%)` : '0 0 4px #000';
+        } else if(this.light.style.background !== 'rgb(51, 51, 68)') { this.light.style.background = '#334'; this.light.style.boxShadow = '0 0 4px #000'; this.nextBeep = 0; }
         // fades
         if(this.flashUntil && now > this.flashUntil) { this.flash.style.opacity = '0'; this.flashUntil = 0; }
         if(this.damageUntil && now > this.damageUntil) { this.vignette.style.opacity = '0'; this.damageUntil = 0; }
         if(this.whiteUntil && now > this.whiteUntil) { this.white.style.opacity = '0'; this.whiteUntil = 0; }
         for(let f of this.feedItems) if(now - f.at > 9000) f.item.style.opacity = '0';
         this.feedItems = this.feedItems.filter(f => { if(now - f.at > 10500) { f.item.remove(); return false; } return true; });
-        if(!this.hint.textContent && g.config.hints.length) this.rotateHint();
-    }
-
-    rotateHint() {
-        let hints = this.game.config.hints;
-        this.hintIndex = ((this.hintIndex ?? -1) + 1) % hints.length;
-        this.hint.textContent = hints[this.hintIndex];
-        clearTimeout(this.hintTimer);
-        this.hintTimer = setTimeout(() => this.rotateHint(), 14000);
     }
 }

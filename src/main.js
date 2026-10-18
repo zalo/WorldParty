@@ -132,6 +132,7 @@ export default class Main {
         let csgTool = new CSGBrushTool();
         this.tools = [new PhysGunTool(), csgTool, new RopeTool(), new WeldTool(), new HingeTool()];
         this.spawnMenu = new SpawnMenu(this, this.tools);
+        this.spawnMenu.setVisible(false); // the sandbox tools must not flash up in a Fort War room: wait for the world config
         csgTool.init(this);
         this.spawnMenu.onPropSelected = (propId) => this.spawnProp(propId);
 
@@ -152,10 +153,17 @@ export default class Main {
             let tool = this.spawnMenu.getCurrentTool();
             if(held && tool.onPrimaryRelease) tool.onPrimaryRelease(this);
         });
+        // the wheel switches tools unless the current tool claims it (a held physgun object, Shift with the mason)
+        this.wheelAcc = 0;
         window.addEventListener("wheel", (e) => {
             if(this.player.controls && this.player.controls.isLocked) {
                 e.preventDefault();
-                this.spawnMenu.getCurrentTool().onScroll(this, e.deltaY);
+                if(this.spawnMenu.getCurrentTool().onScroll(this, e.deltaY, e)) { this.wheelAcc = 0; return; }
+                this.wheelAcc += e.deltaY;
+                if(Math.abs(this.wheelAcc) < 40) return; // one notch of a mouse wheel; trackpads add up to it
+                let n = this.tools.length, i = (this.spawnMenu.currentToolIndex + (this.wheelAcc > 0 ? 1 : n - 1)) % n;
+                this.wheelAcc = 0;
+                this.spawnMenu.selectTool(i);
             }
         }, { passive: false });
         window.addEventListener('keydown', (e) => {
@@ -277,6 +285,7 @@ export default class Main {
         if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full); // world config first: the game client wants to exist before its entities arrive
         if(data.entities) this.ecs.applySnapshot(data.entities, { full, removed: data.removed || [] });
         if(full && this.autoImport) this.importIfEmpty(data);
+        if(full && !this.roomKnown) { this.roomKnown = true; this.spawnMenu.setVisible(true); }
     }
 
     /** A fresh Discord room has no level yet: the first full update without game rules makes the player with the

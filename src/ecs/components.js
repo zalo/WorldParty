@@ -47,11 +47,11 @@ export const Projectile = ({ kind, team = null, owner = null, vel = { x: 0, y: 0
 
 export const Fuse = ({ kind, team = null, owner = null, at }) => ({ kind, team, owner, at });
 
-export const Supply = ({ team = null, state = 'home', carriedBy = null, home = { x: 0, y: 0, z: 0 }, droppedAt = 0 }) =>
-    ({ team, state, carriedBy, home: { ...home }, droppedAt });
+export const Supply = ({ team = null, state = 'home', carriedBy = null, home = { x: 0, y: 0, z: 0 }, droppedAt = 0, buried = false }) =>
+    ({ team, state, carriedBy, home: { ...home }, droppedAt, buried });
 
-export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [] } = {}) =>
-    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt, awards: [...awards] });
+export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [], vote = null } = {}) =>
+    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt, awards: [...awards], vote });
 
 export const Model = ({ url, selectedBy = '' }) => ({ url, selectedBy });
 

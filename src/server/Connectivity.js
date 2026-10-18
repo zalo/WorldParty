@@ -20,6 +20,30 @@
  *  stays put, a little extra terrain is loaded). */
 import { CHUNK_SIZE, HALF, FACES, chunkCenter, isRockKey, neighbour, outsideIsSolid } from '../terrain/grid.js';
 
+/** Manifold's decompose() splits a fully enclosed cavity (or a solid floating inside a hollow) off as its own
+ *  part with negative volume. Such a part is not an island but a hole in the one around it: treated as an
+ *  ungrounded island it would be "shed" and the cavity filled (the sealed supply pockets under the courtyards
+ *  vanished this way, and a tunnel walled shut inside one chunk would too). Negative parts are composed back
+ *  into the smallest positive part whose bounds contain them; the order of the positive parts is kept, so the
+ *  settle's second decomposition still lines up with the summary. */
+export function decomposeParts(manifold, M) {
+    let parts = manifold.decompose();
+    if(parts.length < 2) return parts;
+    let holes = [], solids = [];
+    for(let p of parts) (p.volume() < 0 ? holes : solids).push(p);
+    if(!holes.length) return parts;
+    let groups = solids.map(s => ({ parts: [s], b: s.boundingBox(), v: s.volume() }));
+    for(let h of holes) {
+        let hb = h.boundingBox(), best = null;
+        for(let g of groups) {
+            let inside = [0, 1, 2].every(a => hb.min[a] >= g.b.min[a] - 1e-4 && hb.max[a] <= g.b.max[a] + 1e-4);
+            if(inside && (!best || g.v < best.v)) best = g;
+        }
+        if(best) best.parts.push(h); else h.delete(); // a stray inverted shell with nothing around it
+    }
+    return groups.map(g => { if(g.parts.length === 1) return g.parts[0]; let c = M.compose(g.parts); for(let m of g.parts) m.delete(); return c; });
+}
+
 export const RASTER = 16;                       // cells per face edge (0.625 m)
 const CELLS = RASTER * RASTER;
 const CELL = CHUNK_SIZE / RASTER;
@@ -111,11 +135,11 @@ export class Connectivity {
         let center = chunkCenter(key);
         // Footprints only: island manifolds are not kept (memory); settle re-decomposes the few it needs,
         // in this same order, since decompose is deterministic for a given mesh.
-        let solid = manifold.decompose().map(m => { let isl = this.island(m, center); m.delete(); return isl; });
+        let solid = decomposeParts(manifold, this.M).map(m => { let isl = this.island(m, center); m.delete(); return isl; });
         let cube = this.terrain.withMaterial(this.M.cube([CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE], true).translate(center.x, center.y, center.z), 0);
         let airManifold = cube.subtract(manifold);
         cube.delete();
-        let air = airManifold.decompose().map(m => { let isl = this.island(m, center); m.delete(); return isl; });
+        let air = decomposeParts(airManifold, this.M).map(m => { let isl = this.island(m, center); m.delete(); return isl; });
         airManifold.delete();
         let summary = { version: c.version, solid, air };
         this.cache.set(key, summary);

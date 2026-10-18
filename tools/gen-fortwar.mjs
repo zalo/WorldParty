@@ -215,6 +215,19 @@ for(let wx of [-28, -12, 12, 28]) lateCuts.push(box(wx - 1, wx + 1, 1, 3, -26.5,
 lateCuts.push(box(-2, 2, -15, -12, -2, 2, STONE));
 S = sub(S, union(lateCuts));
 S = add(S, union(last));
+
+// ---- treasure ----------------------------------------------------------------
+// Neutral supplies scattered over the level (the vaults start empty): the stump on the bridge plaza, the gorge bed
+// beside the plaza, the arch, inside the tube, each crag, each sewer jog, each cave entrance, and each fort's
+// front tower top. Coordinates before the nudge; each spot must be open with a floor right under it.
+const scatter = [[0, 1.1, 6.5], [3, -5.5, 9.5], [-3, -5.5, -9.5], [0, 7.5, 32], [0, 0.5, -27.5]];
+for(let s of [-1, 1]) scatter.push([s * 38, 8.0, 19.5], [s * 30, -5.5, 5], [s * 43, 0.5, -22], [s * 36.5, 10.0, 12.5]);
+function clearSpot(p) {
+    let probe = Manifold.cube([0.9, 0.9, 0.9], true).translate(p), hit = S.intersect(probe), v = hit.volume(); hit.delete(); probe.delete();
+    let under = Manifold.cube([0.9, 0.6, 0.9], true).translate([p[0], p[1] - 0.8, p[2]]), floor = S.intersect(under), vf = floor.volume(); floor.delete(); under.delete();
+    return v < 1e-6 && vf > 0.05;
+}
+for(let p of scatter) if(!clearSpot(p)) throw new Error(`supply spot ${p} is blocked or has no floor`);
 // Nothing may lie exactly on a chunk plane: where a solid only touches a chunk face from outside (the ground's top
 // under the chunk above, a wall face on x = -50), Manifold's chunk intersection leaves a zero-thickness sheet that
 // later carves retriangulate into slivers across the hole. Shifting the whole design by NUDGE takes every designed
@@ -265,14 +278,10 @@ const game = {
     surfaceY: SURFACE + NUDGE,
     matchMinutes: 10,
     teams: { red: team(-1, 'Red', '#e03a2f', RED_STONE), blue: team(+1, 'Blue', '#3a7be0', BLUE_STONE) },
-    // neutral supplies in sealed pockets: find them by digging
+    // neutral supplies in the open (the vaults start empty) and in sealed pockets found by digging
+    scatter: scatter.map(nudge),
     caches: [[-46, -9.5, 6.5], [46, -9.5, 6.5], [-14, -10.5, -11.5], [14, -10.5, -11.5], [-0.8, -14.5, 0.8], [0.8, -14.5, -0.8]].map(nudge),
-    hints: [
-        'Steal supplies from the enemy vault and carry them to yours. Most supplies in your vault when time runs out wins.',
-        'Every wall is terrain: blast it, drill it, or tunnel under it. Supplies carried home underground earn a bonus crate.',
-        'Rumour has it loot lies buried beneath the courtyards, under the gorge banks and deep below the bridge.',
-        'Build walls to hold what you take. Anything built without support falls.',
-    ],
+    hints: ['Find the Treasure.'],
 };
 
 mkdirSync(dirname(out), { recursive: true });

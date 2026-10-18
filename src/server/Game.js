@@ -7,13 +7,14 @@
  *  fading, the mason's build budget, and the match timer with terrain restored from the pristine import between rounds.
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
-import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y,
+import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y, VOTE,
          SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, MAX_PLAYER_PROPS, GAME_PROPS, AWARDS, inBox, otherTeam } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
 import { chunksInBox } from '../terrain/grid.js';
 
 const MATCH_ID = 'match';
 const SPAWN_PROTECT_MS = 2500;
+const KILL_GRACE_MS = 1500; // position reports still in flight from before a respawn teleport must not kill again
 const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
 const vec3 = (v, d = { x: 0, y: 0, z: 0 }) => v ? { x: num(v.x, d.x), y: num(v.y, d.y), z: num(v.z, d.z) } : { ...d };
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -32,7 +33,8 @@ export class Game {
         this.scoreTick = 0;
         this.lastMatchSync = 0;
         this.spawnQueue = new Set();   // players to (re)spawn on the next tick, after the update that told them about the game
-        this.spawnedAt = new Map();    // player id -> time of the last spawn (brief protection)
+        this.spawnedAt = new Map();
+        this.lastActive = new Map(); // player id -> last heartbeat (votes count only players who are there)    // player id -> time of the last spawn (brief protection)
     }
 
     get config() { return this.server.terrain.world.game || null; }
@@ -62,7 +64,7 @@ export class Game {
     onDisconnect(id) {
         let p = this.world.get(id, 'Player');
         if(p && p.carrying) this.dropSupply(p.carrying, id, Date.now());
-        this.hitAt.delete(id); this.cooldowns.delete(id); this.buildRegen.delete(id);
+        this.hitAt.delete(id); this.cooldowns.delete(id); this.buildRegen.delete(id); this.lastActive.delete(id);
     }
 
     join(id, team = null) {
@@ -76,6 +78,7 @@ export class Game {
         let t = this.config.teams[team];
         w.set(id, 'Player', { team, color: t.color, health: MAX_HEALTH, dead: false, carrying: null, respawnAt: 0, build: WEAPONS.mason.budget, buster: WEAPONS.buster.perLife });
         this.cooldowns.set(id, {});
+        this.lastActive.set(id, Date.now());
         this.spawnQueue.add(id);
     }
 
@@ -122,7 +125,9 @@ export class Game {
                 if(w.has(data.bodyId, 'Supply') || dist(btf.position, tf.position) > WEAPONS.physgun.range) return true;
                 return false;
             }
-            case 'reset': case 'setgravity': return true; // not during a match
+            case 'heartbeat': this.lastActive.set(id, now); return true;
+            case 'vote': this.vote(id, p, String(data.action || ''), now); return true;
+            case 'reset': case 'setgravity': return true; // not during a match: vote for it
         }
         return false;
     }
@@ -173,19 +178,19 @@ export class Game {
         if(weapon === 'buster') w.set(id, 'Player', { buster: p.buster - 1 });
     }
 
-    /** Drill: carve a box ahead of the eye along the look direction. */
+    /** Drill: carve a sphere just ahead of the eye (reaching back around the player's head), so a dig opens a
+     *  hole big enough to walk or drop through, and digging down bores a shaft the player falls down. */
     async dig(id, p, data, now) {
         if(p.dead || !this.ready(id, 'drill', now)) return;
         let { origin, dir } = this.aim(id, data);
-        let d = WEAPONS.drill;
-        let c = d.reach + d.depth / 2;
-        let center = { x: origin.x + dir.x * c, y: origin.y + dir.y * c - 0.3, z: origin.z + dir.z * c };
+        let d = WEAPONS.drill, r = d.radius;
+        let center = { x: origin.x + dir.x * d.reach, y: origin.y + dir.y * d.reach - d.drop, z: origin.z + dir.z * d.reach };
         // stone comes from digging: a dig that actually removed material is worth a block (re-digging a hole is not)
-        let T = this.server.terrain, r = Math.hypot(d.width, d.height, d.depth) / 2;
+        let T = this.server.terrain;
         let keys = chunksInBox(T.world, { x: center.x - r, y: center.y - r, z: center.z - r }, { x: center.x + r, y: center.y + r, z: center.z + r });
         let volume = () => keys.reduce((sum, k) => sum + (T.chunks[k] && T.hasSolid(k) ? T.manifoldOf(k).volume() : 0), 0);
         let before = volume();
-        await this.server.carveBox(center, this.yawPitchQuat(dir), { x: d.width, y: d.height, z: d.depth }, 1);
+        await this.server.carveSphere(center, r, 1);
         if(before - volume() > 0.05 && p.build < WEAPONS.mason.budget) this.world.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + WEAPONS.mason.stonePerDig) });
     }
 
@@ -285,19 +290,21 @@ export class Game {
 
     // ---- supplies ------------------------------------------------------------------
 
-    /** Every supply back where the level put it. */
+    /** Every supply back where the level put it: the vaults start empty, the treasure lies scattered over the level
+     *  (`scatter`) and buried in sealed pockets (`caches`), so a round opens as a race to explore and turns into a
+     *  raid on whatever the other side brought home. */
     resetSupplies() {
         let w = this.world, g = this.config;
         for(let id of [...w.query('Supply')]) w.destroy(id);
         this.carried.clear();
-        let make = (team, pos) => w.create({
+        let make = (team, pos, buried = false) => w.create({
             Transform: Transform({ position: pos }),
             RigidBody: RigidBody({ shape: 'box', halfExtent: SUPPLY.halfExtent, propId: 'supply' }),
             Prop: Prop({ propId: 'supply', url: null }),
-            Supply: Supply({ team, state: 'home', home: pos }),
+            Supply: Supply({ team, state: 'home', home: pos, buried }),
         });
-        for(let t of TEAMS) for(let s of g.teams[t].slots) make(t, { x: s[0], y: s[1], z: s[2] });
-        for(let c of g.caches) make(null, { x: c[0], y: c[1], z: c[2] });
+        for(let c of g.scatter) make(null, { x: c[0], y: c[1], z: c[2] });
+        for(let c of g.caches) make(null, { x: c[0], y: c[1], z: c[2] }, true);
         for(let [id, p] of w.each('Player')) if(p.carrying) w.set(id, 'Player', { carrying: null });
         // the crates must not fall through floors whose colliders have not been cooked yet
         this.server.cookAround([...w.each('Supply', 'Transform')].map(r => r[2].position));
@@ -308,7 +315,7 @@ export class Game {
     pickup(sid, pid, now) {
         let w = this.world, s = w.get(sid, 'Supply'), p = w.get(pid, 'Player');
         w.remove(sid, 'RigidBody'); w.remove(sid, '$PxBody');
-        w.set(sid, 'Supply', { state: 'carried', carriedBy: pid });
+        w.set(sid, 'Supply', { state: 'carried', carriedBy: pid, buried: false });
         w.set(pid, 'Player', { carrying: sid });
         this.carried.set(sid, { underground: 0 });
         let owner = s.team ? this.config.teams[s.team].name + "'s" : 'a buried';
@@ -431,6 +438,52 @@ export class Game {
         this.fadeSystem(now);
         if(++this.scoreTick % 15 === 0) this.updateScores();
         this.matchSystem(dt, now, players);
+        this.voteSystem(now);
+    }
+
+    // ---- votes --------------------------------------------------------------------
+
+    /** Players with a recent heartbeat (the client sends one while its user is at the keyboard). */
+    activePlayers(now) {
+        let out = [];
+        for(let [id, p] of this.world.each('Player')) if(p.team && now - (this.lastActive.get(id) || 0) < VOTE.activeMs) out.push(id);
+        return out;
+    }
+
+    /** A vote for an admin action: counted among the active players, passed by a majority of them (so a lone
+     *  player's vote goes through at once); a different action replaces a vote nobody else has joined. */
+    vote(id, p, action, now) {
+        let w = this.world, m = w.get(MATCH_ID, 'Match');
+        if(!m || !VOTE.actions[action] || !p.team) return;
+        this.lastActive.set(id, now);
+        let v = m.vote && m.vote.action === action && now < m.vote.until ? m.vote : null;
+        if(!v && m.vote && now < m.vote.until && m.vote.voters.length > 1) { this.server.send(id, { type: 'event', text: `A vote to ${VOTE.actions[m.vote.action].toLowerCase()} is already running` }); return; }
+        if(!v) v = { action, voters: [], until: now + VOTE.expireMs, by: p.name };
+        if(v.voters.includes(id)) return;
+        v.voters.push(id);
+        let active = this.activePlayers(now), needed = Math.floor(active.length / 2) + 1;
+        v.count = v.voters.filter(x => active.includes(x)).length; v.needed = needed;
+        w.set(MATCH_ID, 'Match', { vote: v });
+        this.server.broadcast(JSON.stringify({ type: 'event', kind: 'vote', text: `${p.name} voted to ${VOTE.actions[action].toLowerCase()} (${v.count}/${needed})` }));
+        this.voteSystem(now);
+    }
+
+    voteSystem(now) {
+        let w = this.world, m = w.get(MATCH_ID, 'Match');
+        if(!m || !m.vote) return;
+        let v = m.vote;
+        if(now >= v.until) { w.set(MATCH_ID, 'Match', { vote: null }); this.server.broadcast(JSON.stringify({ type: 'event', text: `The vote to ${VOTE.actions[v.action].toLowerCase()} expired` })); return; }
+        let active = this.activePlayers(now), needed = Math.floor(active.length / 2) + 1;
+        let count = v.voters.filter(x => active.includes(x)).length;
+        if(count !== v.count || needed !== v.needed) w.set(MATCH_ID, 'Match', { vote: { ...v, count, needed } });
+        if(count < needed || m.phase !== 'live') return;
+        w.set(MATCH_ID, 'Match', { vote: null });
+        this.server.broadcast(JSON.stringify({ type: 'event', kind: 'vote', text: `Vote passed: ${VOTE.actions[v.action].toLowerCase()}` }));
+        if(v.action === 'reset') this.newRound(now).catch(e => console.error('reset failed: ' + e.message));
+        else if(v.action === 'end') w.set(MATCH_ID, 'Match', { remainingMs: 0 });
+        else if(v.action === 'swap') {
+            for(let [id, p] of w.each('Player')) if(p.team) { if(p.carrying) this.dropSupply(p.carrying, id, now); w.set(id, 'Player', { team: otherTeam(p.team), color: this.config.teams[otherTeam(p.team)].color }); this.spawnQueue.add(id); }
+        }
     }
 
     /** Thrown props get their velocity once PhysX has an actor for them. */
@@ -487,7 +540,7 @@ export class Game {
         for(let [id, p, tf] of w.each('Player', 'Transform')) {
             if(!p.team) continue;
             if(p.dead) { if(now >= p.respawnAt) this.respawn(id); continue; }
-            if(tf.position.y < PLAYER_KILL_Y) { this.kill(id, null, 'fell out of the world', now); continue; }
+            if(tf.position.y < PLAYER_KILL_Y && now - (this.spawnedAt.get(id) || 0) > KILL_GRACE_MS) { this.kill(id, null, 'fell out of the world', now); continue; }
             if(p.health < MAX_HEALTH && now - (this.hitAt.get(id) || 0) > REGEN_DELAY_MS) {
                 let h = Math.min(MAX_HEALTH, p.health + REGEN_PER_S * dt);
                 if(Math.floor(h) !== Math.floor(p.health) || h === MAX_HEALTH) w.set(id, 'Player', { health: Math.round(h * 10) / 10 }); else p.health = h;

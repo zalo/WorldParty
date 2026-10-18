@@ -89,7 +89,7 @@ export class DrillTool extends Weapon {
     onEquip(main) {
         if(!this.preview) {
             let d = this.def;
-            this.preview = new THREE.Mesh(new THREE.BoxGeometry(d.width, d.height, d.depth), new THREE.MeshBasicMaterial({ color: 0xffcc66, wireframe: true, transparent: true, opacity: 0.5 }));
+            this.preview = new THREE.Mesh(new THREE.SphereGeometry(d.radius, 14, 10), new THREE.MeshBasicMaterial({ color: 0xffcc66, wireframe: true, transparent: true, opacity: 0.35 }));
             main.world.scene.add(this.preview);
         }
         this.preview.visible = true;
@@ -109,8 +109,7 @@ export class DrillTool extends Weapon {
         if(!this.preview) return;
         let c = main.world.camera, d = this.def;
         c.getWorldDirection(_dir);
-        this.preview.position.copy(c.position).addScaledVector(_dir, d.reach + d.depth / 2); this.preview.position.y -= 0.3;
-        this.preview.quaternion.copy(c.quaternion);
+        this.preview.position.copy(c.position).addScaledVector(_dir, d.reach); this.preview.position.y -= d.drop;
     }
 }
 
@@ -138,7 +137,11 @@ export class MasonTool extends Weapon {
     onUnequip(main) { if(this.preview) this.preview.visible = false; }
     status(main) { main.spawnMenu.setStatus(this, `${this.shape} · ${main.game?.me?.build ?? 0} left`); }
     onSecondaryFire(main) { this.shapeIndex = (this.shapeIndex + 1) % this.shapes.length; this.status(main); }
-    onScroll(main, delta) { this.distance = Math.max(2, Math.min(this.def.maxDistance, this.distance - delta * 0.004)); }
+    onScroll(main, delta, e) { // Shift + wheel moves the block; the plain wheel switches weapons
+        if(!e || !e.shiftKey) return false;
+        this.distance = Math.max(2, Math.min(this.def.maxDistance, this.distance - delta * 0.004));
+        return true;
+    }
     onKey(main, code) { if(code === 'KeyR') this.turned = !this.turned; }
     onAction(main, action) { if(action === 'turn') this.turned = !this.turned; }
     onPrimaryFire(main) {

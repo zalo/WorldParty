@@ -11,7 +11,7 @@ import { Game } from './server/Game.js';
 import { Transform, RigidBody, Prop, Joint, Grabbed, Player, Model, PERSISTED } from './ecs/components.js';
 import { Physics } from './server/Physics.js';
 import { Terrain, chunkCenter } from './server/Terrain.js';
-import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME } from './server/Connectivity.js';
+import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME, decomposeParts } from './server/Connectivity.js';
 import { chunkAt, chunksInBox, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { DEFAULT_BODY_GRAVITY, clampGravity } from './gravity.js';
 import { getPropDef } from './props/PropRegistry.js';
@@ -201,7 +201,7 @@ export class WorldParty extends Server {
       let partsOf = key => {
         if(!parts.has(key)) {
           let m = this.terrain.chunks[key] ? this.terrain.manifoldOf(key) : null;
-          let p = m ? m.decompose() : null;
+          let p = m ? decomposeParts(m, M) : null;
           let S = this.connectivity.summary(key);
           if(p && p.length !== S.solid.length) console.warn(`chunk ${key}: ${p.length} islands now, ${S.solid.length} in its summary`);
           parts.set(key, p);

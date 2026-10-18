@@ -10,6 +10,7 @@ export class BaseTool {
     onUnequip(main) {}
     onPrimaryFire(main) {}
     onSecondaryFire(main) {}
-    onScroll(main, delta) {}
+    /** Wheel while this tool is out; return true to keep the wheel from switching tools. */
+    onScroll(main, delta, event) { return false; }
     update(main, delta) {}
 }

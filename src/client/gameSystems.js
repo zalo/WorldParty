@@ -92,10 +92,8 @@ export class SupplyRenderSystem {
                 }
             } else {
                 fx.crate.visible = false;
-                // buried loot stays a secret until it is out in the open: no marker while it is neutral and sleeping underground
-                let tf = world.get(id, 'Transform');
-                let hidden = !s.team && tf && tf.position.y < -1.5;
-                fx.marker.visible = !!body && !hidden;
+                // buried loot stays a secret until someone digs it out (the server clears `buried` on pickup)
+                fx.marker.visible = !!body && !s.buried;
                 fx.marker.scale.setScalar(1);
                 if(body) { fx.marker.position.copy(body.position); fx.marker.position.y += 1.1 + Math.sin(t * 2 + id.length) * 0.1; }
             }

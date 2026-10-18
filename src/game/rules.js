@@ -18,7 +18,7 @@ export const WEAPONS = {
     rocket:  { name: 'Rocket Launcher', icon: '🚀', key: '1', cooldownMs: 1100, speed: 46, gravity: 10, radius: 2.4, damage: 70, direct: 40, knock: 18, lifeMs: 6000 },
     grenade: { name: 'Grenade',         icon: '💣', key: '2', cooldownMs: 900,  minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
     buster:  { name: 'Bunker Buster',   icon: '☢️', key: '2', cooldownMs: 2000, speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
-    drill:   { name: 'Drill',           icon: '⛏️', key: '3', cooldownMs: 420,  width: 1.9, height: 2.5, depth: 2.3, reach: 1.1 },
+    drill:   { name: 'Drill',           icon: '⛏️', key: '3', cooldownMs: 420,  radius: 1.6, reach: 1.3, drop: 0.4 }, // a sphere ahead of the eye, big enough to walk through
     mason:   { name: 'Mason',           icon: '🧱', key: '4', cooldownMs: 300,  budget: 12, regenMs: 20000, stonePerDig: 1, maxDistance: 9, // stone comes from digging; the trickle only prevents a dead end
                shapes: { wall: [4, 2.6, 0.6], block: [2, 2, 2], plank: [4, 0.4, 1.4], pillar: [1, 4, 1] } },
     grapple: { name: 'Grapple',         icon: '🪝', key: '5', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
@@ -32,7 +32,17 @@ export const SUPPLY = {
     dropReturnMs: 30000,            // a dropped supply nobody touches goes back where it came from
     undergroundDepth: 1.5,          // below surface - this counts as underground ...
     undergroundBonusS: 4.0,         // ... for this long while carrying (outside both vaults): the delivery earns a bonus crate
-    senseRange: 20,                 // the HUD hints at neutral supplies this close
+    senseRange: 40,                 // the treasure light starts blinking at neutral supplies this close
+};
+
+/** Votes on admin actions: a majority of the active players (AFK ones, without a heartbeat for activeMs, do not
+ *  count) passes it, so a lone player's vote goes through at once. */
+export const VOTE = {
+    actions: { reset: 'Reset the map', end: 'End the round', swap: 'Swap teams' },
+    expireMs: 60000,
+    activeMs: 90000,
+    heartbeatMs: 5000,
+    idleMs: 60000,                  // no input for this long: the client stops sending heartbeats
 };
 
 export const RUBBLE = { minSpeed: 9, damagePerMps: 4, maxDamage: 70, pairCooldownMs: 600 };
@@ -82,6 +92,7 @@ export function sanitizeGame(g) {
         matchMinutes: Math.max(1, Math.min(60, num(g.matchMinutes, 10))),
         teams,
         caches: vecs(g.caches, 32),
+        scatter: vecs(g.scatter, 32),
         hints: Array.isArray(g.hints) ? g.hints.slice(0, 8).map(h => String(h).slice(0, 200)) : [],
     };
 }

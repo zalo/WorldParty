@@ -75,7 +75,9 @@ export class PhysGunTool extends BaseTool {
     onScroll(main, delta) {
         if(this.grabbedBodyId) {
             this.holdDistance = Math.max(2, this.holdDistance + delta * -0.01);
+            return true;
         }
+        return false;
     }
 
     update(main, delta) {

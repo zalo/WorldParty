@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 export async function buildSite({ watch = false, host = process.env.SERVER_HOST || 'worldparty.makeshifted.workers.dev' } = {}) {
     rmSync('public', { recursive: true, force: true });
     mkdirSync('public', { recursive: true });
-    cpSync('index.html', 'public/index.html');
+    for(let page of ['index.html', 'terms.html', 'privacy.html']) cpSync(page, 'public/' + page); // the legal pages are what Discord's app verification links to
     cpSync('assets', 'public/assets', { recursive: true });
     let options = {
         entryPoints: ['src/main.js'], bundle: true, format: 'esm', outdir: 'public/dist',

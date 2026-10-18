@@ -8,7 +8,7 @@ import { GameHud } from './GameHud.js';
 import { Sfx } from './Sfx.js';
 import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, ExplosionFx, teamColorOf } from './gameSystems.js';
 import { PROPS } from '../props/PropRegistry.js';
-import { GAME_PROPS, RESPAWN_MS } from '../game/rules.js';
+import { GAME_PROPS, RESPAWN_MS, VOTE } from '../game/rules.js';
 
 export class GameClient {
     constructor(main, config) {
@@ -39,11 +39,26 @@ export class GameClient {
         window.addEventListener('keydown', (e) => this.onKey(e));
         this.hud.chat.addEventListener('keydown', (e) => {
             e.stopPropagation();
-            if(e.code === 'Enter') { let text = this.hud.chat.value.trim(); if(text) main.conn.send(JSON.stringify({ type: 'chat', message: text })); this.hud.closeChat(); }
+            if(e.code === 'Enter') {
+                let text = this.hud.chat.value.trim();
+                if(/^\/vote\b/i.test(text)) this.vote(text.split(/\s+/)[1] || '');
+                else if(text) main.conn.send(JSON.stringify({ type: 'chat', message: text }));
+                this.hud.closeChat();
+            }
             else if(e.code === 'Escape') this.hud.closeChat();
         });
         this.hud.toggleHelp(true);
-        setTimeout(() => this.hud.toggleHelp(false), 12000);
+        setTimeout(() => this.hud.toggleHelp(false), 6000);
+        // heartbeat: sent while the player is at the keyboard, so votes count only the people actually here
+        this.lastInput = performance.now();
+        for(let ev of ['keydown', 'pointerdown', 'pointermove', 'touchstart']) window.addEventListener(ev, () => this.lastInput = performance.now(), { passive: true });
+        this.heartbeat = setInterval(() => { if(performance.now() - this.lastInput < VOTE.idleMs && main.conn.readyState === 1) main.conn.send(JSON.stringify({ type: 'heartbeat' })); }, VOTE.heartbeatMs);
+    }
+
+    /** Vote for an admin action (the panel's buttons, or `/vote reset|end|swap` in chat). */
+    vote(action) {
+        if(!VOTE.actions[action]) { this.hud.addFeed(`Votes: ${Object.keys(VOTE.actions).map(a => '/vote ' + a).join(', ')}`, '#ccc'); return; }
+        this.main.conn.send(JSON.stringify({ type: 'vote', action }));
     }
 
     /** Update the world config (a new import may change the rules). */
@@ -59,6 +74,8 @@ export class GameClient {
         if(this.hud.chat.style.display === 'block') return;
         if(e.code === 'Enter') { e.preventDefault(); this.hud.openChat(); }
         else if(e.code === 'KeyH') this.hud.toggleHelp();
+        else if(e.code === 'KeyV') this.hud.toggleVote();
+        else if(e.code === 'Escape' && this.hud.voteOpen) this.hud.toggleVote(false);
         else if(e.code === 'KeyJ') { let t = this.team === 'red' ? 'blue' : 'red'; this.main.conn.send(JSON.stringify({ type: 'jointeam', team: t })); }
     }
 
@@ -70,7 +87,7 @@ export class GameClient {
             case 'respawn':
                 main.player.teleport(data.position);
                 main.player.frozen = false;
-                this.hud.flashText(data.type === 'spawn' ? `You are on ${this.config.teams[data.team]?.name || data.team}. Press H for help` : '', 3000);
+                this.hud.flashText(data.type === 'spawn' ? `You are on ${this.config.teams[data.team]?.name || data.team}. Find the Treasure.` : '', 3000);
                 return true;
             case 'hit':
                 if(data.impulse) main.player.knock(data.impulse);
@@ -94,6 +111,7 @@ export class GameClient {
                 if(data.kind === 'deposit' && data.team === this.team) this.sfx.deposit();
                 if(data.kind === 'bonus') this.hud.flashText(data.text, 3000);
                 if(data.kind === 'match') { this.hud.flashText(data.text, 4000); this.sfx.fanfare(); }
+                if(data.kind === 'vote') this.hud.flashText(data.text, 2500);
                 return true;
             }
             case 'chat':
