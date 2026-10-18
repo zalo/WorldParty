@@ -17,8 +17,11 @@ import { DEFAULT_BODY_GRAVITY } from '../gravity.js';
 const BODY_DENSITY = 500.0;
 const REPLICATE_EVERY_N_TICKS = 2; // 30Hz tick -> 15Hz body replication
 const KILL_PLANE_Y = -100;
-const FRAGMENT_SLEEP_THRESHOLD = 0.02; // mass-normalized kinetic energy below which rubble sleeps (PhysX default 0.005): debris
-                                       // rocking in a pile is what keeps the tick expensive, so it settles a little sooner
+/** Mass-normalized kinetic energy below which rubble sleeps: 4x the PhysX default of 5e-5 * speed², with the typical
+ *  speed taken as gravity * 1 s as PhysX recommends (contact jitter in a resting pile scales with gravity, so a fixed
+ *  threshold tuned at 1 g keeps every fragment awake under heavy gravity). Debris rocking in a pile is what keeps the
+ *  tick expensive, so it settles a little sooner than props. */
+const fragmentSleepThreshold = (gravity) => 4 * 5e-5 * gravity * gravity;
 
 export class Physics {
     constructor() {
@@ -51,6 +54,7 @@ export class Physics {
         let version = px.PHYSICS_VERSION;
         let foundation = px.CreateFoundation(version, new px.PxDefaultAllocator(), new px.PxDefaultErrorCallback());
         let tolerances = new px.PxTolerancesScale();
+        tolerances.set_speed(DEFAULT_BODY_GRAVITY); // typical speed (PhysX: gravity * 1 s); sleep and bounce thresholds derive from it
         this.physics = px.CreatePhysics(version, foundation, tolerances);
 
         let sceneDesc = new px.PxSceneDesc(tolerances);
@@ -59,7 +63,9 @@ export class Physics {
         sceneDesc.set_filterShader(px.DefaultFilterShader());
         this.scene = this.physics.createScene(sceneDesc);
 
-        this.material = this.physics.createMaterial(0.5, 0.5, 0.6);
+        // Restitution near zero: terrain, rubble and crates land dead (0.6 had them bouncing like rubber, and under heavy
+        // gravity nearly every contact is above the bounce threshold)
+        this.material = this.physics.createMaterial(0.5, 0.5, 0.05);
         this.playerMaterial = this.physics.createMaterial(0.5, 0.5, 0.0);
         this.cookingParams = new px.PxCookingParams(tolerances);
         this.filterData = new px.PxFilterData(1, 1, 0, 0); // required by DefaultFilterShader
@@ -294,7 +300,10 @@ export class Physics {
                 continue;
             }
             this.px.PxRigidBodyExt.prototype.updateMassAndInertia(body, BODY_DENSITY);
-            if(fragment) body.setSleepThreshold(FRAGMENT_SLEEP_THRESHOLD);
+            // Under heavy gravity a body falling off the castle covers over 2 m per 30 Hz step, enough to pass through a
+            // floor between steps; speculative contacts catch that without a CCD pass or filter-shader support
+            body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eENABLE_SPECULATIVE_CCD, true);
+            if(fragment) body.setSleepThreshold(fragmentSleepThreshold(-this.scene.getGravity().get_y()));
             if(rb.frozen || rb.kinematic) body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
             this.scene.addActor(body);
             world.add(id, '$PxBody', { actor: body });
@@ -414,7 +423,10 @@ export class Physics {
     setGravity(world, g) {
         if(Math.abs(this.scene.getGravity().get_y() + g) < 1e-6) return;
         this.scene.setGravity(new this.px.PxVec3(0, -g, 0));
-        for(let [, pb] of world.each('$PxBody')) pb.actor.wakeUp();
+        for(let [id, pb] of world.each('$PxBody')) {
+            if(world.has(id, 'FragmentMesh')) pb.actor.setSleepThreshold(fragmentSleepThreshold(g));
+            pb.actor.wakeUp();
+        }
     }
 
     /** Toggle frozen (kinematic) state on a body entity. */

@@ -49,7 +49,7 @@ See `docs/ecs.md`. `src/ecs/World.js` is shared by both sides. Entities are id +
 
 ### Units and gravity
 
-World units are metres (10 m chunks, 1 m props, a 2 m player capsule) but nothing falls at 1 g (`src/gravity.js`): real gravity at this scale reads as slow motion, so the player controller is tuned at `PLAYER_GRAVITY` (8 g) and rigid bodies fall at `DEFAULT_BODY_GRAVITY` (2 g; a metre-sized block at the player's 8 g looks like a toy). A room overrides the body gravity with `world.gravity` (set from the client with `?gravity=<m/s²>` → `setgravity`, persisted with the world config, replaced by an import, reported in chat); `Physics.setGravity` wakes every body so piles re-settle.
+World units are metres (10 m chunks, 1 m props, a 2 m player capsule) but nothing falls at 1 g (`src/gravity.js`): real gravity at this scale reads as slow motion, so the player controller is tuned at `PLAYER_GRAVITY` (8 g) and rigid bodies fall at `DEFAULT_BODY_GRAVITY` (60 m/s², chosen by feel on the castle; a metre-sized block at the player's 8 g looks like a toy). Under that gravity a falling body covers over 2 m per 30 Hz step, so every dynamic body has speculative CCD (without it a cannonball dropped from the walls goes straight through the ground), the shared material's restitution is 0.05 so things land dead, and sleep thresholds scale with gravity (`PxTolerancesScale.speed`, `fragmentSleepThreshold`), otherwise contact jitter keeps whole piles awake. A room overrides the body gravity with `world.gravity` (set from the client with `?gravity=<m/s²>` → `setgravity`, persisted with the world config, replaced by an import, reported in chat); `Physics.setGravity` wakes every body so piles re-settle.
 
 ### Terrain System
 
