@@ -59,16 +59,17 @@ export const GAME_PROPS = ['crate', 'barrel'];
  *  it (`freeAt`). Only below `surfaceY - margin`: the forts, the grass skin and a crater on open ground stay dark. */
 export const GLOW_ROCK = {
     margin: 0.9,                    // no rocks in the first metre under the surface
-    minRadius: 0.15, maxRadius: 0.35,
+    minRadius: 0.06, maxRadius: 0.16,  // pebbles and crystal nodules, not boulders
     freeAt: 0.97,                   // exposure (fraction of the rock out of the ground) at which it becomes a body
-    colors: ['#ffb24a', '#4fe3d6', '#b07cff'],
+    colors: ['#ffb020', '#1fd6c8', '#b05cff'],   // amber, teal, violet: saturated, so the glow stays coloured under ACES
     maxFree: 200,                   // freed pebbles beyond this: the oldest sleeping ones vanish, like rubble
     scanPerTick: 150,               // virtual rocks measured per tick by the lazy scan around players ...
     scanRange: 24,                  // ... in chunks this close to one
-    light: { count: 12, distance: 10, decay: 2, intensity: 14 },   // real point lights on the nearest rocks
-    emissive: 2.2,                  // emissive intensity of the rock material (ACES, exposure 0.55: 4 washed them out to white)
+    light: { count: 12, distance: 8, decay: 2, intensity: 6 },     // real point lights on the nearest rocks: a sewer readable, not neon
+    emissive: 1.6,                  // emissive intensity of the rock material (ACES at exposure 0.42: higher washes the colour out)
+    elongation: 1.8,                // a crystal is a stretched lump, not a ball
 };
-export const DEFAULT_GLOW_FIELD = { seed: 1, cell: 1.1, density: 0.8 };
+export const DEFAULT_GLOW_FIELD = { seed: 1, cell: 1.1, density: 0.55 };
 
 function hash32(x) { x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b); return (x ^ (x >>> 16)) >>> 0; }
 /** The virtual rock of a field cell (null when the cell holds none): position, radius, colour index and spin. */

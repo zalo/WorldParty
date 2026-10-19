@@ -6,7 +6,9 @@
  *  cells overlapping the brush are measured against the new terrain, and a lazy scan measures the cells of the chunks
  *  around players that have air underground (the sewers, the vaults, the cave route, the gorge walls), a few per tick.
  *  A rock whose exposure (the fraction of its sample points in air) is between 0 and 1 becomes an embedded, static
- *  entity: CSG never touches it, it is not terrain. One that nothing holds any more (`freeAt`) gets a sphere RigidBody
+ *  entity: CSG never touches it, it is not terrain. Only where the air it meets has a ceiling: a ray straight up from
+ *  the exposed side that escapes to the sky (the gorge walls, a crater, a shaft) means no rock, so they belong to the
+ *  tunnels, the vaults, the sewers and the pockets. One that nothing holds any more (`freeAt`) gets a sphere RigidBody
  *  and PhysX takes it from there. A rock found entirely in air that was not in solid before the carve never existed.
  *
  *  Point-in-solid is the parity of a ray against the chunk's own closed mesh (the solid clipped to the chunk cube), in
@@ -31,6 +33,7 @@ const DODECA = dirs([[1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1], [-1, 1, 1],
  *  surface; twenty more on the rim decide "free" when those nineteen are all out. */
 const SAMPLES = [[0, [[0, 0, 0]]], [0.5, AXES], [0.9, ICOSA]];
 const SAMPLES_RIM = [[0.98, DODECA]];
+const SKY_OFFSET = 0.03;              // the sky test starts a hair beyond the sample in air (further out could be back inside the wall: pebbles are small)
 
 export class GlowRocks {
     constructor(server) {
@@ -45,6 +48,7 @@ export class GlowRocks {
         this.ray = new THREE.Ray();
         this.pt = new THREE.Vector3();
         this.hit = {};
+        this.airSample = null;      // of the last measure(): [direction, fraction of the radius] of its outermost sample in air
     }
 
     get T() { return this.server.terrain; }
@@ -130,6 +134,7 @@ export class GlowRocks {
         let r = rock.radius, T = this.T;
         this.stats.measured++;
         let keys = chunksInBox(T.world, { x: rock.x - r, y: rock.y - r, z: rock.z - r }, { x: rock.x + r, y: rock.y + r, z: rock.z + r });
+        this.airSample = [[0, 1, 0], 0];
         if(keys.length === 1) {
             let key = keys[0];
             if(!T.chunks[key]) return isRockKey(T.world, key) ? 0 : 1;
@@ -140,11 +145,40 @@ export class GlowRocks {
             let h = e.bvh.closestPointToPoint(this.pt, this.hit, r, r);
             if(!h || h.distance > r) return this.inside(rock) ? 0 : 1;
         }
-        let air = 0, n = 0, p = { x: 0, y: 0, z: 0 };
-        let run = sets => { for(let [s, list] of sets) for(let d of list) { p.x = rock.x + d[0] * s * r; p.y = rock.y + d[1] * s * r; p.z = rock.z + d[2] * s * r; n++; if(!this.inside(p)) air++; } };
+        let air = 0, n = 0, p = { x: 0, y: 0, z: 0 }, best = -1;
+        let run = sets => { for(let [s, list] of sets) for(let d of list) { p.x = rock.x + d[0] * s * r; p.y = rock.y + d[1] * s * r; p.z = rock.z + d[2] * s * r; n++; if(!this.inside(p)) { air++; if(s > best) { best = s; this.airSample = [d, s]; } } } };
         run(SAMPLES);
         if(air === n) run(SAMPLES_RIM);
         return Math.round(air / n * 100) / 100; // two decimals: hundreds of these ride every resync
+    }
+
+    /** Does a ray straight up from `p` (a point in air) reach the sky? Chunk by chunk: implicit rock blocks it, a stored
+     *  chunk's mesh blocks it where the ray hits a face (any face: the ray starts in air, so a hit is solid), above the
+     *  grid is sky. The bridge deck counts as a ceiling for the gorge wall under it, which is fine. */
+    openSky(p) {
+        let w = this.T.world, x = p.x, z = p.z, y = p.y;
+        for(let guard = 0; guard < 16; guard++) {
+            let key = chunkAt(w, { x, y, z });
+            if(!key) return true;
+            let top = chunkMin(key).y + CHUNK_SIZE;
+            if(!this.T.chunks[key]) { if(isRockKey(w, key)) return false; }
+            else {
+                let e = this.bvhOf(key);
+                if(e) {
+                    this.ray.origin.set(x, y, z); this.ray.direction.set(0, 1, 0);
+                    this.stats.rays++;
+                    if(e.bvh.raycastFirst(this.ray, THREE.DoubleSide, 0, top - y + 1e-3)) return false;
+                }
+            }
+            y = top + 1e-3;
+        }
+        return true;
+    }
+
+    /** The air the last measured rock meets is under a ceiling (a tunnel), not open to the sky (a cliff, a crater). */
+    underCeiling(rock) {
+        let [d, s] = this.airSample, off = s * rock.radius + SKY_OFFSET;
+        return !this.openSky({ x: rock.x + d[0] * off, y: rock.y + d[1] * off, z: rock.z + d[2] * off });
     }
 
     // ---- entities -------------------------------------------------------------
@@ -192,7 +226,7 @@ export class GlowRocks {
     onTerrainChanged(boxes, carved, changed) {
         if(!this.active) return null;
         let t0 = Date.now(), w = this.world, R = GLOW_ROCK.maxRadius, seen = new Set();
-        let out = { made: 0, freed: 0, updated: 0, ms: 0 }, positions = [];
+        let out = { made: 0, freed: 0, updated: 0, sky: 0, ms: 0 }, positions = [];
         let before = { measured: this.stats.measured, rays: this.stats.rays, bvhBuilds: this.stats.bvhBuilds };
         for(let b of boxes) {
             let min = { x: b.min.x - R, y: b.min.y - R, z: b.min.z - R }, max = { x: b.max.x + R, y: b.max.y + R, z: b.max.z + R };
@@ -212,6 +246,7 @@ export class GlowRocks {
                 if(e <= 0) continue;
                 let free = e >= GLOW_ROCK.freeAt;
                 if(free && !this.inside(rock, true)) continue; // open air before the carve too: no rock ever lay here
+                if(!this.underCeiling(rock)) { out.sky++; continue; }  // a crater, a cliff, a shaft: the rocks stay underground
                 this.materialize(rock, free ? 1 : e, free);
                 out.made++; if(free) { out.freed++; positions.push(rock); }
             }
@@ -245,7 +280,7 @@ export class GlowRocks {
             if(this.byCell.has(rock.cell)) continue;
             budget--;
             let e = this.measure(rock);
-            if(e > 0 && e < GLOW_ROCK.freeAt) this.materialize(rock, e, false);
+            if(e > 0 && e < GLOW_ROCK.freeAt && this.underCeiling(rock)) this.materialize(rock, e, false);
         }
     }
 

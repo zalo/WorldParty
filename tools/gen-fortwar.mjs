@@ -283,9 +283,9 @@ const game = {
     // neutral supplies in the open (the vaults start empty) and in sealed pockets found by digging
     scatter: scatter.map(nudge),
     caches: [[-46, -9.5, 6.5], [46, -9.5, 6.5], [-14, -10.5, -11.5], [14, -10.5, -11.5], [-0.8, -14.5, 0.8], [0.8, -14.5, -0.8]].map(nudge),
-    // glow rocks: a virtual field through the ground under the surface (one pebble per ~1.3 m³ cell, four in five cells),
-    // materialized by the server wherever a tunnel wall passes through one (src/game/rules.js GLOW_ROCK, src/server/GlowRocks.js)
-    glowRocks: { seed: 1337, cell: 1.1, density: 0.8 },
+    // glow rocks: a virtual field through the ground under the surface (one pebble per ~1.3 m³ cell, in just over half the
+    // cells), materialized by the server wherever a tunnel wall passes through one (src/game/rules.js GLOW_ROCK, src/server/GlowRocks.js)
+    glowRocks: { seed: 1337, cell: 1.1, density: 0.55 },
     hints: ['Find the Treasure.'],
 };
 

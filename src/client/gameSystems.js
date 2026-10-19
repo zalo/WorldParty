@@ -160,14 +160,17 @@ export class ExplosionFx {
     }
 }
 
-/** A lumpy low-poly ball: an icosphere whose vertices are pushed in and out by a hash of their position (the same for
- *  every face sharing a vertex, so the faces stay joined), flat shaded. Every rock is this, scaled and turned. */
+/** A crystal nodule: a low-poly icosphere whose vertices are pushed in and out by a hash of their position (the same
+ *  for every face sharing a vertex, so the faces stay joined), drawn to points at both ends of its local y, flat shaded.
+ *  Every rock is this, scaled by its radius (stretched along y, `GLOW_ROCK.elongation`) and turned by its spin. */
 function lumpyGeometry() {
     let g = new THREE.IcosahedronGeometry(1, 1), pos = g.attributes.position, v = new THREE.Vector3();
     for(let i = 0; i < pos.count; i++) {
         v.fromBufferAttribute(pos, i);
         let h = Math.imul(Math.round(v.x * 1000) * 73856093 ^ Math.round(v.y * 1000) * 19349663 ^ Math.round(v.z * 1000) * 83492791, 0x9E3779B1) >>> 0;
-        v.multiplyScalar(0.78 + 0.34 * (h / 4294967296));
+        let taper = 1 - 0.45 * Math.abs(v.y); // narrower toward the tips
+        v.multiplyScalar(0.8 + 0.3 * (h / 4294967296));
+        v.x *= taper; v.z *= taper;
         pos.setXYZ(i, v.x, v.y, v.z);
     }
     g.computeVertexNormals();
@@ -185,7 +188,7 @@ export class GlowRockRenderSystem {
     constructor(parent, scene, camera, fieldFn) {
         this.parent = parent; this.scene = scene; this.camera = camera; this.fieldFn = fieldFn;
         this.geometry = lumpyGeometry();
-        this.materials = GLOW_ROCK.colors.map(c => new THREE.MeshStandardNodeMaterial({ color: new THREE.Color(c).multiplyScalar(0.5), emissive: new THREE.Color(c), emissiveIntensity: GLOW_ROCK.emissive, roughness: 0.55, metalness: 0 }));
+        this.materials = GLOW_ROCK.colors.map(c => new THREE.MeshStandardNodeMaterial({ color: new THREE.Color(c).multiplyScalar(0.3), emissive: new THREE.Color(c), emissiveIntensity: GLOW_ROCK.emissive, roughness: 0.35, metalness: 0 }));
         this.groups = GLOW_ROCK.colors.map((_, i) => this.makeGroup(i, 256));
         this.lights = Array.from({ length: GLOW_ROCK.light.count }, () => { let l = new THREE.PointLight(0xffffff, 0, GLOW_ROCK.light.distance, GLOW_ROCK.light.decay); scene.add(l); return l; });
         this.colorOf = new Map(); // entity id -> colour index
@@ -237,7 +240,7 @@ export class GlowRockRenderSystem {
             this.pos.set(tf.position.x, tf.position.y, tf.position.z); this.quat.set(tf.quaternion.x, tf.quaternion.y, tf.quaternion.z, tf.quaternion.w);
             if(g.free) {
                 let mesh = new THREE.Mesh(this.geometry, this.materials[rock.color]);
-                mesh.position.copy(this.pos); mesh.quaternion.copy(this.quat); mesh.scale.setScalar(rock.radius);
+                mesh.position.copy(this.pos); mesh.quaternion.copy(this.quat); mesh.scale.set(rock.radius, rock.radius * GLOW_ROCK.elongation, rock.radius);
                 mesh.userData.sharedGeometry = true; mesh.userData.entityId = id; mesh.userData.halfExtent = rock.radius; mesh.userData.collisionBVH = this.geometry.boundsTree;
                 this.parent.add(mesh);
                 world.add(id, '$Mesh', { object: mesh });
@@ -246,7 +249,7 @@ export class GlowRockRenderSystem {
             }
             let grp = this.groups[rock.color];
             if(grp.ids.length === grp.capacity) { this.grow(rock.color); grp = this.groups[rock.color]; }
-            this.tmp.compose(this.pos, this.quat, this.scl.setScalar(rock.radius));
+            this.tmp.compose(this.pos, this.quat, this.scl.set(rock.radius, rock.radius * GLOW_ROCK.elongation, rock.radius));
             let index = grp.ids.length;
             grp.mesh.setMatrixAt(index, this.tmp); grp.ids.push(id); grp.mesh.count = index + 1; grp.mesh.instanceMatrix.needsUpdate = true;
             world.add(id, '$GlowInst', { color: rock.color, index });
