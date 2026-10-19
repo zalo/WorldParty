@@ -16,6 +16,7 @@ import { World as EcsWorld } from './ecs/World.js';
 import { encodeSoup, unpackChunkFrame } from './net/codec.js';
 import { TerrainMirror } from './client/TerrainMirror.js';
 import { TerrainTextures } from './client/TerrainTextures.js';
+import { TerrainGI } from './client/TerrainGI.js';
 import { makeTerrainMaterial } from './client/terrainMaterial.js';
 import { getPropDef } from './props/PropRegistry.js';
 import { PLAYER_GRAVITY } from './gravity.js';
@@ -255,6 +256,17 @@ export default class Main {
         for(let light of this.probeMuted || []) probes.mute.push(light);
     }
 
+    /** Vertex GI on the terrain (src/client/TerrainGI.js), once the renderer is up; ?vgi=0 leaves the probe grid to it. */
+    attachGI() {
+        let r = this.world.renderer;
+        if(this.gi || !TerrainGI.supported(r) || this.queryParams.get('vgi') === '0') return;
+        let jobs = parseInt(this.queryParams.get('girays') || '0') || undefined;
+        try {
+            this.gi = new TerrainGI(r, this.world.scene, this.terrain, [this.defaultMaterial, this.fragmentMaterial], { mobile: this.isMobile(), jobs, layersOf: () => this.textures.averages });
+            this.chunkListeners.push((key, region) => this.gi.changed(region));
+        } catch(e) { console.warn('vertex GI unavailable: ' + e.message); this.gi = null; }
+    }
+
     /** A light the probe bake should not see (the glow volume: the probes would bake it in again at their 6 m). */
     muteDuringProbeBake(light) {
         (this.probeMuted ||= []).push(light);
@@ -379,6 +391,7 @@ export default class Main {
         this.ecs.update(this.deltaTime / 1000.0);
         this.terrain.update();
         this.world.update(this.deltaTime / 1000.0);
+        this.gi?.tick(this.world);
 
         this.world.renderFrame();
         this.world.stats.update();

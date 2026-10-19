@@ -96,7 +96,7 @@ export class GlowRocks {
         geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
         geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.indices), 1)); // the build reorders the index: copy it
         this.stats.bvhBuilds++;
-        e = { bvh: new MeshBVH(geometry, { maxLeafSize: 8 }), air: this.undergroundAir(key, mesh) };
+        e = { bvh: new MeshBVH(geometry, { targetLeafSize: 8 }), air: this.undergroundAir(key, mesh) };
         this.bvhs.set(id, e);
         while(this.bvhs.size > BVH_CACHE) this.bvhs.delete(this.bvhs.keys().next().value);
         return e;

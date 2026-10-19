@@ -33,7 +33,7 @@ const SETTLE_MS = 2000;
 const GATHER_MS = 250;                 // a batch waits this long after a chunk settles into it, for its neighbours
 const FORCE_MS = 10000;                // a batch that keeps changing is rebuilt anyway this long after it first did
 const REBUILD_TRIS_PER_FRAME = 65536;  // rebuild work per update (at least one batch)
-const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3]];
+const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3], ['rec', 1]];
 
 function regionOf(key) {
     let [x, y, z] = key.split(',').map(Number);
@@ -101,6 +101,8 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
     geometry.setAttribute('slot', new THREE.BufferAttribute(slot, 1));
     geometry.setAttribute('tile', new THREE.BufferAttribute(tile, 1));
     geometry.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    // the vertex GI record of each vertex (TerrainGI); -1: none, the probe grid lights it
+    geometry.setAttribute('rec', new THREE.BufferAttribute(new Float32Array(numTris * 3).fill(-1), 1));
     geometry.setIndex(new THREE.BufferAttribute(idx, 1));
     return geometry;
 }
@@ -141,6 +143,8 @@ export class TerrainMirror {
         this.group.name = 'terrain';
         this.scene.add(this.group);
         this.objects = new Map();   // key -> Mesh
+        this.render = new Map();    // key -> refined render geometry (TerrainGI), drawn instead of the collision geometry
+        this.onGeometry = null;     // (key, geometry|null) => void, after a chunk's collision geometry was replaced
         // render batching (see REGION); the Raycaster and the BVH users ignore `visible`, the renderer skips the subtree
         this.batching = batching;
         this.group.visible = !batching;
@@ -342,8 +346,9 @@ export class TerrainMirror {
     setGeometry(key, geometry) {
         let mesh = this.objects.get(key);
         this.undraw(key);
+        this.render.delete(key); // refined from the old content
         if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
-        if(!geometry) { this.forget(key); return; }
+        if(!geometry) { this.forget(key); this.onGeometry?.(key, null); return; }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
@@ -357,6 +362,29 @@ export class TerrainMirror {
         this.group.add(mesh);
         this.objects.set(key, mesh);
         if(this.batching) this.drawHot(key, geometry);
+        this.onGeometry?.(key, geometry); // TerrainGI refines it now and hands back a render geometry (setRenderGeometry)
+    }
+
+    /** What is drawn for a chunk: its refined render geometry when there is one, else the collision geometry. */
+    drawGeometry(key) { return this.render.get(key) || this.objects.get(key)?.geometry || null; }
+
+    /** A refined render geometry for a chunk (same surface, more vertices, a GI record per vertex). Drawn at once if the
+     *  chunk is drawn on its own; a batch keeps drawing the old one until its rebuild, which is the same surface. */
+    setRenderGeometry(key, geometry) {
+        if(!this.objects.has(key)) return;
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+        this.render.set(key, geometry);
+        if(!this.batching) return;
+        let st = this.drawn.get(key);
+        if(!st) return;
+        if(st.hot) {
+            this.renderGroup.remove(st.hot);
+            let hot = new THREE.Mesh(geometry, this.material);
+            hot.castShadow = true; hot.receiveShadow = true; hot.matrixAutoUpdate = false; hot.userData.chunkKey = key;
+            this.renderGroup.add(hot);
+            st.hot = hot;
+        } else if(st.batch) this.touch(st.batch, GATHER_MS);
     }
 
     // ---- render batching ------------------------------------------------------
@@ -389,7 +417,7 @@ export class TerrainMirror {
     drawHot(key, geometry) {
         let st = this.drawn.get(key);
         if(!st) { st = { batch: null, inMesh: false, hot: null, changedAt: 0, settled: false }; this.drawn.set(key, st); }
-        let hot = new THREE.Mesh(geometry, this.material);
+        let hot = new THREE.Mesh(this.render.get(key) || geometry, this.material);
         hot.castShadow = true;
         hot.receiveShadow = true;
         hot.matrixAutoUpdate = false;
@@ -408,7 +436,7 @@ export class TerrainMirror {
         if(!this.dirty.has(b)) { this.dirty.add(b); b.dirtySince = now; }
     }
 
-    trisOf(key) { let m = this.objects.get(key); return m ? m.geometry.index.count / 3 : 0; }
+    trisOf(key) { let g = this.drawGeometry(key); return g ? g.index.count / 3 : 0; }
 
     batchTris(b, except = null) { let n = 0; for(let k of b.keys) if(k !== except) n += this.trisOf(k); return n; }
 
@@ -453,12 +481,13 @@ export class TerrainMirror {
         this.dirty.delete(b);
         b.foldAt = 0;
         this.rebuilds++;
-        let members = [], total = 0;
+        let members = [], total = 0, totalIndex = 0;
         for(let k of b.keys) {
-            let st = this.drawn.get(k), m = this.objects.get(k);
-            if(!st || !m || (st.hot && !st.settled)) continue;
+            let st = this.drawn.get(k), g = this.drawGeometry(k);
+            if(!st || !g || (st.hot && !st.settled)) continue;
             members.push(k);
-            total += m.geometry.attributes.position.count;
+            total += g.attributes.position.count;
+            totalIndex += g.index.count;
         }
         let old = b.mesh;
         b.mesh = null;
@@ -466,14 +495,15 @@ export class TerrainMirror {
         if(total > 0) {
             let geometry = new THREE.BufferGeometry(), arrays = {};
             for(let [name, size] of BATCH_ATTRIBUTES) arrays[name] = new Float32Array(total * size);
-            let index = new Uint32Array(total), box = new THREE.Box3(), offset = 0;
+            let index = new Uint32Array(totalIndex), box = new THREE.Box3(), offset = 0, at = 0;
             for(let k of members) {
-                let g = this.objects.get(k).geometry, n = g.attributes.position.count;
+                let g = this.drawGeometry(k), n = g.attributes.position.count, src = g.index.array, m = g.index.count;
                 for(let [name, size] of BATCH_ATTRIBUTES) arrays[name].set(g.attributes[name].array.subarray(0, n * size), offset * size);
-                for(let i = 0; i < n; i++) index[offset + i] = offset + i; // chunk geometry is flat (an unshared vertex per corner)
-                b.ranges.set(k, { start: offset, count: n });
+                for(let i = 0; i < m; i++) index[at + i] = src[i] + offset;
+                b.ranges.set(k, { start: at, count: m });
+                if(!g.boundingBox) g.computeBoundingBox();
                 box.union(g.boundingBox);
-                offset += n;
+                offset += n; at += m;
             }
             for(let [name, size] of BATCH_ATTRIBUTES) geometry.setAttribute(name, new THREE.BufferAttribute(arrays[name], size));
             geometry.setIndex(new THREE.BufferAttribute(index, 1));
@@ -493,9 +523,9 @@ export class TerrainMirror {
             let st = this.drawn.get(k);
             if(st.hot) {
                 this.renderGroup.remove(st.hot);
+                st.hot.geometry.dispose(); // frees its GPU buffers; the arrays (and the collision mesh's BVH) stay
                 st.hot = null;
                 this.hotKeys.delete(k);
-                this.objects.get(k).geometry.dispose(); // frees its GPU buffers; the collision mesh keeps the arrays and BVH
             }
         }
         if(b.keys.size === 0) {

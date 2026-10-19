@@ -18,6 +18,7 @@ export class TerrainTextures {
         this.texture.generateMipmaps = true;
         this.texture.needsUpdate = true;
         this.layers = new Map();   // material id -> layer index
+        this.averages = [];        // layer index -> mean linear RGB
         this.loading = null;
     }
 
@@ -59,6 +60,13 @@ export class TerrainTextures {
         this.texture.image = { data, width: SIZE, height: SIZE, depth: textured.length };
         this.texture.needsUpdate = true;
         this.layers = layers;
+        // each layer's mean colour in linear light: the albedo the vertex GI's rays see (TerrainGI)
+        let lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        this.averages = textured.map((m, i) => {
+            let base = i * SIZE * SIZE * 4, sum = [0, 0, 0], n = 0;
+            for(let p = base; p < base + SIZE * SIZE * 4; p += 4 * 7) { sum[0] += lin(data[p]); sum[1] += lin(data[p + 1]); sum[2] += lin(data[p + 2]); n++; }
+            return sum.map(v => v / n);
+        });
         return layers;
     }
 }

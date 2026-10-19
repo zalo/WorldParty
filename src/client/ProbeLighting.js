@@ -55,6 +55,9 @@ class ProbeGridNode extends LightProbeGridNode {
             const outside = min.sub(positionWorld).max(0.0).add(positionWorld.sub(max).max(0.0));
             irradiance = irradiance.mul(outside.length().smoothstep(0.0, this._falloff).oneMinus());
         }
+        // terrain with vertex GI (TerrainGI): its own light replaces the probes' as it gathers samples
+        const gi = builder.material && builder.material.giNode;
+        if(gi) irradiance = irradiance.mul(gi.w.oneMinus());
         builder.context.irradiance.addAssign(irradiance);
     }
 }

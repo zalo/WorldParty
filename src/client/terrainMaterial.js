@@ -5,11 +5,24 @@
 import * as THREE from 'three/webgpu';
 import { attribute, texture, uv, select, vertexColor, positionWorld, positionLocal, normalWorld, normalLocal, float, vec3 } from 'three/tsl';
 
+/** The terrain material: a standard material that adds the vertex GI (TerrainGI) as indirect diffuse light when it has
+ *  one (`giNode`: per vertex mean irradiance and a weight, interpolated; `giScale`, the same multiplier the probe grid
+ *  uses). The probe grid's light is faded out by the same weight (ProbeLighting's node), so a vertex without samples
+ *  yet shows the probes and one with enough shows its own gathered light. */
+export class TerrainNodeMaterial extends THREE.MeshStandardNodeMaterial {
+    constructor(params) { super(params); this.giNode = null; this.giScale = null; }
+    setupLightMap(builder) {
+        if(this.giNode) return new THREE.IrradianceNode(this.giNode.xyz.mul(this.giNode.w).mul(this.giScale));
+        return super.setupLightMap(builder);
+    }
+}
+
 /** @param {THREE.DataArrayTexture} arrayTexture the world's texture layers (TerrainTextures)
  *  @param {'world'|'local'} space which position (and normal) the triplanar projection uses */
 export function makeTerrainMaterial(arrayTexture, space = 'world', debug = false) {
     // normals come from the geometry (per face, blended across smooth materials: buildTerrainGeometry), not from derivatives
-    let material = debug === 6 ? new THREE.MeshBasicNodeMaterial() : new THREE.MeshStandardNodeMaterial({ roughness: 0.75, metalness: 0.05 }); // 6: unlit
+    let material = debug >= 6 ? new THREE.MeshBasicNodeMaterial() : new TerrainNodeMaterial({ roughness: 0.75, metalness: 0.05 }); // 6: unlit (7, 8: TerrainGI's light and weight)
+    material.tridebug = debug;
     // Terrain is closed solid, so cast shadows with its front faces: three's default (back faces) stores the
     // depth of the far side of every wall and ceiling, and at the base of a wall or the top edge of a sewer
     // wall the stored depth meets the lit surface within the bias, which drew a bright line of leaked light

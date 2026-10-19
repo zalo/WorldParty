@@ -203,6 +203,7 @@ export default class World {
                     // the probes carry the sky's diffuse light once baked; until then the environment map does (ProbeLighting.environmentIntensity)
                     mainObject.attachProbes?.(this.probes);
                 }
+                mainObject.attachGI?.();
                 return;
             }
             console.warn('DayCycle needs WebGPU; using the static skybox');
