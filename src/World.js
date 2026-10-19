@@ -10,6 +10,8 @@ import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { DayCycle } from './sky/DayCycle.js';
 import { ProbeLighting } from './client/ProbeLighting.js';
 
+const MOBILE_ENVIRONMENT = 3; // image based light on moving objects where no probe grid runs (see _setupSky)
+
 /** The fundamental set up and animation structures for 3D Visualization */
 export default class World {
 
@@ -196,7 +198,13 @@ export default class World {
         this.renderer.init().then(() => {
             if(DayCycle.supported(this.renderer)) {
                 this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
-                if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0')) {
+                // A phone with vertex GI runs no probe grid: each probe bake is six renders of the scene (~13 ms of CPU
+                // on a 4x-throttled desktop, plus the GPU), and one ran every few frames for minutes after load and after
+                // every dig: the hitching. The terrain has its gathered light; moving objects take the sky's image based
+                // light at MOBILE_ENVIRONMENT (they had the probes' ambient-scaled light). ?probes=1 brings the grid back.
+                let skipProbes = this.isMobile && mainObject.wantsVertexGI?.() && !(params && params.get('probes') === '1');
+                if(skipProbes) this.scene.environmentIntensity = MOBILE_ENVIRONMENT;
+                if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0') && !skipProbes) {
                     // a probe costs ~4 ms of CPU to bake here with the terrain batched (12 ms before), several times that on a phone:
                     // mobile gets a coarser grid, one probe at a time and a 2 ms budget (it rests between probes that overrun it)
                     this.probes = new ProbeLighting(this.renderer, this.scene, this.isMobile ? { spacing: 8, maxProbes: 1500, perFrame: 1, budgetMs: 2 } : { spacing: 6, maxProbes: 4000 });

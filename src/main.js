@@ -256,6 +256,9 @@ export default class Main {
         for(let light of this.probeMuted || []) probes.mute.push(light);
     }
 
+    /** Will vertex GI run? (World skips the probe grid on phones when it will.) */
+    wantsVertexGI() { return TerrainGI.supported(this.world.renderer) && this.queryParams.get('vgi') !== '0'; }
+
     /** Vertex GI on the terrain (src/client/TerrainGI.js), once the renderer is up; ?vgi=0 leaves the probe grid to it. */
     attachGI() {
         this.giDecided = true; // (GameClient waits for this to know where the glow rocks' light goes)

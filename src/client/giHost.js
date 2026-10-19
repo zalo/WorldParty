@@ -8,13 +8,17 @@
  *  each marked chunk is refined once, and that work is time-sliced between frames (`ADAPT_MS` per frame message), so
  *  the job lists keep coming.
  *
- *  Messages in: init, chunk (coarse arrays), remove, changed (a carve's box), ready (chunks the packed BVH now has),
- *  state (a readback of the records' light), rock / unrock (crystals), frame (camera; answered with a work package).
- *  Out: chunk (a refined render mesh and each coarse corner's record), work (jobs, glow jobs, crystal buffer writes,
- *  whether a readback is wanted, stats). Every message out carries the record uploads (positions/normals of new
+ *  It also packs the GPU BVH (three-mesh-bvh's BVHComputeData over its chunk BVHs, each coarse corner carrying its
+ *  record and albedo): that full repack cost 22-32 ms of the main thread per carve on a 4x-throttled CPU.
+ *
+ *  Messages in: init, chunk (coarse arrays and albedo), remove, changed (a carve's box), state (a readback of the
+ *  records' light), rock / unrock (crystals), frame (camera; answered with a work package). Out: chunk (a refined
+ *  render mesh), bvh (the packed BVH's buffers; the chunks in it may be sampled from then on), work (jobs, glow jobs,
+ *  crystal buffer writes, whether a readback is wanted, stats). Every message out carries the record uploads (positions/normals of new
  *  records, init and knock ops) the main thread must apply before anything that references them. */
-import { BufferGeometry, BufferAttribute, Ray, Vector3, Box3, DoubleSide } from 'three';
+import { BufferGeometry, BufferAttribute, Ray, Vector3, Box3, DoubleSide, Mesh } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { BVHComputeData } from 'three-mesh-bvh/webgpu';
 import { GICore, NO_RECORD } from './giCore.js';
 
 const CHUNK = 10;
@@ -32,6 +36,10 @@ export class GIHost {
         this.redoQueue = new Set();  // chunks to refine again
         this.wantState = false;
         this.statsAt = 0;
+        this.proxies = new Map();    // chunk key -> Mesh of its coarse geometry (with `surface`) for the packed BVH
+        this.packer = new BVHComputeData([], { attributes: { position: 'vec4f', surface: 'vec4f' } });
+        this.packDirty = false; this.packAt = 0;
+        this.unpacked = new Set();   // chunks whose current geometry the packed BVH does not have yet
         this.ray = new Ray(); this.box = new Box3(); this.p = new Vector3(); this.hit = {};
     }
 
@@ -39,9 +47,8 @@ export class GIHost {
         switch(m.t) {
             case 'init': return this.init(m);
             case 'chunk': return this.chunk(m);
-            case 'remove': this.core.removeChunk(m.key); this.bvhs.delete(m.key); return;
+            case 'remove': this.core.removeChunk(m.key); this.bvhs.delete(m.key); if(this.proxies.delete(m.key)) this.packDirty = true; this.unpacked.delete(m.key); return;
             case 'changed': return this.changed(m.box);
-            case 'ready': return this.ready(m.keys);
             case 'state': this.state = new Float32Array(m.buf); this.adaptQueue.push(...this.staged); this.staged = []; this.wantState = false; return;
             case 'rock': return this.setRock(m.id, m.x, m.y, m.z, m.radius, m.rgb, m.power);
             case 'unrock': return this.removeRock(m.id);
@@ -82,13 +89,45 @@ export class GIHost {
 
     chunk(m) {
         // the coarse geometry's BVH first: seeding checks sight against the terrain as it is now
-        let g = new BufferGeometry();
+        let g = new BufferGeometry(), nt = m.cls.length;
         g.setAttribute('position', new BufferAttribute(m.pos, 3));
-        this.bvhs.set(m.key, m.pos.length ? new MeshBVH(g, { targetLeafSize: 8 }) : null);
+        let bvh = nt ? new MeshBVH(g, { targetLeafSize: 8 }) : null;
+        this.bvhs.set(m.key, bvh);
         let ch = this.core.setChunk(m.key, m.version, { pos: m.pos, nrm: m.nrm, uv: m.uv, cls: m.cls, skip: m.skip }, m.carved);
         this.redoQueue.delete(ch); // (a replaced chunk object is not in there anyway)
         this.assignCrystals(ch);
         this.sendChunk(ch);
+        // for the packed BVH: each corner (the geometry is a flat corner list) with its record and its triangle's albedo
+        if(this.proxies.delete(m.key)) this.packDirty = true;
+        if(bvh) {
+            let surface = new Float32Array(nt * 12);
+            for(let t = 0; t < nt; t++) for(let k = 0; k < 3; k++) {
+                let o = (t * 3 + k) * 4;
+                surface[o] = ch.coarseRec[t * 3 + k]; surface[o + 1] = m.alb[t * 3]; surface[o + 2] = m.alb[t * 3 + 1]; surface[o + 3] = m.alb[t * 3 + 2];
+            }
+            g.setAttribute('surface', new BufferAttribute(surface, 4));
+            g.boundsTree = bvh;
+            let proxy = new Mesh(g); proxy.updateMatrixWorld();
+            this.proxies.set(m.key, proxy);
+            this.packDirty = true;
+        }
+        this.unpacked.add(m.key);
+    }
+
+    /** Repack the GPU BVH (at most once a second while chunks change) and send its buffers; the chunks in it may be
+     *  sampled, and crystals waiting for it are placed and baked again. */
+    pack() {
+        this.packAt = performance.now(); this.packDirty = false;
+        if(!this.proxies.size) return;
+        let P = this.packer;
+        P.objects = [...this.proxies.values()];
+        try { P.update(); } catch(e) { console.warn('TerrainGI worker: BVH pack failed: ' + e.message); return; }
+        let arr = (n) => n.value.array;
+        let msg = { t: 'bvh', nodes: arr(P.storage.nodes), index: arr(P.storage.index), attributes: arr(P.storage.attributes), transforms: arr(P.storage.transforms) };
+        // (sent, not copied: the packer makes new buffers on its next update)
+        this.send(msg, [msg.nodes.buffer, msg.index.buffer, msg.attributes.buffer, msg.transforms.buffer]);
+        let keys = [...this.unpacked]; this.unpacked.clear();
+        this.ready(keys);
     }
 
     sendChunk(ch) {
@@ -134,6 +173,7 @@ export class GIHost {
 
     frame(m) {
         let t0 = performance.now(), core = this.core;
+        if(this.packDirty && t0 - this.packAt > 1000) this.pack();
         // adaptive refinement, a slice at a time: passes mark chunks, each marked chunk is refined once
         if(this.state) {
             while(performance.now() - t0 < ADAPT_MS && (this.redoQueue.size || this.adaptQueue.length)) {

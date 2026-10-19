@@ -49,9 +49,11 @@ const SMOOTH_ANGLE = Math.cos(70 * Math.PI / 180); // faces of smooth materials 
 export function buildTerrainGeometry(positions, indices, materials, uvs, table, layers) {
     let numTris = indices.length / 3;
     // face normals, and which faces meet at each vertex position (vertices are shared by index in the chunk mesh,
-    // but seams split them, so group by position)
+    // but seams split them, so group by position: `rep` maps a vertex to the first vertex at its position, found
+    // through a numeric hash of the position at 0.1 mm with exact compare; string keys built with toFixed for every
+    // corner made this the slowest step of a carve on a phone, ~14 ms per chunk on a 4x-throttled CPU)
     let faceN = new Float32Array(numTris * 3), smoothFace = new Uint8Array(numTris);
-    let byPos = new Map();
+    let nv = positions.length / 3, rep = null, faceStart = null, faceList = null;
     for(let t = 0; t < numTris; t++) {
         let a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3;
         let ux = positions[b] - positions[a], uy = positions[b + 1] - positions[a + 1], uz = positions[b + 2] - positions[a + 2];
@@ -60,8 +62,26 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
         faceN[t * 3] = nx / l; faceN[t * 3 + 1] = ny / l; faceN[t * 3 + 2] = nz / l;
         let id = materials ? materials[t] : DEFAULT_MATERIAL, m = table[id] || table[DEFAULT_MATERIAL];
         smoothFace[t] = m.smooth && l > 1e-9 ? 1 : 0;
-        if(!smoothFace[t]) continue;
-        for(let k = 0; k < 3; k++) { let v = indices[t * 3 + k] * 3, key = positions[v].toFixed(4) + ',' + positions[v + 1].toFixed(4) + ',' + positions[v + 2].toFixed(4); let list = byPos.get(key); if(list) list.push(t); else byPos.set(key, [t]); }
+    }
+    let anySmooth = smoothFace.some(f => f);
+    if(anySmooth) {
+        rep = new Int32Array(nv);
+        let Q = new Int32Array(nv * 3), buckets = new Map();
+        for(let v = 0; v < nv; v++) {
+            let qx = Math.round(positions[v * 3] * 1e4), qy = Math.round(positions[v * 3 + 1] * 1e4), qz = Math.round(positions[v * 3 + 2] * 1e4);
+            Q[v * 3] = qx; Q[v * 3 + 1] = qy; Q[v * 3 + 2] = qz;
+            let h = (Math.imul(qx, 73856093) ^ Math.imul(qy, 19349663) ^ Math.imul(qz, 83492791)) | 0, list = buckets.get(h), r = v;
+            if(list) { for(let w of list) if(Q[w * 3] === qx && Q[w * 3 + 1] === qy && Q[w * 3 + 2] === qz) { r = w; break; } if(r === v) list.push(v); }
+            else buckets.set(h, [v]);
+            rep[v] = r;
+        }
+        // smooth faces per position (compressed rows)
+        let count = new Int32Array(nv + 1);
+        for(let t = 0; t < numTris; t++) if(smoothFace[t]) for(let k = 0; k < 3; k++) count[rep[indices[t * 3 + k]] + 1]++;
+        for(let v = 0; v < nv; v++) count[v + 1] += count[v];
+        faceStart = count; faceList = new Int32Array(count[nv]);
+        let fill = count.slice(0, nv);
+        for(let t = 0; t < numTris; t++) if(smoothFace[t]) for(let k = 0; k < 3; k++) faceList[fill[rep[indices[t * 3 + k]]]++] = t;
     }
     let nrm = new Float32Array(numTris * 9);
     let pos = new Float32Array(numTris * 9);
@@ -84,9 +104,8 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
             col[o] = color.r; col[o + 1] = color.g; col[o + 2] = color.b;
             let nx = faceN[t * 3], ny = faceN[t * 3 + 1], nz = faceN[t * 3 + 2];
             if(smoothFace[t]) {
-                let list = byPos.get(positions[v * 3].toFixed(4) + ',' + positions[v * 3 + 1].toFixed(4) + ',' + positions[v * 3 + 2].toFixed(4));
-                let sx = 0, sy = 0, sz = 0;
-                for(let f of list) { let fx = faceN[f * 3], fy = faceN[f * 3 + 1], fz = faceN[f * 3 + 2]; if(fx * nx + fy * ny + fz * nz >= SMOOTH_ANGLE) { sx += fx; sy += fy; sz += fz; } }
+                let r = rep[v], sx = 0, sy = 0, sz = 0;
+                for(let j = faceStart[r], e = faceStart[r + 1]; j < e; j++) { let f = faceList[j], fx = faceN[f * 3], fy = faceN[f * 3 + 1], fz = faceN[f * 3 + 2]; if(fx * nx + fy * ny + fz * nz >= SMOOTH_ANGLE) { sx += fx; sy += fy; sz += fz; } }
                 let l = Math.hypot(sx, sy, sz); if(l > 1e-6) { nx = sx / l; ny = sy / l; nz = sz / l; }
             }
             nrm[o] = nx; nrm[o + 1] = ny; nrm[o + 2] = nz;

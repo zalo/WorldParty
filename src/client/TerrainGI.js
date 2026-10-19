@@ -25,7 +25,7 @@
  *  4096 on mobile); `?tridebug=7` shows the gathered light unlit, `?tridebug=8` the weight. */
 import * as THREE from 'three/webgpu';
 import { Fn, If, instanceIndex, storage, uniform, attribute, varying, vec3, vec4, float, uint, min, max, select } from 'three/tsl';
-import { BVHComputeData, rayStruct, rayIntersectionResultStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { BVHComputeData, rayStruct, rayIntersectionResultStruct, bvhNodeStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { GI_DEFAULTS, OP_INIT, NO_RECORD } from './giCore.js';
 import { GIHost } from './giHost.js';
 import { G } from '../sky/Globals.js';
@@ -77,12 +77,12 @@ export class TerrainGI {
         this.opCount = uniform(0, 'uint');
         this.maxSamples = uniform(this.p.maxSamples);
         this.giScale = uniform(10);
-        // the BVH: a proxy mesh per chunk sharing the collision geometry (and its BVH), not in the scene
-        this.proxies = new Map();     // key -> Mesh
+        // the packed BVH: built by the worker (giHost.pack); this instance only provides the traversal functions, whose
+        // storage proxies are pointed at the buffers the worker sends (applyBVH)
         this.bvh = new BVHComputeData([], { attributes: { position: 'vec4f', surface: 'vec4f' } });
-        this.bvhDirty = false; this.bvhAt = 0; this.bvhReady = false; this.bvhEpoch = 0;
-        this.pendingReady = new Set(); // chunks the packed BVH does not have yet
-        this.pending = new Map();     // key -> { geometry, alb } sent to the worker, waiting for its refined mesh
+        this.attributeStruct = new THREE.StructTypeNode({ position: 'vec4f', surface: 'vec4f' }, 'bvh_GeometryStruct');
+        this.bvhReady = false; this.bvhEpoch = 0;
+        this.giFallback = uniform(new THREE.Vector3());      // without probes: what an unsampled vertex stands in with
         this.classes = new Map();     // "r,g,b,slot,tile" -> material class (render vertices of different classes are not shared)
         this.classList = [];
         this.work = null;             // the worker's latest work package, not yet dispatched
@@ -121,7 +121,7 @@ export class TerrainGI {
         this.toHost = (m) => host.handle(m);
         this.stats.worker = false;
         host.handle(init);
-        if(replay) { this.pending.clear(); this.asked = false; for(let [key, mesh] of this.terrain.objects) this.onGeometry(key, mesh.geometry); }
+        if(replay) { this.asked = false; for(let [key, mesh] of this.terrain.objects) this.onGeometry(key, mesh.geometry); }
     }
 
     // ---- shaders --------------------------------------------------------------------
@@ -305,7 +305,7 @@ export class TerrainGI {
             if(m.tridebug === 7) m.colorNode = giNode.xyz.mul(giNode.w).add(glowNode).mul(this.giScale).mul(0.25 / Math.PI);
             else if(m.tridebug === 8) m.colorNode = vec3(giNode.w);
             else if(m.tridebug >= 6) continue;
-            else { m.giNode = giNode; m.glowNode = glowNode; m.giScale = this.giScale; }
+            else { m.giNode = giNode; m.glowNode = glowNode; m.giScale = this.giScale; m.giFallback = this.giFallback; }
             m.needsUpdate = true;
         }
     }
@@ -313,7 +313,9 @@ export class TerrainGI {
     // ---- chunks -----------------------------------------------------------------------
 
     classOf(r, g, b, slot, tile) {
-        let key = `${r.toFixed(3)},${g.toFixed(3)},${b.toFixed(3)},${slot},${tile}`;
+        // a number, not a string (this runs per triangle of every chunk a carve touches): colour at 1/1000, the layer,
+        // and the tiling at 1/1000 (a few metres per tile at most)
+        let key = ((((Math.round(r * 1000) * 1024 + Math.round(g * 1000)) * 1024 + Math.round(b * 1000)) * 256 + (slot + 1)) * 4096) + Math.round(tile * 1000);
         let k = this.classes.get(key);
         if(k === undefined) { k = this.classList.length; this.classes.set(key, k); this.classList.push([r, g, b, slot, tile]); }
         return k;
@@ -322,9 +324,7 @@ export class TerrainGI {
     /** A chunk's collision geometry changed (or went): the worker refines it (onHost 'chunk' brings the render mesh and
      *  each coarse corner's record, which go to TerrainMirror and into the BVH's `surface` attribute). */
     onGeometry(key, geometry) {
-        if(this.proxies.delete(key)) this.bvhDirty = true;
-        this.pendingReady.delete(key);
-        if(!geometry) { this.pending.delete(key); this.toHost({ t: 'remove', key }); return; }
+        if(!geometry) { this.toHost({ t: 'remove', key }); return; }
         let A = geometry.attributes, I = geometry.index.array, nt = geometry.index.count / 3;
         let P = A.position.array, Nn = A.normal.array, U = A.uv ? A.uv.array : null, Cc = A.color.array, S = A.slot.array, T = A.tile.array;
         let pos = new Float32Array(nt * 9), nrm = new Float32Array(nt * 9), uv = U ? new Float32Array(nt * 6) : null, cls = new Uint16Array(nt), alb = new Float32Array(nt * 3);
@@ -342,9 +342,8 @@ export class TerrainGI {
         }
         let skip = this.hiddenOnPlanes(key, pos, nrm, nt);
         let carved = this.terrain.changing && this.terrain.changing.key === key ? this.terrain.changing.box : null;
-        this.pending.set(key, { geometry, alb });
-        let msg = { t: 'chunk', key, version: geometry.uuid, pos, nrm, uv, cls, skip, carved: carved ? { min: carved.min.clone(), max: carved.max.clone() } : null };
-        this.toHost(msg, [pos.buffer, nrm.buffer, cls.buffer, skip.buffer].concat(uv ? [uv.buffer] : []));
+        let msg = { t: 'chunk', key, version: geometry.uuid, pos, nrm, uv, cls, skip, alb, carved: carved ? { min: carved.min.clone(), max: carved.max.clone() } : null };
+        this.toHost(msg, [pos.buffer, nrm.buffer, cls.buffer, skip.buffer, alb.buffer].concat(uv ? [uv.buffer] : []));
     }
 
     /** The worker's messages. Record uploads (new records' positions, init and knock ops) come first, always. */
@@ -355,31 +354,42 @@ export class TerrainGI {
         }
         if(m.ops) this.runOps(m.ops);
         if(m.t === 'chunk') this.onChunk(m);
+        else if(m.t === 'bvh') this.applyBVH(m);
         else if(m.t === 'work') { this.work = m; this.asked = false; if(m.stats) this.hostStats = m.stats; }
     }
 
-    /** A refined mesh: to TerrainMirror (if it is still of the chunk's current geometry), and the first one for a
-     *  geometry also puts that geometry in the BVH with its corners' records and albedo. */
+    /** A refined mesh: to TerrainMirror, if it is still of the chunk's current geometry. */
     onChunk(m) {
         let mesh = this.terrain.objects.get(m.key);
-        if(!mesh || mesh.geometry.uuid !== m.version) return; // replaced since
-        this.pushRender(m, mesh.geometry);
-        let p = this.pending.get(m.key);
-        if(!p || p.geometry !== mesh.geometry) return;        // an adaptive pass: same coarse geometry and corner records
-        this.pending.delete(m.key);
-        let geometry = p.geometry, I = geometry.index.array, nt = geometry.index.count / 3, alb = p.alb;
-        let surface = new Float32Array(geometry.attributes.position.count * 4);
-        for(let t = 0; t < nt; t++) for(let k = 0; k < 3; k++) {
-            let v = I[t * 3 + k];
-            surface[v * 4] = m.coarseRec[t * 3 + k];
-            surface[v * 4 + 1] = alb[t * 3]; surface[v * 4 + 2] = alb[t * 3 + 1]; surface[v * 4 + 3] = alb[t * 3 + 2];
+        if(mesh && mesh.geometry.uuid === m.version) this.pushRender(m, mesh.geometry);
+    }
+
+    /** The worker's packed BVH. Its buffers are written into the ones the passes already bind when they fit (they are
+     *  allocated with half again as much room, and the traversal only reads what the nodes point at), so a dig does not
+     *  rebuild the passes: building them again (three's node building, even though the pipeline comes from the cache)
+     *  cost ~14 ms on a 4x-throttled CPU, once a second while digging. When one does not fit, new buffers go behind the
+     *  traversal functions' proxies (as BVHComputeData.update would set them) and the passes are rebuilt. */
+    applyBVH(m) {
+        let t0 = performance.now(), B = this.bvh, S = THREE.StorageBufferAttribute;
+        let parts = [['nodes', m.nodes], ['transforms', m.transforms], ['index', m.index], ['attributes', m.attributes]];
+        let fits = this.bvhAttrs && parts.every(([k, a]) => a.length <= this.bvhAttrs[k].array.length);
+        if(fits) {
+            for(let [k, a] of parts) { let at = this.bvhAttrs[k]; at.array.set(a); at.clearUpdateRanges(); at.addUpdateRange(0, a.length); at.needsUpdate = true; }
+        } else {
+            let room = (a, item) => { let n = Math.ceil(a.length * 1.5 / item) * item, b = new a.constructor(n); b.set(a); return b; };
+            let stride = this.attributeStruct.getLength();
+            this.bvhAttrs = { nodes: new S(room(m.nodes, 8), 1), transforms: new S(room(m.transforms, 1), 1), index: new S(room(m.index, 3), 1), attributes: new S(room(m.attributes, stride), stride) };
+            B.dispose();
+            B.storage.nodes = storage(this.bvhAttrs.nodes, bvhNodeStruct).toReadOnly().setName('bvh_nodes');
+            B.storage.transforms = storage(this.bvhAttrs.transforms, B.structs.transform).toReadOnly().setName('bvh_transforms');
+            B.storage.index = storage(this.bvhAttrs.index, 'uint').toReadOnly().setName('bvh_index');
+            B.storage.attributes = storage(this.bvhAttrs.attributes, this.attributeStruct).toReadOnly().setName('bvh_attributes');
+            B.structs.attributes = this.attributeStruct;
+            this.buildGather();
+            this.stats.bvhRebuilds = (this.stats.bvhRebuilds || 0) + 1;
         }
-        geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 4));
-        let proxy = new THREE.Mesh(geometry);
-        proxy.updateMatrixWorld();
-        this.proxies.set(m.key, proxy);
-        this.pendingReady.add(m.key);
-        this.bvhDirty = true;
+        this.bvhReady = true; this.bvhEpoch++;
+        this.stats.bvhUpdates++; this.stats.bvhMs = performance.now() - t0;
     }
 
     runOps(ops) {
@@ -484,26 +494,14 @@ export class TerrainGI {
         let irr = G.skyIrradiance.value, hz = G.horizonColor.value;
         this.setLighting([d.x, d.y, d.z], [sun.color.r * k, sun.color.g * k, sun.color.b * k], [irr.r, irr.g, irr.b], [hz.r, hz.g, hz.b]);
         this.giScale.value = world.probes ? world.probes.ambient : 10;
+        // with no probe grid (phones), an unsampled vertex stands in with half the open sky instead of the probes
+        if(world.probes) this.giFallback.value.set(0, 0, 0); else this.giFallback.value.copy(this.uE0.value);
         this.update(world.camera);
     }
 
     update(camera) {
         if(this.renderer.initialized === false) return;
         let now = performance.now();
-        // the packed BVH, at most once a second, once the chunks arriving in a burst have settled
-        if(this.bvhDirty && this.proxies.size && now - this.bvhAt > 1000) {
-            let t0 = performance.now();
-            this.bvh.objects = [...this.proxies.values()];
-            try {
-                this.bvh.update();
-                this.buildGather();
-                this.bvhReady = true; this.bvhEpoch++;
-                this.toHost({ t: 'ready', keys: [...this.pendingReady] });
-                this.pendingReady.clear();
-            } catch(e) { console.warn('TerrainGI: BVH update failed: ' + e.message); }
-            this.bvhDirty = false; this.bvhAt = now;
-            this.stats.bvhUpdates++; this.stats.bvhMs = performance.now() - t0;
-        }
         // the worker's latest work package: crystal buffer writes, the glow pass, the rays
         let w = this.work;
         if(w && this.bvhReady) {
@@ -565,5 +563,5 @@ export class TerrainGI {
         this.terrain.setRenderGeometry(ch.key, g, coarse);
     }
 
-    info() { return { ...this.hostStats, ...this.stats, bvhChunks: this.proxies.size, pending: this.pending.size }; }
+    info() { return { ...this.hostStats, ...this.stats }; }
 }
