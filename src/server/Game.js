@@ -466,7 +466,6 @@ export class Game {
         this.fadeSystem(now);
         this.rocks.scan();
         if(++this.scoreTick % 15 === 0) this.updateScores();
-        if(this.scoreTick % 30 === 0) this.rocks.trimFree();
         this.matchSystem(dt, now, players);
         this.voteSystem(now);
     }

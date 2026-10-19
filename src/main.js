@@ -194,6 +194,13 @@ export default class Main {
         this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);
+        this.chunkListeners = [];   // (key, box) => void after a chunk's content changed: the probe grid, the glow volume
+        // box: what changed (a carve's region), clipped to the chunk; the whole chunk when there is nothing to compare with
+        this.terrain.onChunkChanged = (key, box) => {
+            let region = box ? box.clone().intersect(this.terrain.bbox(key)) : this.terrain.bbox(key);
+            if(region.isEmpty()) region = this.terrain.bbox(key);
+            for(let fn of this.chunkListeners) fn(key, region);
+        };
         this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk)
         this.onWorldChanged(this.terrain.world);
     }
@@ -240,7 +247,14 @@ export default class Main {
         probes.occluders = this.terrain.group; // chunk meshes with BVHs: probes that land inside rock bake from the nearest air
         let band = this.probeBounds(this.terrain.world);
         if(band) probes.setBounds(...band);
-        this.terrain.onChunkChanged = (key) => probes.markDirty(this.terrain.bbox(key));
+        this.chunkListeners.push((key, region) => probes.markDirty(region));
+        for(let light of this.probeMuted || []) probes.mute.push(light);
+    }
+
+    /** A light the probe bake should not see (the glow volume: the probes would bake it in again at their 6 m). */
+    muteDuringProbeBake(light) {
+        (this.probeMuted ||= []).push(light);
+        this.probes?.mute.push(light);
     }
 
     /** Upload a world manifest written by tools/import-world.mjs to the room, in batches under the message limit. */

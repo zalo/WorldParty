@@ -7,7 +7,8 @@ import { PhysGunTool } from '../tools/PhysGunTool.js';
 import { GameHud } from './GameHud.js';
 import { Sfx } from './Sfx.js';
 import { Music } from './Music.js';
-import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, GlowRockRenderSystem, ExplosionFx, teamColorOf } from './gameSystems.js';
+import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, GlowRockRenderSystem, GlowSparkFx, ExplosionFx, teamColorOf } from './gameSystems.js';
+import { GlowLighting } from './GlowLighting.js';
 import { PROPS } from '../props/PropRegistry.js';
 import { GAME_PROPS, RESPAWN_MS, VOTE, WEAPONS } from '../game/rules.js';
 
@@ -37,7 +38,17 @@ export class GameClient {
         ecs.addSystem(new ProjectileRenderSystem(main.world.scene));
         ecs.addSystem(new SupplyRenderSystem(main.world.scene, main.world.camera, () => main.conn.id, t => this.teamColor(t)));
         ecs.addSystem(new FuseFxSystem());
-        ecs.addSystem(new GlowRockRenderSystem(main.physBodiesParent, main.world.scene, main.world.camera, () => this.config.glowRocks));
+        // the glow rocks light the tunnels through a volume texture around the camera (GlowLighting); ?glow=0 turns it off,
+        // ?glow=<intensity> tunes it. The probe bake mutes it (the probes would bake it in again at 6 m).
+        let glowParam = main.queryParams.get('glow');
+        if(glowParam !== '0') {
+            let mobile = main.isMobile();
+            this.glow = new GlowLighting(main.world.renderer, main.world.scene, main.terrain, { dims: mobile ? [64, 32, 64] : [80, 32, 80], ...(glowParam ? { intensity: parseFloat(glowParam) } : {}) });
+            main.chunkListeners.push((key, region) => this.glow.chunkChanged(region));
+            main.muteDuringProbeBake?.(this.glow.light);
+        }
+        ecs.addSystem(new GlowRockRenderSystem(main.world.scene, () => this.config.glowRocks, this.glow));
+        this.sparks = new GlowSparkFx(main.world.scene);
         ecs.on('set', (id, name, s) => {
             if(name === 'Supply' && s.state === 'carried' && s.carriedBy === main.conn.id && !this.carryingNoted) { this.carryingNoted = true; this.sfx.pickup(); this.hud.flashText('Supply grabbed! Get it to your vault', 2000); }
             if(name === 'Supply' && s.state !== 'carried' && s.carriedBy !== main.conn.id) this.carryingNoted = false;
@@ -123,6 +134,14 @@ export class GameClient {
                 this.hud.damageFlash();
                 this.sfx.hurt(data.damage);
                 return true;
+            case 'glowpop': {
+                // glow rocks dug all the way out: they shatter where they were
+                if(!Array.isArray(data.rocks) || !data.rocks.length) return true;
+                this.sparks.spawn(data.rocks);
+                let [x, y, z] = data.rocks[0];
+                this.sfx.crystal(data.rocks.length, new THREE.Vector3(x, y, z));
+                return true;
+            }
             case 'explosion': {
                 let p = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
                 this.fx.spawn(p, data.radius, data.kind);
@@ -175,6 +194,8 @@ export class GameClient {
     update(dt) {
         let main = this.main, me = this.me;
         this.fx.update(dt);
+        this.sparks.update(dt);
+        this.glow?.update(main.world.camera);
         if(me) {
             if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; this.carryingNoted = false; for(let t of this.tools) if(t.release) t.release(main); this.sfx.drillLoop(false); this.sfx.reel(false); }
             if(!me.dead && this.wasDead) { main.player.frozen = false; main.player.spectate = null; this.hud.spectating = ''; this.hud.killedBy = ''; }

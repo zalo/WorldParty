@@ -55,11 +55,25 @@ export class ProbeLighting {
 
     // LightProbeGrid bakes into render targets one row (or one slice) per probe, so the probe count
     // must stay under the device's 2D texture limit (8192 on most adapters) with room to spare.
-    /** `ambient` scales the probe light and the sky's image based light. Measured against the sun, this sky's
-     *  zenith is about half as bright as a real one, and a walled courtyard floor sees only the zenith cone, so
-     *  physically its shade sat near 1:80 of the sunlit cobbles next to it (a linear render has no eye to adapt);
-     *  a game reads well near 1:5, which is what this multiplier buys (with the exposure in World.js). */
-    constructor(renderer, scene, { spacing = 6, maxProbes = 4000, perFrame = 8, cubemapSize = 8, ambient = 7 } = {}) {
+    /** `ambient` scales the probe light. Measured against the sun, this sky's zenith is about half as bright as a real
+     *  one, and a walled courtyard floor sees only the zenith cone, so physically its shade sat near 1:80 of the sunlit
+     *  cobbles next to it (a linear render has no eye to adapt); the multiplier lifts the shade toward what a game reads.
+     *
+     *  What the probes see decides whether they mean anything: a capture renders the scene with the sky's image based
+     *  light on every surface, and that light knows nothing about occlusion, so at the old 7x a probe in the vault saw
+     *  walls lit like the courtyard and handed that back to the vault (the vault looked like daylight and the probes
+     *  looked like nothing). Captures now use `bakeEnvironment` (a little sky light on surfaces: the first bounce of the
+     *  shaded ground outdoors, nearly nothing indoors) while the probes see the sky itself and the sunlit surfaces in
+     *  full, so the occlusion is in the probes. Once they are baked the scene's own image based light drops to
+     *  `environmentFloor`, a specular sheen and a minimum in unlit corners; before that it stands in at `environmentUnbaked`.
+     *  `?ambient=`, `?envfloor=` and `?bakeenv=` override the three for tuning. */
+    constructor(renderer, scene, { spacing = 6, maxProbes = 4000, perFrame = 8, cubemapSize = 8, ambient = 10, bakeEnvironment = 0.35, environmentFloor = 0.2, environmentUnbaked = 2.5 } = {}) {
+        let q = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+        let num = (k, d) => q.has(k) && Number.isFinite(parseFloat(q.get(k))) ? parseFloat(q.get(k)) : d;
+        ambient = num('ambient', ambient); environmentFloor = num('envfloor', environmentFloor); bakeEnvironment = num('bakeenv', bakeEnvironment);
+        this.bakeEnvironment = bakeEnvironment;
+        this.environmentFloor = environmentFloor;
+        this.environmentUnbaked = environmentUnbaked;
         this.renderer = renderer;
         this.scene = scene;
         this.spacing = spacing;   // requested lattice step (metres); `step` is the one in use (coarser if the cap binds)
@@ -78,6 +92,7 @@ export class ProbeLighting {
         this.requested = null;            // the box last asked for (before lattice alignment)
         this.occluders = null;            // Group of closed meshes with BVHs (the terrain chunks) for the inside-solid test
         this.relocated = new Map();       // probe index -> position baked from instead (inside solid) or null (in air)
+        this.mute = [];                   // lights switched off while baking (the glow volume)
         // our sampling node for the grid (LightProbeGrid.bake registers three's only if none is there yet)
         if(renderer.library.getLightNodeClass(LightProbeGrid) === null) renderer.library.addLight(ProbeGridNode, LightProbeGrid);
     }
@@ -204,16 +219,18 @@ export class ProbeLighting {
     /** Probe linear index as LightProbeGrid orders them: ix + iz * nx + iy * nx * nz. */
     index(ix, iy, iz) { let r = this.grid.resolution; return ix + iz * r.x + iy * r.x * r.z; }
 
-    /** Mark every probe whose cell overlaps `box` (world units) for rebaking. */
+    /** Mark the probes around `box` (world units: what a carve changed, see TerrainMirror's changedBox) for rebaking:
+     *  the corners of every cell it overlaps, 8 to 27 for a drill bite. (It was a step beyond the whole chunk, ~125
+     *  probes per bite, each six renders of the scene, which a held drill never let the bake catch up with.) */
     markDirty(box) {
         if(!this.grid || this.disabled) return;
-        let r = this.grid.resolution, step = this.step;
-        let lo = [box.min.x, box.min.y, box.min.z], hi = [box.max.x, box.max.y, box.max.z];
+        let r = this.grid.resolution, step = this.step, m = 0;
+        let lo = [box.min.x - m, box.min.y - m, box.min.z - m], hi = [box.max.x + m, box.max.y + m, box.max.z + m];
         let mn = [this.min.x, this.min.y, this.min.z], res = [r.x, r.y, r.z];
         let i0 = [], i1 = [];
         for(let a = 0; a < 3; a++) {
-            i0[a] = Math.max(0, Math.floor((lo[a] - mn[a]) / step) - 1);
-            i1[a] = Math.min(res[a] - 1, Math.ceil((hi[a] - mn[a]) / step) + 1);
+            i0[a] = Math.max(0, Math.floor((lo[a] - mn[a]) / step));
+            i1[a] = Math.min(res[a] - 1, Math.ceil((hi[a] - mn[a]) / step));
         }
         for(let iy = i0[1]; iy <= i1[1]; iy++) for(let iz = i0[2]; iz <= i1[2]; iz++) for(let ix = i0[0]; ix <= i1[0]; ix++) {
             let i = this.index(ix, iy, iz);
@@ -261,15 +278,22 @@ export class ProbeLighting {
             let last = runs[runs.length - 1];
             if(last && last.start + last.count === i) last.count++; else runs.push({ start: i, count: 1 });
         }
+        let muted = this.mute.map(l => l.intensity), env = this.scene.environmentIntensity;
         try {
             let t0 = performance.now();
+            for(let l of this.mute) l.intensity = 0;
+            this.scene.environmentIntensity = this.bakeEnvironment;
             for(let r of runs) this.grid.bake(this.renderer, this.scene, { start: r.start, count: r.count, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
+            this.mute.forEach((l, i) => l.intensity = muted[i]);
+            this.scene.environmentIntensity = env;
             this.bakedOnce = true;
             this.failures = 0;
             this.lastBakeMs = performance.now() - t0;
             this.bakedTotal = (this.bakedTotal || 0) + take.length;
             if(this.lastBakeMs > 50) console.log(`probe bake: ${take.length} probes in ${this.lastBakeMs.toFixed(0)} ms (${this.dirty.size} left, now ${this.perFrame}/frame)`);
         } catch(e) {
+            this.mute.forEach((l, i) => l.intensity = muted[i]);
+            this.scene.environmentIntensity = env;
             for(let i of take) this.dirty.add(i);
             this.failures++;
             this.pauseUntil = performance.now() + 2000 * this.failures;
@@ -278,10 +302,10 @@ export class ProbeLighting {
         }
     }
 
-    /** How much of the sky's image based light the scene should use: all of it (times `ambient`) until the
-     *  probes carry the diffuse sky light themselves, then a quarter, so that it is not counted twice but
-     *  interiors, which the unoccluded environment map lights everywhere, keep a floor instead of going black. */
-    environmentIntensity() { return this.ambient * (1 - 0.75 * this.bakedFraction()); }
+    /** How much of the sky's image based light the scene should use: `environmentUnbaked` until the probes carry the
+     *  diffuse sky light themselves, then only `environmentFloor` (it lights every surface alike, the vault as much as
+     *  the plaza, so anything more washes out what the probes know about occlusion). */
+    environmentIntensity() { let f = this.bakedFraction(); return this.environmentUnbaked + (this.environmentFloor - this.environmentUnbaked) * f; }
 
     stats() { return this.grid ? { probes: this.grid.resolution.x * this.grid.resolution.y * this.grid.resolution.z, dirty: this.dirty.size, step: this.step } : null; }
 }

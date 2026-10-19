@@ -179,20 +179,18 @@ function lumpyGeometry() {
     return g;
 }
 
-/** Glow rocks: the pebbles the server materialized from the field (src/server/GlowRocks.js). Embedded ones are
- *  instances of one lumpy icosphere per colour with an emissive material, so the probe grid bakes their light into
- *  the tunnels around them (the terrain hides whatever part is still in the ground); a freed one, a body now, gets a
- *  mesh of its own so the snapshot interpolation and the player's collision treat it like any prop. A small pool of
- *  real point lights sits on the rocks nearest the camera, since every light costs every pixel. */
+/** Glow rocks: the pebbles the server materialized from the field (src/server/GlowRocks.js). They are instances of one
+ *  lumpy icosphere per colour with an emissive material (the terrain hides whatever part is still in the ground), and
+ *  each one is splatted into the glow volume (src/client/GlowLighting.js), which is what lights the tunnel around it:
+ *  every rock, not a pool of point lights on the nearest dozen. A rock dug all the way out shatters on the server; the
+ *  `glowpop` message brings the sparkle (GlowSparkFx). */
 export class GlowRockRenderSystem {
-    constructor(parent, scene, camera, fieldFn) {
-        this.parent = parent; this.scene = scene; this.camera = camera; this.fieldFn = fieldFn;
+    constructor(scene, fieldFn, glow = null) {
+        this.scene = scene; this.fieldFn = fieldFn; this.glow = glow;
         this.geometry = lumpyGeometry();
         this.materials = GLOW_ROCK.colors.map(c => new THREE.MeshStandardNodeMaterial({ color: new THREE.Color(c).multiplyScalar(0.3), emissive: new THREE.Color(c), emissiveIntensity: GLOW_ROCK.emissive, roughness: 0.35, metalness: 0 }));
+        this.colors = GLOW_ROCK.colors.map(c => new THREE.Color(c)); // linear
         this.groups = GLOW_ROCK.colors.map((_, i) => this.makeGroup(i, 256));
-        this.lights = Array.from({ length: GLOW_ROCK.light.count }, () => { let l = new THREE.PointLight(0xffffff, 0, GLOW_ROCK.light.distance, GLOW_ROCK.light.decay); scene.add(l); return l; });
-        this.colorOf = new Map(); // entity id -> colour index
-        this.frame = 0;
         this.tmp = new THREE.Matrix4(); this.pos = new THREE.Vector3(); this.quat = new THREE.Quaternion(); this.scl = new THREE.Vector3();
     }
     makeGroup(color, capacity) {
@@ -206,10 +204,15 @@ export class GlowRockRenderSystem {
         this.world = world;
         world.on('remove', (id, name, data) => {
             if(name === '$GlowInst') this.release(data);
-            else if(name === 'GlowRock') this.colorOf.delete(id);
+            else if(name === 'GlowRock') this.glow?.removeRock(id);
         });
-        // freed: out of the instances; the next update gives it a mesh of its own
-        world.on('set', (id, name, g) => { if(name === 'GlowRock' && g.free && world.has(id, '$GlowInst')) world.remove(id, '$GlowInst'); });
+        // exposure changed: the light follows (a rock barely out of the wall barely lights it)
+        world.on('set', (id, name, g) => { if(name === 'GlowRock' && world.has(id, '$GlowInst')) this.light(id, world.get(id, '$GlowInst'), g); });
+    }
+    /** Splat (or re-splat) a rock into the glow volume. */
+    light(id, inst, g) {
+        if(!this.glow || !inst) return;
+        this.glow.setRock(id, inst.x, inst.y, inst.z, inst.radius, this.colors[inst.color], g.free ? 0 : 0.35 + 0.65 * g.exposure);
     }
     /** Take an instance out of its group: the last one moves into its slot. */
     release(inst) {
@@ -233,49 +236,58 @@ export class GlowRockRenderSystem {
     update(world) {
         let field = this.fieldFn();
         if(field) for(let [id, g, tf] of world.each('GlowRock', 'Transform')) {
-            if(world.has(id, '$GlowInst') || world.has(id, '$Mesh')) continue;
+            if(world.has(id, '$GlowInst') || g.free) continue; // free: a body from before rocks shattered (the server removes those)
             let [i, j, k] = g.cell.split(',').map(Number), rock = virtualRock(field, i, j, k);
             if(!rock) continue;
-            this.colorOf.set(id, rock.color);
             this.pos.set(tf.position.x, tf.position.y, tf.position.z); this.quat.set(tf.quaternion.x, tf.quaternion.y, tf.quaternion.z, tf.quaternion.w);
-            if(g.free) {
-                let mesh = new THREE.Mesh(this.geometry, this.materials[rock.color]);
-                mesh.position.copy(this.pos); mesh.quaternion.copy(this.quat); mesh.scale.set(rock.radius, rock.radius * GLOW_ROCK.elongation, rock.radius);
-                mesh.userData.sharedGeometry = true; mesh.userData.entityId = id; mesh.userData.halfExtent = rock.radius; mesh.userData.collisionBVH = this.geometry.boundsTree;
-                this.parent.add(mesh);
-                world.add(id, '$Mesh', { object: mesh });
-                world.remove(id, '$Snapshot');
-                continue;
-            }
             let grp = this.groups[rock.color];
             if(grp.ids.length === grp.capacity) { this.grow(rock.color); grp = this.groups[rock.color]; }
             this.tmp.compose(this.pos, this.quat, this.scl.set(rock.radius, rock.radius * GLOW_ROCK.elongation, rock.radius));
             let index = grp.ids.length;
             grp.mesh.setMatrixAt(index, this.tmp); grp.ids.push(id); grp.mesh.count = index + 1; grp.mesh.instanceMatrix.needsUpdate = true;
-            world.add(id, '$GlowInst', { color: rock.color, index });
+            let inst = { color: rock.color, index, x: rock.x, y: rock.y, z: rock.z, radius: rock.radius };
+            world.add(id, '$GlowInst', inst);
+            this.light(id, inst, g);
         }
-        if(++this.frame % 6 === 0) this.assignLights(world);
-        else for(let l of this.lights) { let o = l.userData.follow; if(o) l.position.copy(o.position); } // a rolling rock carries its light
     }
-    /** The pool of lights goes to the nearest rocks that show (exposure scales the light: a rock barely out of the wall
-     *  barely lights it). */
-    assignLights(world) {
-        let cam = this.camera.position, reach = (GLOW_ROCK.light.distance * 2) ** 2, cands = [];
-        for(let [id, g, tf] of world.each('GlowRock', 'Transform')) {
-            if(g.exposure <= 0) continue;
-            let o = world.get(id, '$Mesh')?.object, p = o ? o.position : tf.position;
-            let d = (p.x - cam.x) ** 2 + (p.y - cam.y) ** 2 + (p.z - cam.z) ** 2;
-            if(d < reach) cands.push({ d, p, o, g, id });
+}
+
+/** Shattered glow rocks: a burst of tiny shards in the rock's colour, all in one instanced mesh. */
+export class GlowSparkFx {
+    constructor(scene, capacity = 384) {
+        this.capacity = capacity;
+        let geometry = new THREE.OctahedronGeometry(1, 0);
+        this.mesh = new THREE.InstancedMesh(geometry, new THREE.MeshBasicMaterial({ color: 0xffffff }), capacity);
+        this.mesh.count = 0; this.mesh.frustumCulled = false;
+        this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.mesh.setColorAt(0, new THREE.Color(1, 1, 1));
+        scene.add(this.mesh);
+        this.sparks = [];
+        this.colors = GLOW_ROCK.colors.map(c => new THREE.Color(c).multiplyScalar(2.2)); // brighter than the rock: it is the glow coming out
+        this.m = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3(); this.e = new THREE.Euler();
+    }
+    /** rocks: [[x, y, z, colour index], ...] */
+    spawn(rocks) {
+        for(let [x, y, z, c] of rocks) for(let n = 0; n < 7 && this.sparks.length < this.capacity; n++) {
+            let v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.3, Math.random() - 0.5).normalize().multiplyScalar(2 + Math.random() * 3);
+            this.sparks.push({ p: new THREE.Vector3(x, y, z), v, t: 0, life: 0.35 + Math.random() * 0.35, size: 0.025 + Math.random() * 0.03, c: this.colors[c] || this.colors[0], spin: Math.random() * 6 });
         }
-        cands.sort((a, b) => a.d - b.d);
-        this.lights.forEach((l, i) => {
-            let c = cands[i];
-            if(!c) { l.intensity = 0; l.userData.follow = null; return; }
-            l.color.set(GLOW_ROCK.colors[this.colorOf.get(c.id) ?? 0]);
-            l.intensity = GLOW_ROCK.light.intensity * (c.g.free ? 1 : 0.35 + 0.65 * c.g.exposure);
-            l.position.copy(c.p);
-            l.userData.follow = c.o || null;
-        });
+    }
+    update(dt) {
+        if(!this.sparks.length && !this.mesh.count) return;
+        this.sparks = this.sparks.filter(s => (s.t += dt) < s.life);
+        let i = 0;
+        for(let s of this.sparks) {
+            s.v.y -= 9 * dt; s.p.addScaledVector(s.v, dt);
+            let k = 1 - s.t / s.life;
+            this.q.setFromEuler(this.e.set(s.spin * s.t, s.spin * s.t * 0.7, 0));
+            this.m.compose(s.p, this.q, this.s.setScalar(s.size * k));
+            this.mesh.setMatrixAt(i, this.m); this.mesh.setColorAt(i, s.c);
+            i++;
+        }
+        this.mesh.count = i;
+        this.mesh.instanceMatrix.needsUpdate = true;
+        if(this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
     }
 }
 

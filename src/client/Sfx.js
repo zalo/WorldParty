@@ -231,6 +231,13 @@ export const SOUNDS = {
         s.tone(at, 85 * r, { dur: 0.15, gain: 0.35, freqEnd: 38, out });
         for(let i = 0; i < 4; i++) s.noise(at + 0.02 + Math.random() * 0.22, { dur: rnd(0.015, 0.035), gain: 0.16, type: 'bandpass', freq: rnd(700, 2600), q: 3, attack: 0.001, out });
     },
+    /** A glow rock dug out: it shatters with a glassy tinkle (high bell partials in D, a breath of sparkle noise). */
+    crystal(s, { at = s.now, count = 1, distance = 0, pan = 0 } = {}) {
+        let out = s.bus({ send: 0.35, pan, lowpass: distance > 12 ? 4000 : 0 }), g = clamp(0.2 / (1 + distance / 8), 0.02, 0.2);
+        let notes = [86, 90, 93, 98, 102], n = Math.min(4, 1 + Math.ceil(count / 2));
+        for(let i = 0; i < n; i++) s.bell(at + i * rnd(0.025, 0.05), midiHz(notes[Math.floor(Math.random() * notes.length)]), { dur: rnd(0.2, 0.35), gain: g * rnd(0.6, 1), bright: 1.4, out });
+        s.noise(at, { dur: 0.08, gain: g * 0.5, type: 'highpass', freq: 5000, attack: 0.001, out });
+    },
     /** Mason: a stone block set down; `size` is the cube root of its volume (wall 1.8, block 2, plank 1.3, pillar 1.6). */
     build(s, { at = s.now, size = 1.6 } = {}) {
         let r = rnd(0.93, 1.07), k = clamp(size / 1.6, 0.7, 1.4), out = s.bus({ send: 0.25 });
@@ -482,6 +489,7 @@ export class Sfx {
     votePass() { this.play('votePass'); }
     click() { this.play('click'); }
     beep(near) { this.play('beep', { near }); }
+    crystal(count, pos) { let sp = this.spatial(pos); if(sp.distance < 30) this.play('crystal', { count, ...sp }); }
     rubble(count, pos) { this.play('rubble', { count, ...this.spatial(pos) }); }
     land(speed) { this.play('land', { speed }); }
     step() { this.play('step'); }

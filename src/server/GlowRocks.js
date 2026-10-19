@@ -8,15 +8,17 @@
  *  A rock whose exposure (the fraction of its sample points in air) is between 0 and 1 becomes an embedded, static
  *  entity: CSG never touches it, it is not terrain. Only where the air it meets has a ceiling: a ray straight up from
  *  the exposed side that escapes to the sky (the gorge walls, a crater, a shaft) means no rock, so they belong to the
- *  tunnels, the vaults, the sewers and the pockets. One that nothing holds any more (`freeAt`) gets a sphere RigidBody
- *  and PhysX takes it from there. A rock found entirely in air that was not in solid before the carve never existed.
+ *  tunnels, the vaults, the sewers and the pockets. One that nothing holds any more (`freeAt`) shatters: the entity goes
+ *  and the clients get a `glowpop` (a sparkle and a tinkle where it was). They used to become sphere bodies, which
+ *  filled every fresh tunnel with a carpet of pebbles: a drill bite frees the half dozen rocks inside its sphere. A rock
+ *  found entirely in air that was not in solid before the carve never existed.
  *
  *  Point-in-solid is the parity of a ray against the chunk's own closed mesh (the solid clipped to the chunk cube), in
  *  a three-mesh-bvh BVH cached per chunk version; a closest-point query with the rock's radius as the limit skips the
  *  rocks nowhere near a surface (nearly all of them) before any sampling. Manifold is not involved. */
 import * as THREE from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import { Transform, RigidBody, GlowRock } from '../ecs/components.js';
+import { Transform, GlowRock } from '../ecs/components.js';
 import { GLOW_ROCK, virtualRock, virtualRocksIn } from '../game/rules.js';
 import { chunkAt, chunksInBox, chunkMin, chunkCenter, isRockKey, CHUNK_SIZE } from '../terrain/grid.js';
 
@@ -33,17 +35,17 @@ const DODECA = dirs([[1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1], [-1, 1, 1],
  *  surface; twenty more on the rim decide "free" when those nineteen are all out. */
 const SAMPLES = [[0, [[0, 0, 0]]], [0.5, AXES], [0.9, ICOSA]];
 const SAMPLES_RIM = [[0.98, DODECA]];
+const SHATTERED = -1;                 // byCell value of a rock that came out of the ground and shattered
 const SKY_OFFSET = 0.03;              // the sky test starts a hair beyond the sample in air (further out could be back inside the wall: pebbles are small)
 
 export class GlowRocks {
     constructor(server) {
         this.server = server;
         this.world = server.world;
-        this.byCell = new Map();    // cell -> entity id of a materialized rock (kept after the entity is gone: no rock twice)
+        this.byCell = new Map();    // cell -> entity id of a materialized rock, or SHATTERED (kept after the rock is gone: no rock twice)
         this.bvhs = new Map();      // "key@version" -> { bvh, air }, least recently used first
         this.scanned = new Map();   // chunk key -> version the lazy scan has covered
         this.cursor = null;         // { key, version, rocks } chunk the lazy scan is in
-        this.freed = [];            // ids of freed rocks, oldest first
         this.stats = { measured: 0, rays: 0, bvhBuilds: 0 };
         this.ray = new THREE.Ray();
         this.pt = new THREE.Vector3();
@@ -62,14 +64,17 @@ export class GlowRocks {
     reset() {
         for(let id of [...this.world.query('GlowRock')]) this.world.destroy(id);
         this.byCell.clear(); this.scanned.clear(); this.bvhs.clear();
-        this.cursor = null; this.freed = [];
+        this.cursor = null;
     }
 
     /** Start from the entities there are (a room starting from storage, a level just imported): the index is rebuilt,
      *  so cells whose rock went with a cleared world can grow one again, and every chunk is scanned anew. */
     adopt() {
-        this.byCell.clear(); this.scanned.clear(); this.bvhs.clear(); this.cursor = null; this.freed = [];
-        for(let [id, g] of this.world.each('GlowRock')) { this.byCell.set(g.cell, id); if(g.free) this.freed.push(id); }
+        this.byCell.clear(); this.scanned.clear(); this.bvhs.clear(); this.cursor = null;
+        for(let [id, g] of [...this.world.each('GlowRock')]) {
+            if(g.free) { this.byCell.set(g.cell, SHATTERED); this.world.destroy(id); continue; } // a body from before rocks shattered
+            this.byCell.set(g.cell, id);
+        }
     }
 
     rockOf(cell) { let [i, j, k] = cell.split(',').map(Number); return virtualRock(this.field, i, j, k); }
@@ -183,39 +188,22 @@ export class GlowRocks {
 
     // ---- entities -------------------------------------------------------------
 
-    materialize(rock, exposure, free) {
+    materialize(rock, exposure) {
         let axis = AXES[rock.axis], h = rock.spin / 2, s = Math.sin(h);
-        let comps = {
+        let id = this.world.create({
             Transform: Transform({ position: { x: rock.x, y: rock.y, z: rock.z }, quaternion: { x: axis[0] * s, y: axis[1] * s, z: axis[2] * s, w: Math.cos(h) } }),
-            GlowRock: GlowRock({ cell: rock.cell, exposure, free }),
-        };
-        if(free) comps.RigidBody = RigidBody({ shape: 'sphere', halfExtent: rock.radius, propId: 'glowrock' });
-        let id = this.world.create(comps);
+            GlowRock: GlowRock({ cell: rock.cell, exposure, free: false }),
+        });
         this.byCell.set(rock.cell, id);
-        if(free) this.freed.push(id);
         return id;
     }
 
-    /** Nothing holds the rock any more: it becomes a body where it lies. */
-    free(id, rock) {
-        let w = this.world;
-        w.set(id, 'GlowRock', { exposure: 1, free: true });
-        if(!w.has(id, 'RigidBody')) w.add(id, 'RigidBody', RigidBody({ shape: 'sphere', halfExtent: rock.radius, propId: 'glowrock' }));
-        this.freed.push(id);
+    /** Nothing holds the rock any more: it shatters (the entity goes; the cell remembers, so it never grows back). */
+    shatter(rock, id = undefined) {
+        if(id !== undefined && this.world.has(id, 'GlowRock')) this.world.destroy(id);
+        this.byCell.set(rock.cell, SHATTERED);
     }
 
-    /** Freed pebbles past the cap: the oldest sleeping ones go (a tunnel's worth of them rolling about adds up). */
-    trimFree() {
-        let w = this.world;
-        this.freed = this.freed.filter(id => w.has(id, 'GlowRock'));
-        let excess = this.freed.length - GLOW_ROCK.maxFree;
-        for(let id of [...this.freed]) {
-            if(excess <= 0) break;
-            let rb = w.get(id, 'RigidBody');
-            if(rb && !rb.sleeping) continue;
-            w.destroy(id); excess--;
-        }
-    }
 
     // ---- events ---------------------------------------------------------------
 
@@ -226,7 +214,7 @@ export class GlowRocks {
     onTerrainChanged(boxes, carved, changed) {
         if(!this.active) return null;
         let t0 = Date.now(), w = this.world, R = GLOW_ROCK.maxRadius, seen = new Set();
-        let out = { made: 0, freed: 0, updated: 0, sky: 0, ms: 0 }, positions = [];
+        let out = { made: 0, freed: 0, updated: 0, sky: 0, ms: 0 }, pops = [];
         let before = { measured: this.stats.measured, rays: this.stats.rays, bvhBuilds: this.stats.bvhBuilds };
         for(let b of boxes) {
             let min = { x: b.min.x - R, y: b.min.y - R, z: b.min.z - R }, max = { x: b.max.x + R, y: b.max.y + R, z: b.max.z + R };
@@ -235,10 +223,10 @@ export class GlowRocks {
                 seen.add(rock.cell);
                 let id = this.byCell.get(rock.cell);
                 if(id !== undefined) {
-                    let g = w.get(id, 'GlowRock');
+                    let g = id === SHATTERED ? null : w.get(id, 'GlowRock');
                     if(!g || g.free) continue;
                     let e = this.measure(rock);
-                    if(e >= GLOW_ROCK.freeAt) { this.free(id, rock); positions.push(rock); out.freed++; }
+                    if(e >= GLOW_ROCK.freeAt) { this.shatter(rock, id); pops.push(rock); out.freed++; }
                     else if(Math.abs(e - g.exposure) > 0.01) { w.set(id, 'GlowRock', { exposure: e }); out.updated++; }
                     continue;
                 }
@@ -247,8 +235,9 @@ export class GlowRocks {
                 let free = e >= GLOW_ROCK.freeAt;
                 if(free && !this.inside(rock, true)) continue; // open air before the carve too: no rock ever lay here
                 if(!this.underCeiling(rock)) { out.sky++; continue; }  // a crater, a cliff, a shaft: the rocks stay underground
-                this.materialize(rock, free ? 1 : e, free);
-                out.made++; if(free) { out.freed++; positions.push(rock); }
+                if(free) { this.shatter(rock); pops.push(rock); out.freed++; continue; } // dug out in one bite
+                this.materialize(rock, e);
+                out.made++;
             }
         }
         // The scan's bookkeeping: a chunk a brush changed is as covered as it was (the brush region was just measured);
@@ -259,7 +248,8 @@ export class GlowRocks {
             else this.scanned.delete(key);
             if(this.cursor && this.cursor.key === key) this.cursor = null;
         }
-        if(positions.length) this.server.cookAround(positions);
+        // the shattered ones sparkle on the clients: [x, y, z, colour index], a centimetre is plenty
+        if(pops.length) this.server.broadcast(JSON.stringify({ type: 'glowpop', rocks: pops.slice(0, 64).map(r => [Math.round(r.x * 100) / 100, Math.round(r.y * 100) / 100, Math.round(r.z * 100) / 100, r.color]) }));
         out.ms = Date.now() - t0;
         out.measured = this.stats.measured - before.measured; out.rays = this.stats.rays - before.rays; out.bvhBuilds = this.stats.bvhBuilds - before.bvhBuilds;
         return out;
@@ -280,7 +270,7 @@ export class GlowRocks {
             if(this.byCell.has(rock.cell)) continue;
             budget--;
             let e = this.measure(rock);
-            if(e > 0 && e < GLOW_ROCK.freeAt && this.underCeiling(rock)) this.materialize(rock, e, false);
+            if(e > 0 && e < GLOW_ROCK.freeAt && this.underCeiling(rock)) this.materialize(rock, e);
         }
     }
 

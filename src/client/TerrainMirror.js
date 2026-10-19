@@ -85,6 +85,22 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
     return geometry;
 }
 
+/** Bounds of the vertices one mesh has and the other lacks (what a carve added or took away), or null when there is
+ *  no old mesh to compare with. Listeners (the probe grid, the glow volume) redo only that much of the chunk instead
+ *  of all of it: a 1.6 m drill bite marked every probe around the whole 10 m chunk dirty. Positions are hashed at a
+ *  millimetre; a collision can only make the box a little smaller than the truth. */
+function changedBox(prev, next) {
+    if(!prev || !next) return null;
+    const hash = (P, i) => (Math.round(P[i] * 1000) * 73856093) ^ (Math.round(P[i + 1] * 1000) * 19349663) ^ (Math.round(P[i + 2] * 1000) * 83492791);
+    let box = new THREE.Box3(), seen = new Set();
+    let a = prev.positions, b = next.positions;
+    for(let i = 0; i < a.length; i += 3) seen.add(hash(a, i));
+    let mine = new Set(), v = new THREE.Vector3();
+    for(let i = 0; i < b.length; i += 3) { let h = hash(b, i); mine.add(h); if(!seen.has(h)) box.expandByPoint(v.set(b[i], b[i + 1], b[i + 2])); }
+    for(let i = 0; i < a.length; i += 3) if(!mine.has(hash(a, i))) box.expandByPoint(v.set(a[i], a[i + 1], a[i + 2]));
+    return box.isEmpty() ? null : box;
+}
+
 export class TerrainMirror {
     constructor(scene, material) {
         this.scene = scene;
@@ -99,7 +115,7 @@ export class TerrainMirror {
         this.pending = new Map();   // key -> version being fetched
         this.boxes = new Map();     // key -> Box3 (cached)
         this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
-        this.onChunkChanged = null; // (key) => void, after a chunk's content changed (not mere visibility)
+        this.onChunkChanged = null; // (key, box|null) => void, after a chunk's content changed (not mere visibility); box bounds what changed
         this.onWorldChanged = null; // (world) => void, after a new world config is adopted
         this.group = new THREE.Group();
         this.group.name = 'terrain';
@@ -159,11 +175,12 @@ export class TerrainMirror {
 
     setChunkMesh(key, mesh, version) {
         this.pending.delete(key);
+        let prev = this.meshes.get(key);
         if(mesh) this.meshes.set(key, mesh); else this.meshes.delete(key);
         this.versions.set(key, version);
         this.rockMask.delete(key);
         this.rebuild(key);
-        this.onChunkChanged?.(key);
+        this.onChunkChanged?.(key, changedBox(prev, mesh));
     }
 
     /** Drop a modified chunk we no longer need to hold. */

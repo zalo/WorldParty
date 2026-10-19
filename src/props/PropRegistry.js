@@ -20,7 +20,7 @@ export const PROPS = [
     { id: "supply",   name: "Supply",       icon: "💰",  mass: 30,  halfExtent: 0.45, shape: 'box',    url: null, color: 0xffc830, hidden: true },
     { id: "grenade",  name: "Grenade",      icon: "💣",  mass: 3,   halfExtent: 0.22, shape: 'sphere', url: null, color: 0x3d5a2a, hidden: true },
     { id: "buster",   name: "Bunker Buster", icon: "☢️", mass: 60,  halfExtent: 0.42, shape: 'sphere', url: null, color: 0x202020, hidden: true },
-    { id: "glowrock", name: "Glow Rock",    icon: "💎",  mass: 10,  halfExtent: 0.25, shape: 'sphere', url: null, color: 0xffb24a, hidden: true }, // a freed glow rock (src/server/GlowRocks.js); the client draws it itself
+    { id: "glowrock", name: "Glow Rock",    icon: "💎",  mass: 10,  halfExtent: 0.25, shape: 'sphere', url: null, color: 0xffb24a, hidden: true }, // glow rocks used to become bodies when dug out; they shatter now (src/server/GlowRocks.js). Kept so old rooms load
 ];
 
 /** @type {Record<string, typeof PROPS[0]>} */
