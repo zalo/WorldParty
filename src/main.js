@@ -191,10 +191,10 @@ export default class Main {
         let tridebug = parseInt(this.queryParams.get('tridebug') || '0') || 0;
         this.defaultMaterial = makeTerrainMaterial(this.textures.texture, 'world', tridebug);
         this.fragmentMaterial = makeTerrainMaterial(this.textures.texture, 'local', tridebug);
-        this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
+        this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial, { batching: this.queryParams.get('batch') !== '0' }); // ?batch=0: a draw per chunk
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);
-        this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk)
+        this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk, with its BVH; drawn through batches)
         this.onWorldChanged(this.terrain.world);
     }
 
@@ -351,6 +351,7 @@ export default class Main {
         }
 
         this.ecs.update(this.deltaTime / 1000.0);
+        this.terrain.update();
         this.world.update(this.deltaTime / 1000.0);
 
         this.world.renderPipeline.render();
