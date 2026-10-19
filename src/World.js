@@ -68,14 +68,24 @@ export default class World {
         // offset keeps lit surfaces off their own map (about a texel of the far cascade at grazing angles).
         this.dirLight.shadow.bias = 0;
         this.dirLight.shadow.normalBias = 0.06;
-        this.dirLight.shadow.radius = 1.5;   // texels of the 5 tap PCF disk, resolved by TRAA
+        this.dirLight.shadow.radius = 1.5;   // texels of the 5 tap PCF disk (rotated per pixel by a noise TRAA resolves; set to 1 on the direct path below)
         this.scene.add( this.dirLight );
 
-        // Mobile renders at half resolution
-        let pixelRatio = this.isMobile ? Math.max(0.5, window.devicePixelRatio * 0.25) : Math.min(1, window.devicePixelRatio);
+        // Two ways to draw a frame. Desktop: the post-processing pipeline (scene pass into MRT targets, TRAA, optional
+        // SSGI). Mobile, or ?traa=0: `renderer.render` straight to the canvas with 4x MSAA; the renderer still tone maps
+        // and converts to sRGB in its output pass (one half-float target), so the image matches minus the temporal AA.
+        // TRAA blurred a phone's already small frame, and the MRT targets (four colour attachments) plus the TRAA history
+        // are a lot of bandwidth for a tiled mobile GPU. ?direct=0|1 forces either; ?gi=1 needs the pipeline.
+        let flagsIn = mainObject.queryParams || new URLSearchParams();
+        this.direct = flagsIn.get('gi') !== '1' && (flagsIn.has('direct') ? flagsIn.get('direct') === '1' : (this.isMobile || flagsIn.get('traa') === '0'));
 
-        // WebGPU Renderer — no hardware AA since TRAA handles it
-        this.renderer = new THREE.WebGPURenderer();
+        // Pixel ratio: CSS pixels on mobile (it was a quarter of the device ratio, 0.75 on a DPR 3 phone, which with TRAA
+        // on top was most of the blur), at most the device ratio on desktop. ?dpr=<n> overrides.
+        let pixelRatio = flagsIn.has('dpr') ? parseFloat(flagsIn.get('dpr')) : (this.isMobile ? 1 : Math.min(1, window.devicePixelRatio));
+
+        // WebGPU Renderer: MSAA only on the direct path (the pipeline's TRAA does the anti-aliasing there)
+        this.renderer = new THREE.WebGPURenderer({ antialias: this.direct, trackTimestamp: flagsIn.get('gputime') === '1' }); // ?gputime=1: GPU timestamps (renderer.resolveTimestampsAsync)
+        if(this.direct) this.dirLight.shadow.radius = 1; // without TRAA the per-pixel rotation of the PCF disk shows as dither at shadow edges
         this.renderer.library.addLight( SunLightNode, SunLight );
         this.renderer.setPixelRatio( pixelRatio );
         this.renderer.shadowMap.enabled = true;
@@ -90,53 +100,8 @@ export default class World {
         window.addEventListener('resize', this._onWindowResize.bind(this), false);
         window.addEventListener('orientationchange', this._onWindowResize.bind(this), false);
 
-        // Post-processing: SSGI + TRAA via RenderPipeline
-        this.renderPipeline = new THREE.RenderPipeline( this.renderer );
-
-        const scenePass = pass( this.scene, this.camera );
-        scenePass.setMRT( mrt( {
-            output: output,
-            diffuseColor: diffuseColor,
-            normal: packNormalToRGB( normalView ),
-            velocity: velocity
-        } ) );
-
-        const scenePassColor = scenePass.getTextureNode( 'output' );
-        const scenePassDiffuse = scenePass.getTextureNode( 'diffuseColor' );
-        const scenePassDepth = scenePass.getTextureNode( 'depth' );
-        const scenePassNormal = scenePass.getTextureNode( 'normal' );
-        const scenePassVelocity = scenePass.getTextureNode( 'velocity' );
-
-        // Bandwidth optimization: use lower precision for diffuse and normals
-        const diffuseTexture = scenePass.getTexture( 'diffuseColor' );
-        diffuseTexture.type = THREE.UnsignedByteType;
-        const normalTexture = scenePass.getTexture( 'normal' );
-        normalTexture.type = THREE.UnsignedByteType;
-
-        const sceneNormal = sample( ( uv ) => {
-            return unpackRGBToNormal( scenePassNormal.sample( uv ) );
-        } );
-
-        // Toggles: ?traa=0 skips the temporal AA, ?probes=0 skips the probe grid, ?gi=1 adds screen-space GI on top.
-        // SSGI is off by default: the probe grid carries the bounce light, and the screen-space pass cost a large
-        // share of the frame for a smeary, view-dependent gain.
         let flags = mainObject.queryParams || new URLSearchParams();
-        let compositePass = scenePassColor;
-        if(flags.get('gi') === '1') {
-            this.giPass = ssgi( scenePassColor, scenePassDepth, sceneNormal, this.camera );
-            this.giPass.useTemporalFiltering = flags.get('gitemporal') !== '0';
-            this.giPass.sliceCount.value = this.isMobile ? 1 : 2;
-            this.giPass.stepCount.value = 8;
-            const gi = this.giPass.getGINode();
-            const ao = this.giPass.getAONode();
-            // Composite: direct lighting * AO + diffuse * GI
-            compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
-        }
-
-        // TRAA: temporal resolve anti-aliasing using velocity buffer
-        const traaPass = traa( compositePass, scenePassDepth, scenePassVelocity, this.camera );
-
-        this.renderPipeline.outputNode = flags.get('traa') === '0' ? compositePass : traaPass;
+        if(!this.direct) this._setupPipeline(flags);
 
         // Aerial perspective: a thin haze in the sky's horizon colour (the same radiance units as the sky, so it
         // tone maps with it), 1 - exp(-(d k)^2): 3% at 50 m, 12% at 100 m, 25% at 150 m. It separates the far
@@ -167,6 +132,62 @@ export default class World {
         this.color = new THREE.Color();
     }
 
+    /** Draw the frame: the post-processing pipeline, or straight to the canvas (see `direct`). */
+    renderFrame() {
+        if(this.direct) this.renderer.render(this.scene, this.camera);
+        else this.renderPipeline.render();
+    }
+
+    /** **INTERNAL**: the post-processing pipeline (desktop): scene pass into MRT targets, optional SSGI, TRAA. */
+    _setupPipeline(flags) {
+        // Post-processing: SSGI + TRAA via RenderPipeline
+        this.renderPipeline = new THREE.RenderPipeline( this.renderer );
+
+        const scenePass = pass( this.scene, this.camera );
+        scenePass.setMRT( mrt( {
+            output: output,
+            diffuseColor: diffuseColor,
+            normal: packNormalToRGB( normalView ),
+            velocity: velocity
+        } ) );
+
+        const scenePassColor = scenePass.getTextureNode( 'output' );
+        const scenePassDiffuse = scenePass.getTextureNode( 'diffuseColor' );
+        const scenePassDepth = scenePass.getTextureNode( 'depth' );
+        const scenePassNormal = scenePass.getTextureNode( 'normal' );
+        const scenePassVelocity = scenePass.getTextureNode( 'velocity' );
+
+        // Bandwidth optimization: use lower precision for diffuse and normals
+        const diffuseTexture = scenePass.getTexture( 'diffuseColor' );
+        diffuseTexture.type = THREE.UnsignedByteType;
+        const normalTexture = scenePass.getTexture( 'normal' );
+        normalTexture.type = THREE.UnsignedByteType;
+
+        const sceneNormal = sample( ( uv ) => {
+            return unpackRGBToNormal( scenePassNormal.sample( uv ) );
+        } );
+
+        // Toggles: ?traa=0 skips the temporal AA (the direct path, unless ?direct=0), ?probes=0 skips the probe grid,
+        // ?gi=1 adds screen-space GI on top. SSGI is off by default: the probe grid carries the bounce light, and the
+        // screen-space pass cost a large share of the frame for a smeary, view-dependent gain.
+        let compositePass = scenePassColor;
+        if(flags.get('gi') === '1') {
+            this.giPass = ssgi( scenePassColor, scenePassDepth, sceneNormal, this.camera );
+            this.giPass.useTemporalFiltering = flags.get('gitemporal') !== '0';
+            this.giPass.sliceCount.value = this.isMobile ? 1 : 2;
+            this.giPass.stepCount.value = 8;
+            const gi = this.giPass.getGINode();
+            const ao = this.giPass.getAONode();
+            // Composite: direct lighting * AO + diffuse * GI
+            compositePass = vec4( add( scenePassColor.rgb.mul( ao ), scenePassDiffuse.rgb.mul( gi.rgb ) ), scenePassColor.a );
+        }
+
+        // TRAA: temporal resolve anti-aliasing using velocity buffer
+        const traaPass = traa( compositePass, scenePassDepth, scenePassVelocity, this.camera );
+
+        this.renderPipeline.outputNode = flags.get('traa') === '0' ? compositePass : traaPass;
+    }
+
     /** Physically based sky + sun (needs WebGPU); otherwise the static skybox image and a hemisphere light. */
     _setupSky(mainObject) {
         let params = mainObject.queryParams;
@@ -176,7 +197,9 @@ export default class World {
             if(DayCycle.supported(this.renderer)) {
                 this.dayCycle = new DayCycle(this.renderer, this.scene, this.dirLight, { timeOfDay, dayLengthMinutes });
                 if(ProbeLighting.supported(this.renderer) && !(params && params.get('probes') === '0')) {
-                    this.probes = new ProbeLighting(this.renderer, this.scene, { spacing: this.isMobile ? 8 : 6, maxProbes: this.isMobile ? 1500 : 4000 }); // a probe costs ~5 ms to bake, so ~2300 probes for Twin Forts' band
+                    // a probe costs ~4 ms of CPU to bake here with the terrain batched (12 ms before), several times that on a phone:
+                    // mobile gets a coarser grid, one probe at a time and a 2 ms budget (it rests between probes that overrun it)
+                    this.probes = new ProbeLighting(this.renderer, this.scene, this.isMobile ? { spacing: 8, maxProbes: 1500, perFrame: 1, budgetMs: 2 } : { spacing: 6, maxProbes: 4000 });
                     // the probes carry the sky's diffuse light once baked; until then the environment map does (ProbeLighting.environmentIntensity)
                     mainObject.attachProbes?.(this.probes);
                 }

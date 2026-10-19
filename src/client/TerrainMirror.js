@@ -1,7 +1,8 @@
-/** Client terrain mirror: one Mesh per held chunk under a single Group (a
- *  few hundred draw calls at most, and no shared-buffer bookkeeping to get
- *  wrong), with a BVH per chunk for player collision and a version per
- *  chunk for content-addressed fetching.
+/** Client terrain mirror: a Mesh per held chunk (with its BVH, for player collision, tool raycasts and the probe
+ *  grid's inside-solid test) and a version per chunk for content-addressed fetching. Those meshes are not drawn:
+ *  rendering goes through merged batch meshes (see "render batching" below), because a level is hundreds of small
+ *  chunks (Twin Forts: 356 meshes averaging 32 triangles) and every draw costs the same CPU however small it is
+ *  (~800 draws a frame with the two shadow cascades, and six more passes of everything per probe bake).
  *
  *  Chunks are keyed "x,y,z" over a sparse world (see terrain/grid.js); the
  *  world config arrives with the first full update. The server decides what
@@ -19,6 +20,25 @@ export { CHUNK_SIZE };
 const PLANE_EPS = 1e-3;
 
 export function chunkCenter(key) { let c = gridCenter(key); return new THREE.Vector3(c.x, c.y, c.z); }
+
+/** Render batching. Chunks are grouped by region (REGION chunks per axis); a region's chunks are drawn as one or more
+ *  batch meshes of at most BATCH_TRIS triangles, built by concatenating the chunks' geometries (all share one material
+ *  and one attribute layout, in world space). A chunk whose geometry changes leaves its batch's draw at once (its
+ *  index range is zeroed: degenerate triangles, one index buffer upload) and draws as a mesh of its own ("hot"), so a
+ *  carve shows with no extra latency; once nothing in the batch has changed for SETTLE_MS the batch is rebuilt with
+ *  it, as a fresh Mesh (never new geometry under a live one: see setGeometry). `?batch=0` draws one mesh per chunk. */
+const REGION = [4, 2, 4];
+const BATCH_TRIS = 32768;              // ~5 MB of vertex data: a castle region splits into several batches
+const SETTLE_MS = 2000;
+const GATHER_MS = 250;                 // a batch waits this long after a chunk settles into it, for its neighbours
+const FORCE_MS = 10000;                // a batch that keeps changing is rebuilt anyway this long after it first did
+const REBUILD_TRIS_PER_FRAME = 65536;  // rebuild work per update (at least one batch)
+const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3]];
+
+function regionOf(key) {
+    let [x, y, z] = key.split(',').map(Number);
+    return Math.floor(x / REGION[0]) + ',' + Math.floor(y / REGION[1]) + ',' + Math.floor(z / REGION[2]);
+}
 
 const SMOOTH_ANGLE = Math.cos(70 * Math.PI / 180); // faces of smooth materials meeting within this blend their normals
 
@@ -102,7 +122,7 @@ function changedBox(prev, next) {
 }
 
 export class TerrainMirror {
-    constructor(scene, material) {
+    constructor(scene, material, { batching = true } = {}) {
         this.scene = scene;
         this.material = material;
         this.world = DEFAULT_WORLD;
@@ -117,10 +137,21 @@ export class TerrainMirror {
         this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
         this.onChunkChanged = null; // (key, box|null) => void, after a chunk's content changed (not mere visibility); box bounds what changed
         this.onWorldChanged = null; // (world) => void, after a new world config is adopted
-        this.group = new THREE.Group();
+        this.group = new THREE.Group();   // one Mesh per chunk, with its BVH: collision and raycasts, not drawn when batching
         this.group.name = 'terrain';
         this.scene.add(this.group);
         this.objects = new Map();   // key -> Mesh
+        // render batching (see REGION); the Raycaster and the BVH users ignore `visible`, the renderer skips the subtree
+        this.batching = batching;
+        this.group.visible = !batching;
+        this.renderGroup = new THREE.Group();
+        this.renderGroup.name = 'terrain-batches';
+        this.scene.add(this.renderGroup);
+        this.drawn = new Map();     // key -> { batch, inMesh, hot: Mesh|null, changedAt, settled }
+        this.hotKeys = new Set();   // chunks drawn on their own
+        this.regions = new Map();   // region key -> [batch]
+        this.dirty = new Set();     // batches waiting for a rebuild
+        this.rebuilds = 0;
     }
 
     /** Adopt the server's world config (bounds, implicit rock). */
@@ -295,7 +326,9 @@ export class TerrainMirror {
     stats() {
         let tris = 0, verts = 0;
         for(let mesh of this.objects.values()) { tris += mesh.geometry.index.count / 3; verts += mesh.geometry.attributes.position.count; }
-        return { chunks: this.objects.size, tris, verts, rock: this.rockMask.size, held: this.meshes.size, pending: this.pending.size };
+        let batches = 0; for(let list of this.regions.values()) for(let b of list) if(b.mesh) batches++;
+        return { chunks: this.objects.size, tris, verts, rock: this.rockMask.size, held: this.meshes.size, pending: this.pending.size,
+                 batches, hot: this.hotKeys.size, drawObjects: this.batching ? this.renderGroup.children.length : this.objects.size, rebuilds: this.rebuilds };
     }
 
     /** BVH for a chunk, or null if it has no geometry. */
@@ -308,16 +341,14 @@ export class TerrainMirror {
 
     setGeometry(key, geometry) {
         let mesh = this.objects.get(key);
-        if(!geometry) {
-            if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
-            return;
-        }
+        this.undraw(key);
+        if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
+        if(!geometry) { this.forget(key); return; }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
         // Always a fresh Mesh: swapping the geometry of a live mesh leaves the renderer's per-object state (buffers,
         // bundles) to catch up, and a draw with the old index buffer over new vertices is exactly a stretched sliver
-        if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
         mesh = new THREE.Mesh(geometry, this.material);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -325,5 +356,152 @@ export class TerrainMirror {
         mesh.userData.chunkKey = key;
         this.group.add(mesh);
         this.objects.set(key, mesh);
+        if(this.batching) this.drawHot(key, geometry);
+    }
+
+    // ---- render batching ------------------------------------------------------
+
+    /** Take a chunk out of what is drawn: its own mesh, and its range of its batch (zeroed indices, until the rebuild). */
+    undraw(key) {
+        let st = this.drawn.get(key);
+        if(!st) return;
+        if(st.hot) { this.renderGroup.remove(st.hot); st.hot = null; }
+        this.hotKeys.delete(key);
+        if(st.batch && st.inMesh) {
+            let b = st.batch, r = b.ranges.get(key), index = b.mesh.geometry.index;
+            index.array.fill(0, r.start, r.start + r.count);
+            index.needsUpdate = true;
+            b.ranges.delete(key);
+            st.inMesh = false;
+            this.touch(b, SETTLE_MS);
+        }
+    }
+
+    /** The chunk has no geometry any more: out of its batch's membership too. */
+    forget(key) {
+        let st = this.drawn.get(key);
+        if(!st) return;
+        if(st.batch) { st.batch.keys.delete(key); this.touch(st.batch, SETTLE_MS); }
+        this.drawn.delete(key);
+    }
+
+    /** Draw a changed chunk on its own until it has settled. The mesh shares the collision mesh's geometry. */
+    drawHot(key, geometry) {
+        let st = this.drawn.get(key);
+        if(!st) { st = { batch: null, inMesh: false, hot: null, changedAt: 0, settled: false }; this.drawn.set(key, st); }
+        let hot = new THREE.Mesh(geometry, this.material);
+        hot.castShadow = true;
+        hot.receiveShadow = true;
+        hot.matrixAutoUpdate = false;
+        hot.userData.chunkKey = key;
+        this.renderGroup.add(hot);
+        st.hot = hot;
+        st.changedAt = performance.now();
+        st.settled = false;
+        this.hotKeys.add(key);
+    }
+
+    /** Schedule a batch's rebuild no sooner than `delay` ms from now. */
+    touch(b, delay) {
+        let now = performance.now();
+        b.foldAt = Math.max(b.foldAt, now + delay);
+        if(!this.dirty.has(b)) { this.dirty.add(b); b.dirtySince = now; }
+    }
+
+    trisOf(key) { let m = this.objects.get(key); return m ? m.geometry.index.count / 3 : 0; }
+
+    batchTris(b, except = null) { let n = 0; for(let k of b.keys) if(k !== except) n += this.trisOf(k); return n; }
+
+    /** The batch a settled chunk goes into: the one it was in while it still fits, else one of its region's with room. */
+    assign(key, st) {
+        let tris = this.trisOf(key);
+        if(st.batch && (this.batchTris(st.batch, key) + tris <= BATCH_TRIS || st.batch.keys.size === 1)) return st.batch;
+        if(st.batch) { st.batch.keys.delete(key); this.touch(st.batch, 0); }
+        let region = regionOf(key), list = this.regions.get(region);
+        if(!list) { list = []; this.regions.set(region, list); }
+        let b = list.find(c => c.keys.size === 0 || this.batchTris(c) + tris <= BATCH_TRIS);
+        if(!b) { b = { region, keys: new Set(), mesh: null, ranges: new Map(), foldAt: 0, dirtySince: 0 }; list.push(b); }
+        b.keys.add(key);
+        st.batch = b;
+        return b;
+    }
+
+    /** Once per frame: settled chunks join their batch, and due batches are rebuilt (within a budget). */
+    update() {
+        if(!this.batching) return;
+        let now = performance.now();
+        for(let key of this.hotKeys) {
+            let st = this.drawn.get(key);
+            if(!st || st.settled || now - st.changedAt < SETTLE_MS) continue;
+            st.settled = true;
+            this.touch(this.assign(key, st), GATHER_MS);
+        }
+        let budget = REBUILD_TRIS_PER_FRAME, first = true;
+        for(let b of this.dirty) {
+            if(now < b.foldAt && now - b.dirtySince < FORCE_MS) continue;
+            let tris = this.batchTris(b);
+            if(!first && tris > budget) continue;
+            this.rebuildBatch(b);
+            budget -= tris; first = false;
+            if(budget <= 0) break;
+        }
+    }
+
+    /** Build a batch's mesh from its members' current geometry (members still changing stay on their own) and swap it
+     *  in for the old one in the same frame; folded chunks stop drawing on their own. */
+    rebuildBatch(b) {
+        this.dirty.delete(b);
+        b.foldAt = 0;
+        this.rebuilds++;
+        let members = [], total = 0;
+        for(let k of b.keys) {
+            let st = this.drawn.get(k), m = this.objects.get(k);
+            if(!st || !m || (st.hot && !st.settled)) continue;
+            members.push(k);
+            total += m.geometry.attributes.position.count;
+        }
+        let old = b.mesh;
+        b.mesh = null;
+        b.ranges = new Map();
+        if(total > 0) {
+            let geometry = new THREE.BufferGeometry(), arrays = {};
+            for(let [name, size] of BATCH_ATTRIBUTES) arrays[name] = new Float32Array(total * size);
+            let index = new Uint32Array(total), box = new THREE.Box3(), offset = 0;
+            for(let k of members) {
+                let g = this.objects.get(k).geometry, n = g.attributes.position.count;
+                for(let [name, size] of BATCH_ATTRIBUTES) arrays[name].set(g.attributes[name].array.subarray(0, n * size), offset * size);
+                for(let i = 0; i < n; i++) index[offset + i] = offset + i; // chunk geometry is flat (an unshared vertex per corner)
+                b.ranges.set(k, { start: offset, count: n });
+                box.union(g.boundingBox);
+                offset += n;
+            }
+            for(let [name, size] of BATCH_ATTRIBUTES) geometry.setAttribute(name, new THREE.BufferAttribute(arrays[name], size));
+            geometry.setIndex(new THREE.BufferAttribute(index, 1));
+            geometry.boundingBox = box;
+            geometry.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+            let mesh = new THREE.Mesh(geometry, this.material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.matrixAutoUpdate = false;
+            mesh.userData.terrainBatch = b.region;
+            this.renderGroup.add(mesh);
+            b.mesh = mesh;
+        }
+        if(old) { this.renderGroup.remove(old); old.geometry.dispose(); }
+        for(let k of b.keys) { let st = this.drawn.get(k); if(st) st.inMesh = b.ranges.has(k); }
+        for(let k of members) {
+            let st = this.drawn.get(k);
+            if(st.hot) {
+                this.renderGroup.remove(st.hot);
+                st.hot = null;
+                this.hotKeys.delete(k);
+                this.objects.get(k).geometry.dispose(); // frees its GPU buffers; the collision mesh keeps the arrays and BVH
+            }
+        }
+        if(b.keys.size === 0) {
+            let list = this.regions.get(b.region), i = list ? list.indexOf(b) : -1;
+            if(i >= 0) list.splice(i, 1);
+            if(list && !list.length) this.regions.delete(b.region);
+        }
     }
 }

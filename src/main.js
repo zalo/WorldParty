@@ -83,6 +83,10 @@ export default class Main {
 
         this.serverTickMs = 0;
         this.world = new World(this, this.isMobile());
+        // Frame cap: 60 fps on mobile (a 90 or 120 Hz phone otherwise renders every frame twice as often, and heats up
+        // for it), none on desktop; ?fps=<n> sets it (0: uncapped)
+        let fps = this.queryParams.has('fps') ? parseFloat(this.queryParams.get('fps')) : (this.isMobile() ? 60 : 0);
+        this.frameInterval = fps > 0 ? 1000 / fps : 0;
         this.simulationParams = { firstPerson: true, gravity: -PLAYER_GRAVITY, playerSpeed: 10, physicsSteps: 5, jumpVelocity: 20.0, mobile: this.isMobile() };
         this.raycaster = new THREE.Raycaster();
 
@@ -191,7 +195,7 @@ export default class Main {
         let tridebug = parseInt(this.queryParams.get('tridebug') || '0') || 0;
         this.defaultMaterial = makeTerrainMaterial(this.textures.texture, 'world', tridebug);
         this.fragmentMaterial = makeTerrainMaterial(this.textures.texture, 'local', tridebug);
-        this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial);
+        this.terrain = new TerrainMirror(this.world.scene, this.defaultMaterial, { batching: this.queryParams.get('batch') !== '0' }); // ?batch=0: a draw per chunk
         this.terrain.fetchChunk = (index, version) => this.fetchChunk(index, version);
         this.terrain.onWorldChanged = (w) => this.onWorldChanged(w);
         this.chunkListeners = [];   // (key, box) => void after a chunk's content changed: the probe grid, the glow volume
@@ -201,7 +205,7 @@ export default class Main {
             if(region.isEmpty()) region = this.terrain.bbox(key);
             for(let fn of this.chunkListeners) fn(key, region);
         };
-        this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk)
+        this.terrainBatch = this.terrain.group; // raycast target for tools (one mesh per chunk, with its BVH; drawn through batches)
         this.onWorldChanged(this.terrain.world);
     }
 
@@ -350,6 +354,14 @@ export default class Main {
 
     update(timeMS) {
         if(!this.constructorFinished) return;
+        if(this.frameInterval) {
+            // skip display frames until a frame interval has accumulated (carrying the remainder, so a 90 Hz display
+            // still averages 60); the canvas keeps showing the last frame drawn
+            this.capDebt = (this.capDebt || 0) + (timeMS - (this.capLast ?? timeMS));
+            this.capLast = timeMS;
+            if(this.capDebt < this.frameInterval - 1) return;
+            this.capDebt = Math.min(this.capDebt - this.frameInterval, this.frameInterval);
+        }
         this.deltaTime = timeMS - this.timeMS;
         this.timeMS = timeMS;
 
@@ -365,9 +377,10 @@ export default class Main {
         }
 
         this.ecs.update(this.deltaTime / 1000.0);
+        this.terrain.update();
         this.world.update(this.deltaTime / 1000.0);
 
-        this.world.renderPipeline.render();
+        this.world.renderFrame();
         this.world.stats.update();
 
         if(!this.serverTickDisplay) {
