@@ -145,6 +145,7 @@ export class TerrainMirror {
         this.objects = new Map();   // key -> Mesh
         this.render = new Map();    // key -> refined render geometry (TerrainGI), drawn instead of the collision geometry
         this.onGeometry = null;     // (key, geometry|null) => void, after a chunk's collision geometry was replaced
+        this.changing = null;       // { key, box } while a chunk whose content a carve changed is being rebuilt
         // render batching (see REGION); the Raycaster and the BVH users ignore `visible`, the renderer skips the subtree
         this.batching = batching;
         this.group.visible = !batching;
@@ -214,8 +215,11 @@ export class TerrainMirror {
         if(mesh) this.meshes.set(key, mesh); else this.meshes.delete(key);
         this.versions.set(key, version);
         this.rockMask.delete(key);
+        let box = changedBox(prev, mesh);
+        this.changing = box ? { key, box } : null; // what a carve changed, for onGeometry listeners during the rebuild (TerrainGI)
         this.rebuild(key);
-        this.onChunkChanged?.(key, changedBox(prev, mesh));
+        this.changing = null;
+        this.onChunkChanged?.(key, box);
     }
 
     /** Drop a modified chunk we no longer need to hold. */

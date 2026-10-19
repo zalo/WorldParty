@@ -74,6 +74,7 @@ export class TerrainGI {
         this.stats = { jobs: 0, ops: 0, bvhUpdates: 0, bvhMs: 0, readbacks: 0, chunks: 0 };
         this.buildOps();
         this.attachMaterials();
+        this.core.visible = (ax, ay, az, bx, by, bz) => this.visible(ax, ay, az, bx, by, bz);
         terrain.onGeometry = (key, geometry) => this.onGeometry(key, geometry);
         for(let [key, mesh] of terrain.objects) this.onGeometry(key, mesh.geometry); // chunks that arrived before us
     }
@@ -170,14 +171,16 @@ export class TerrainGI {
             If(instanceIndex.lessThan(opCount), () => {
                 const op = ops.element(instanceIndex).toVar();
                 const id = op.y;
-                If(op.x.equal(uint(OP_INIT)), () => {
+                // the first word: the type, the weight the record starts with, and a scale for copied light (giCore's seed)
+                const w = float(op.x.shiftRight(uint(8)).bitAnd(uint(255)));
+                const k = float(op.x.shiftRight(uint(16)).bitAnd(uint(255))).div(255.0);
+                If(op.x.bitAnd(uint(255)).equal(uint(OP_INIT)), () => {
                     If(op.z.equal(uint(NO_RECORD)), () => {
-                        state.element(id).assign(vec4(0.0));
+                        state.element(id).assign(vec4(0.0, 0.0, 0.0, w)); // empty (unknown, w 0) or dark (a carve with nothing in sight)
                     }).Else(() => {
-                        // seeded from the edge's two ends: their mean, at a low weight
+                        // copied from two gathered records: their mean at weight w
                         const sa = state.element(op.z).toVar(), sb = state.element(op.w).toVar();
-                        const w = min(min(sa.w, sb.w), float(16)).mul(0.5);
-                        const mean = sa.xyz.div(max(sa.w, 1.0)).add(sb.xyz.div(max(sb.w, 1.0))).mul(0.5);
+                        const mean = sa.xyz.div(max(sa.w, 1.0)).add(sb.xyz.div(max(sb.w, 1.0))).mul(k.mul(0.5));
                         state.element(id).assign(vec4(mean.mul(w), w));
                     });
                     seq.element(id).assign(uint(0));
@@ -236,7 +239,8 @@ export class TerrainGI {
             alb[t * 3] = r * (L ? L[0] : 1); alb[t * 3 + 1] = g * (L ? L[1] : 1); alb[t * 3 + 2] = b * (L ? L[2] : 1);
         }
         let skip = this.hiddenOnPlanes(key, pos, nrm, nt);
-        let ch = this.core.setChunk(key, geometry.uuid, { pos, nrm, uv: U ? uv : null, cls, skip });
+        let carved = this.terrain.changing && this.terrain.changing.key === key ? this.terrain.changing.box : null;
+        let ch = this.core.setChunk(key, geometry.uuid, { pos, nrm, uv: U ? uv : null, cls, skip }, carved);
         this.pushRender(ch);
         // the coarse geometry for the BVH: per vertex the record of that corner and the triangle's albedo
         let surface = new Float32Array(A.position.count * 4);
@@ -316,6 +320,20 @@ export class TerrainGI {
         }
         cache.set(ck, out);
         return out;
+    }
+
+    /** Can one point see another (nothing of the terrain between them)? For copying light to new vertices. */
+    visible(ax, ay, az, bx, by, bz) {
+        let dx = bx - ax, dy = by - ay, dz = bz - az, len = Math.hypot(dx, dy, dz);
+        if(len < 1e-4) return true;
+        let T = this.terrain, ray = this._ray || (this._ray = new THREE.Ray()), box = this._box || (this._box = new THREE.Box3());
+        ray.origin.set(ax, ay, az); ray.direction.set(dx / len, dy / len, dz / len);
+        box.min.set(Math.min(ax, bx), Math.min(ay, by), Math.min(az, bz)); box.max.set(Math.max(ax, bx), Math.max(ay, by), Math.max(az, bz));
+        for(let key of T.intersecting(box)) {
+            let bvh = T.bvh(key);
+            if(bvh && bvh.raycastFirst(ray, THREE.DoubleSide, 0, len)) return false;
+        }
+        return true;
     }
 
     /** A carve changed a region: the records around it re-converge (the chunk itself was re-refined by onGeometry). */

@@ -31,11 +31,14 @@ export const GI_DEFAULTS = {
     nearDistance: 25,      // chunks within this of the camera aim for maxSamples; further ones for fewer
     weightAt: 12,          // samples at which a vertex's light fully replaces the probe grid's (the shader)
     capacity: 1 << 18,     // records the GPU buffers hold
-    knockTo: 4,            // samples a record near a carve keeps (the light there just changed)
+    knockTo: 12,           // samples a record near a carve keeps (the light there just changed; no fewer than weightAt, or the
+                           // probe grid's light comes back on the walls around every dig)
+    seedReach: 3,          // metres within which a new vertex looks for gathered ones to copy its light from
+    seedCarved: 0.6,       // what a surface a carve just exposed keeps of the light it copies (it is deeper in, and sees less)
     knockReach: 5,         // metres around a carve's region
 };
 
-export const OP_INIT = 0, OP_KNOCK = 1, NO_RECORD = 0xffffffff;
+export const OP_INIT = 0, OP_KNOCK = 1, NO_RECORD = 0xffffffff; // an op's first word: type | weight << 8 | scale * 255 << 16
 
 const Q_POS = 1e4, Q_NRM = 1e3;
 const posKey = (x, y, z) => `${Math.round(x * Q_POS)},${Math.round(y * Q_POS)},${Math.round(z * Q_POS)}`;
@@ -61,11 +64,19 @@ export class Records {
         this.ops = [];                               // [type, id, a, b] for the GPU
         this.dirtyLo = Infinity; this.dirtyHi = -1;  // slots whose geo needs uploading
         this.full = false;
+        this.born = new Uint32Array(capacity);       // batch it was created in (see GICore: a seed must be older)
+        this.batch = 1;
+        this.cells = new Map();                      // 1 m cell -> record ids, to find gathered neighbours
+        this.cellOf = new Float64Array(capacity);
+        this.seeder = null;                          // (id, x, y, z, nx, ny, nz, pa, pb) => [a, b, weight] (GICore.seed)
     }
+    static cellKey(x, y, z) { return ((Math.floor(x) + 4096) * 8192 + (Math.floor(y) + 4096)) * 8192 + (Math.floor(z) + 4096); }
+    /** Old enough to copy light from: referenced, created before this batch, and sampled. */
+    gathered(r) { return r >= 0 && this.refs[r] > 0 && this.born[r] < this.batch && this.cnt[r] >= 1; }
     get size() { return this.keys.size; }
     /** The record for a key, created at (p, n) if new: with no references yet (`retain` takes one, `sweep` frees the new
-     *  ones nobody took), initialised from records `pa` and `pb` if both are given and were not created in this batch.
-     *  -1 when the buffers are full. */
+     *  ones nobody took) and initialised on the GPU as `seeder` decides (`pa`, `pb`: the ends of the edge a midpoint
+     *  splits). -1 when the buffers are full. */
     find(key, px, py, pz, nx, ny, nz, pa = -1, pb = -1) {
         let id = this.keys.get(key);
         if(id !== undefined) return id;
@@ -77,10 +88,13 @@ export class Records {
         let g = this.geo, o = id * 8;
         g[o] = px; g[o + 1] = py; g[o + 2] = pz; g[o + 3] = (h & 0xffff) / 65536;
         g[o + 4] = nx; g[o + 5] = ny; g[o + 6] = nz; g[o + 7] = (h >>> 16) / 65536;
-        this.refs[id] = 0; this.stamp[id] = 0;
-        let seeded = pa >= 0 && pb >= 0 && this.refs[pa] > 0 && this.refs[pb] > 0 && this.cnt[pa] >= 1 && this.cnt[pb] >= 1;
-        this.cnt[id] = seeded ? Math.min(this.cnt[pa], this.cnt[pb], 16) * 0.5 : 0;
-        this.ops.push(OP_INIT, id, seeded ? pa : NO_RECORD, seeded ? pb : NO_RECORD);
+        this.refs[id] = 0; this.stamp[id] = 0; this.born[id] = this.batch;
+        let [a, b, w, k = 1] = this.seeder ? this.seeder(id, px, py, pz, nx, ny, nz, pa, pb) : [NO_RECORD, NO_RECORD, 0];
+        this.cnt[id] = w;
+        this.ops.push((OP_INIT | (w << 8) | (Math.round(k * 255) << 16)) >>> 0, id, a, b);
+        let c = Records.cellKey(px, py, pz), list = this.cells.get(c);
+        if(list) list.push(id); else this.cells.set(c, [id]);
+        this.cellOf[id] = c;
         if(id < this.dirtyLo) this.dirtyLo = id;
         if(id > this.dirtyHi) this.dirtyHi = id;
         this.fresh.push(id);
@@ -88,7 +102,11 @@ export class Records {
     }
     retain(id) { this.refs[id]++; }
     release(id) { if(--this.refs[id] <= 0) this.drop(id); }
-    drop(id) { this.keys.delete(this.keyOf[id]); this.keyOf[id] = undefined; this.refs[id] = 0; this.free.push(id); }
+    drop(id) {
+        this.keys.delete(this.keyOf[id]); this.keyOf[id] = undefined; this.refs[id] = 0; this.free.push(id);
+        let list = this.cells.get(this.cellOf[id]);
+        if(list) { let i = list.indexOf(id); if(i >= 0) { list[i] = list[list.length - 1]; list.pop(); } if(!list.length) this.cells.delete(this.cellOf[id]); }
+    }
     sweep() { for(let id of this.fresh) if(this.refs[id] === 0 && this.keyOf[id] !== undefined) this.drop(id); this.fresh = []; }
     /** Keep at most `n` samples' worth (the mean stays, its weight drops). */
     knock(id, n) { if(this.cnt[id] <= n) return; this.cnt[id] = n; this.ops.push(OP_KNOCK, id, n, 0); }
@@ -103,7 +121,58 @@ export class GICore {
         this.chunks = new Map();       // key -> chunk
         this.splitEdges = new Set();   // edge keys (sorted position keys) split by the adaptive passes
         this.frame = 0;
-        this.stats = { refines: 0, refineMs: 0, adapts: 0, splits: 0 };
+        this.stats = { refines: 0, refineMs: 0, adapts: 0, splits: 0, seeded: 0, dark: 0 };
+        this.visible = null;           // (ax, ay, az, bx, by, bz) => can a point see another (TerrainGI: the chunk BVHs)
+        this.carveBox = null;          // while refining a carved chunk: the region the carve changed, a little enlarged
+        this.records.seeder = (id, x, y, z, nx, ny, nz, pa, pb) => this.seed(x, y, z, nx, ny, nz, pa, pb);
+    }
+
+    /** How a new record starts. A fresh vertex used to start empty, and the shader showed the probe grid's light until
+     *  rays came in: underground, a new tunnel lit up like the plaza for a second. Now it copies the light of gathered
+     *  records it can see, at full weight (rays then average in): the ends of the edge it splits, else the two nearest
+     *  within `seedReach` facing roughly its way and in sight (the old cavity's walls a dig extends; the ground around a
+     *  crater). A surface a carve just exposed keeps `seedCarved` of what it copies: it lies deeper than the walls it
+     *  copies from, and a tunnel dug dig after dig would otherwise drag the entrance's light along with it (measured on a
+     *  tunnel out of the vault: 50/255 at first and 26 converged without seeds, 39 with plain copies). With nothing in sight, a vertex inside the region a carve changed starts dark at full weight (it is in
+     *  rock that was solid a moment ago); anything else (a chunk arriving, a rebuild for a new cull mask) starts
+     *  unknown, on the probes. */
+    seed(x, y, z, nx, ny, nz, pa, pb) {
+        let R = this.records, W = this.p.weightAt, c = this.carveBox;
+        let carved = !!c && x >= c[0] && x <= c[3] && y >= c[1] && y <= c[4] && z >= c[2] && z <= c[5];
+        let k = carved ? this.p.seedCarved : 1;
+        if(R.gathered(pa) && R.gathered(pb)) { this.stats.seeded++; return [pa, pb, W, k]; }
+        let near = this.nearest(x, y, z, nx, ny, nz);
+        if(near.length) { this.stats.seeded++; return [near[0], near[near.length > 1 ? 1 : 0], W, k]; }
+        if(carved) { this.stats.dark++; return [NO_RECORD, NO_RECORD, W]; }
+        return [NO_RECORD, NO_RECORD, 0];
+    }
+
+    /** Up to two gathered records near a point that it can see, best first (distance, with a penalty for facing away). */
+    nearest(x, y, z, nx, ny, nz) {
+        let R = this.records, reach = this.p.seedReach, r = Math.ceil(reach), cands = [], g = R.geo;
+        let cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+        for(let i = -r; i <= r; i++) for(let j = -r; j <= r; j++) for(let k = -r; k <= r; k++) {
+            let list = R.cells.get(Records.cellKey(cx + i, cy + j, cz + k));
+            if(!list) continue;
+            for(let id of list) {
+                if(!R.gathered(id)) continue;
+                let o = id * 8, dx = g[o] - x, dy = g[o + 1] - y, dz = g[o + 2] - z, d2 = dx * dx + dy * dy + dz * dz;
+                if(d2 > reach * reach || d2 < 1e-8) continue;
+                let facing = g[o + 4] * nx + g[o + 5] * ny + g[o + 6] * nz;
+                cands.push([d2 + (facing < 0.2 ? 4 : 0), id]);
+            }
+        }
+        if(!cands.length) return [];
+        cands.sort((a, b) => a[0] - b[0]);
+        let out = [], tests = 0;
+        for(let [, id] of cands) {
+            if(out.length >= 2 || tests >= 8) break;
+            let o = id * 8;
+            tests++;
+            if(this.visible && !this.visible(x + nx * 0.05, y + ny * 0.05, z + nz * 0.05, g[o] + g[o + 4] * 0.05, g[o + 1] + g[o + 5] * 0.05, g[o + 2] + g[o + 6] * 0.05)) continue;
+            out.push(id);
+        }
+        return out;
     }
 
     reset() { for(let key of [...this.chunks.keys()]) this.removeChunk(key); this.splitEdges.clear(); }
@@ -111,16 +180,18 @@ export class GICore {
     /** A chunk's coarse geometry: flat corner arrays (positions and normals, 9 per triangle; uvs 6 per triangle or null),
      *  a material class per triangle and optionally `skip` (1: a hidden triangle on a chunk plane, left as it is). Returns the chunk with its refined mesh (positions, normals, uvs, cls, recOf,
      *  index) and `coarseRec`, the record of each coarse corner (-1 on chunk planes), for the GPU BVH's lookups.
-     *  `changed` (a box {min, max}) is what a carve changed: records around it re-converge. */
-    setChunk(key, version, coarse, changed = null) {
+     *  `carved` (a box {min, max}) is what a carve changed, if one did (see `seed`). */
+    setChunk(key, version, coarse, carved = null) {
         let old = this.chunks.get(key);
         let [cx, cy, cz] = key.split(',').map(Number);
         let ch = { key, version, min: [cx * CHUNK, cy * CHUNK, cz * CHUNK], coarse, stage: 0, cursor: 0, minSamples: 0, ready: false };
+        this.records.batch++;
+        this.carveBox = carved && old ? [carved.min.x - 0.5, carved.min.y - 0.5, carved.min.z - 0.5, carved.max.x + 0.5, carved.max.y + 0.5, carved.max.z + 0.5] : null;
         this.refine(ch);
+        this.carveBox = null;
         this.chunks.set(key, ch);
         if(old) for(let r of old.recOf) if(r >= 0) this.records.release(r);
         this.records.sweep();
-        if(changed) this.knockAround(changed);
         return ch;
     }
 
@@ -248,6 +319,7 @@ export class GICore {
         }
         this.stats.adapts++; this.stats.splits += added;
         if(!added) return [];
+        this.records.batch++;
         let again = new Set([ch]);
         for(let [axis, s] of planes) {
             let c = ch.min.slice(); c[axis] = s === ch.min[axis] ? ch.min[axis] - CHUNK : ch.min[axis] + CHUNK;
