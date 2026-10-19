@@ -9,7 +9,8 @@
  *  finished in normal play (walking into the vault was enough), which is why "the probes did nothing". */
 import * as THREE from 'three/webgpu';
 import { array, attribute, getShIrradianceAt, normalWorld, positionWorld, texture3D, uniform, vec3 } from 'three/tsl';
-import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
+import { LightProbeGrid as CubeCameraGrid } from 'three/addons/lighting/LightProbeGrid.js';
+import { LightProbeGrid as BatchedGrid } from './vendor/LightProbeGrid.js';
 import { LightProbeGridNode, ATLAS_PADDING } from 'three/addons/tsl/lighting/LightProbeGridNode.js';
 import { LightProbeGridHelper } from 'three/addons/helpers/LightProbeGridHelper.js';
 
@@ -62,8 +63,14 @@ class ProbeGridNode extends LightProbeGridNode {
     }
 }
 
+/** The grid class: three PR #34909's batched capture (vendor/LightProbeGrid.js: eight probes per render through one
+ *  48-view ArrayCamera, every queued run in one bake call) unless `?probebake=cube` asks for r186's (a CubeCamera per
+ *  probe: six renders and a submit each, and a bake call per run). */
+const BATCHED = typeof location === 'undefined' || new URLSearchParams(location.search).get('probebake') !== 'cube';
+const LightProbeGrid = BATCHED ? BatchedGrid : CubeCameraGrid;
+
 const AXES = [ [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1] ].map(a => new THREE.Vector3(...a));
-const _ray = new THREE.Ray(), _inv = new THREE.Matrix4();
+const _ray = new THREE.Ray(), _inv = new THREE.Matrix4(), _min = new THREE.Vector3(), _max = new THREE.Vector3();
 
 export class ProbeLighting {
 
@@ -111,6 +118,8 @@ export class ProbeLighting {
         this.max = new THREE.Vector3();
         this.requested = null;            // the box last asked for (before lattice alignment)
         this.occluders = null;            // Group of closed meshes with BVHs (the terrain chunks) for the inside-solid test
+        this.occludersIn = null;          // (min, max) => those of them within a box (Main: the chunk meshes there)
+        this.captureView = null;          // (on) => void: swap in what captures draw of the terrain (TerrainMirror.captureView)
         this.relocated = new Map();       // probe index -> position baked from instead (inside solid) or null (in air)
         this.mute = [];                   // lights switched off while baking (the glow volume)
         // our sampling node for the grid (LightProbeGrid.bake registers three's only if none is there yet)
@@ -119,8 +128,13 @@ export class ProbeLighting {
 
     /** First hit of a world-space ray against the occluders (both face sides), or null. */
     raycast(origin, dir, far) {
-        let best = null;
-        for(let mesh of this.occluders.children) {
+        let best = null, meshes = this.occluders.children;
+        if(this.occludersIn) {
+            _min.set(Math.min(origin.x, origin.x + dir.x * far), Math.min(origin.y, origin.y + dir.y * far), Math.min(origin.z, origin.z + dir.z * far));
+            _max.set(Math.max(origin.x, origin.x + dir.x * far), Math.max(origin.y, origin.y + dir.y * far), Math.max(origin.z, origin.z + dir.z * far));
+            meshes = this.occludersIn(_min, _max); // testing all of Twin Forts' 356 chunks cost ~0.45 ms per probe placed
+        }
+        for(let mesh of meshes) {
             let bvh = mesh.geometry && mesh.geometry.boundsTree;
             if(!bvh) continue;
             _ray.origin.copy(origin); _ray.direction.copy(dir);
@@ -290,7 +304,7 @@ export class ProbeLighting {
         if(this.skipFrames > 0) { this.skipFrames--; return; }
         if(this.lastBakeMs !== undefined) {
             if(this.lastBakeMs > this.budgetMs * 1.5) this.perFrame = Math.max(1, Math.floor(this.perFrame / 2));
-            else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(32, this.perFrame + 1);
+            else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(BATCHED ? 64 : 32, this.perFrame + 1);
         }
         let take = this.nearestDirty(camera, this.perFrame).sort((a, b) => a - b);
         for(let i of take) this.dirty.delete(i);
@@ -305,7 +319,10 @@ export class ProbeLighting {
             for(let l of this.mute) l.intensity = 0;
             this.scene.environmentIntensity = this.bakeEnvironment;
             if(this.helper) this.helper.visible = false;
-            for(let r of runs) this.grid.bake(this.renderer, this.scene, { start: r.start, count: r.count, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
+            this.captureView?.(true);
+            if(BATCHED) this.grid.bake(this.renderer, this.scene, { runs, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
+            else for(let r of runs) this.grid.bake(this.renderer, this.scene, { start: r.start, count: r.count, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
+            this.captureView?.(false);
             this.mute.forEach((l, i) => l.intensity = muted[i]);
             this.scene.environmentIntensity = env;
             if(this.helper) this.helper.visible = true;
@@ -316,6 +333,7 @@ export class ProbeLighting {
             if(take.length === 1 && this.lastBakeMs > this.budgetMs) this.skipFrames = Math.min(30, Math.ceil(this.lastBakeMs / this.budgetMs) - 1);
             if(this.lastBakeMs > 50) console.log(`probe bake: ${take.length} probes in ${this.lastBakeMs.toFixed(0)} ms (${this.dirty.size} left, now ${this.perFrame}/frame)`);
         } catch(e) {
+            this.captureView?.(false);
             this.mute.forEach((l, i) => l.intensity = muted[i]);
             this.scene.environmentIntensity = env;
             if(this.helper) this.helper.visible = true;

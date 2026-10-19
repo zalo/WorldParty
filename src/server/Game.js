@@ -218,7 +218,7 @@ export class Game {
         let keys = chunksInBox(T.world, { x: center.x - r, y: center.y - r, z: center.z - r }, { x: center.x + r, y: center.y + r, z: center.z + r });
         let volume = () => keys.reduce((sum, k) => sum + (T.chunks[k] && T.hasSolid(k) ? T.manifoldOf(k).volume() : 0), 0);
         let before = volume();
-        await this.server.carveSphere(center, r, 1);
+        await this.server.carveSphere(center, r, 1, true);
         if(before - volume() > 0.05 && p.build < WEAPONS.mason.budget) this.world.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + WEAPONS.mason.stonePerDig) });
     }
 

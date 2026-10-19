@@ -361,7 +361,7 @@ export class TerrainGI {
     /** A refined mesh: to TerrainMirror, if it is still of the chunk's current geometry. */
     onChunk(m) {
         let mesh = this.terrain.objects.get(m.key);
-        if(mesh && mesh.geometry.uuid === m.version) this.pushRender(m, mesh.geometry);
+        if(mesh && mesh.geometry.uuid === m.version) { this.pushRender(m, mesh.geometry); this.terrain.setCoarseRecords(m.key, mesh.geometry, m.coarseRec); }
     }
 
     /** The worker's packed BVH. Its buffers are written into the ones the passes already bind when they fit (they are

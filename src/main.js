@@ -250,6 +250,19 @@ export default class Main {
     attachProbes(probes) {
         this.probes = probes;
         probes.occluders = this.terrain.group; // chunk meshes with BVHs: probes that land inside rock bake from the nearest air
+        probes.occludersIn = (min, max) => { let out = []; for(let k of this.terrain.intersecting({ min, max })) { let m = this.terrain.objects.get(k); if(m) out.push(m); } return out; };
+        // Captures see the static world: the terrain (as its collision geometry, TerrainMirror.captureView; ?probeproxy=0
+        // keeps the refined batches), models and crystals; not bodies or players, which move on and would leave their
+        // shading baked in (and Fort War's six supply crates alone are 32k triangles, three times its collision terrain)
+        let proxy = this.queryParams.get('probeproxy') !== '0', hidden = [];
+        probes.captureView = (on) => {
+            if(proxy) this.terrain.captureView(on);
+            if(on) {
+                let movers = [this.physBodiesParent, this.player?.playerMesh];
+                for(let [, , m] of this.ecs.each('Player', '$Mesh')) movers.push(m.object);
+                for(let o of movers) if(o && o.visible) { o.visible = false; hidden.push(o); }
+            } else { for(let o of hidden) o.visible = true; hidden.length = 0; }
+        };
         let band = this.probeBounds(this.terrain.world);
         if(band) probes.setBounds(...band);
         this.chunkListeners.push((key, region) => probes.markDirty(region));

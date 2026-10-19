@@ -26,7 +26,8 @@ const COOKS_NOW = 3;                // mesh colliders cooked immediately when ac
 const COOKS_PER_TICK = 2;           // ... and per tick for the rest
 
 // Brushes the server carves with itself (explosions, the drill, the mason): unit shapes, scaled per use
-const SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 2).attributes.position.array); // 320 faces: craters read as round
+const SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 1).attributes.position.array); // 80 faces: explosions
+const ROUND_SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 2).attributes.position.array); // 320 faces: the drill's tunnels read as round
 const CUBE_SOUP = encodeSoup(new THREE.BoxGeometry(1, 1, 1).toNonIndexed().attributes.position.array);
 
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
@@ -473,9 +474,10 @@ export class WorldParty extends Server {
   send(id, msg) { let c = this.conns.get(id); if(c) try { c.send(JSON.stringify(msg)); } catch(e) { console.warn(`send to ${id} failed: ${e.message}`); } }
 
   /** Server-side carves and additions reuse the client's csg path with the server's own unit brushes. */
-  carveSphere(center, radius, material = 1) {
+  /** `round` uses the finer sphere with a tighter simplification (the drill); explosions take the coarse one. */
+  carveSphere(center, radius, material = 1, round = false) {
     let min = { x: center.x - radius, y: center.y - radius, z: center.z - radius }, max = { x: center.x + radius, y: center.y + radius, z: center.z + radius };
-    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius }, tolerance: 0.02 });
+    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: round ? ROUND_SPHERE_SOUP : SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius }, tolerance: round ? 0.02 : 0.1 });
   }
   carveBox(center, quaternion, size, material = 1) { return this.boxCsg(center, quaternion, size, material, SUBTRACTION); }
   addBox(center, quaternion, size, material = 0) { return this.boxCsg(center, quaternion, size, material, ADDITION); }

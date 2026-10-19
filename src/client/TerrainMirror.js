@@ -36,10 +36,15 @@ const REBUILD_TRIS_PER_FRAME = 65536;  // rebuild work per update (at least one 
 const DEFER_MS = 250;                  // longest a chunk keeps its previous drawing while its refined mesh is on its way
 const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3], ['rec', 1]];
 
-function regionOf(key) {
+function regionOf(key, R = REGION) {
     let [x, y, z] = key.split(',').map(Number);
-    return Math.floor(x / REGION[0]) + ',' + Math.floor(y / REGION[1]) + ',' + Math.floor(z / REGION[2]);
+    return Math.floor(x / R[0]) + ',' + Math.floor(y / R[1]) + ',' + Math.floor(z / R[2]);
 }
+
+/** Chunks per piece of the terrain probe captures draw (captureView): a dig rebuilds its piece only (a single mesh was
+ *  ~0.5 ms for Twin Forts but would copy a whole castle world per dig), and a batched capture draws each piece in all
+ *  48 of its views, so pieces are few (Twin Forts: 8). */
+const CAPTURE_REGION = [8, 4, 8];
 
 const SMOOTH_ANGLE = Math.cos(70 * Math.PI / 180); // faces of smooth materials meeting within this blend their normals
 
@@ -179,6 +184,13 @@ export class TerrainMirror {
         this.regions = new Map();   // region key -> [batch]
         this.dirty = new Set();     // batches waiting for a rebuild
         this.rebuilds = 0;
+        // what probe captures draw instead of the batches (captureView)
+        this.captureGroup = new THREE.Group();
+        this.captureGroup.name = 'terrain-capture';
+        this.captureGroup.visible = false;
+        this.scene.add(this.captureGroup);
+        this.pieces = new Map();    // capture region -> { keys: Set, mesh, dirty }
+        this.captureDirty = false;
     }
 
     /** Adopt the server's world config (bounds, implicit rock). */
@@ -371,6 +383,9 @@ export class TerrainMirror {
 
     setGeometry(key, geometry) {
         let mesh = this.objects.get(key);
+        let piece = this.pieceOf(key);
+        if(geometry) piece.keys.add(key); else piece.keys.delete(key);
+        piece.dirty = this.captureDirty = true;
         // With deferDraw (TerrainGI, whose refined mesh comes back from a worker a frame or two later), a chunk that was
         // drawn refined keeps drawing that until the new one arrives (setRenderGeometry) or DEFER_MS pass: drawn as the
         // bare collision geometry meanwhile, a fresh dig showed the probe grid's light for those frames.
@@ -418,6 +433,65 @@ export class TerrainMirror {
             this.renderGroup.add(hot);
             st.hot = hot;
         } else if(st.batch) this.touch(st.batch, GATHER_MS);
+    }
+
+    /** A chunk's coarse corner records (TerrainGI) go into its collision geometry's `rec` attribute, so a probe capture
+     *  of the collision geometry shows the gathered light (as does the chunk while it is drawn unrefined). */
+    setCoarseRecords(key, geometry, coarseRec) {
+        let mesh = this.objects.get(key);
+        if(!mesh || mesh.geometry !== geometry) return;
+        let rec = geometry.attributes.rec, I = geometry.index.array, a = rec.array, changed = false;
+        for(let c = 0; c < coarseRec.length; c++) { let v = I[c]; if(a[v] !== coarseRec[c]) { a[v] = coarseRec[c]; changed = true; } }
+        if(changed) { rec.needsUpdate = true; this.pieceOf(key).dirty = this.captureDirty = true; }
+    }
+
+    pieceOf(key) {
+        let region = regionOf(key, CAPTURE_REGION), piece = this.pieces.get(region);
+        if(!piece) { piece = { keys: new Set(), mesh: null, dirty: true }; this.pieces.set(region, piece); }
+        return piece;
+    }
+
+    /** Probe captures draw the terrain at 8x8 pixels a cube face. The collision geometry is the same surface as the
+     *  refined render geometry (Twin Forts: ~11k triangles against ~190k), carries the gathered light at its corners
+     *  (setCoarseRecords) and merged into a few large pieces (CAPTURE_REGION) is a few draws per view: a batched capture
+     *  (vendor/LightProbeGrid.js) draws every object in all 48 of its views. `on` swaps it in for the batches; pieces a
+     *  chunk changed in since the last capture are rebuilt first. */
+    captureView(on) {
+        if(!this.batching) return;
+        if(on && this.captureDirty) {
+            this.captureDirty = false;
+            for(let [region, piece] of this.pieces) if(piece.dirty) { this.rebuildPiece(piece); if(!piece.keys.size) this.pieces.delete(region); }
+        }
+        this.renderGroup.visible = !on;
+        this.captureGroup.visible = on;
+    }
+
+    rebuildPiece(piece) {
+        piece.dirty = false;
+        if(piece.mesh) { this.captureGroup.remove(piece.mesh); piece.mesh.geometry.dispose(); piece.mesh = null; }
+        let total = 0, totalIndex = 0, members = [];
+        for(let k of piece.keys) { let mesh = this.objects.get(k); if(mesh) { members.push(mesh.geometry); total += mesh.geometry.attributes.position.count; totalIndex += mesh.geometry.index.count; } }
+        if(!total) return;
+        let geometry = new THREE.BufferGeometry(), arrays = {};
+        for(let [name, size] of BATCH_ATTRIBUTES) arrays[name] = new Float32Array(total * size);
+        let index = new Uint32Array(totalIndex), box = new THREE.Box3(), offset = 0, at = 0;
+        for(let g of members) {
+            let n = g.attributes.position.count, src = g.index.array, m = g.index.count;
+            for(let [name, size] of BATCH_ATTRIBUTES) arrays[name].set(g.attributes[name].array.subarray(0, n * size), offset * size);
+            for(let i = 0; i < m; i++) index[at + i] = src[i] + offset;
+            box.union(g.boundingBox);
+            offset += n; at += m;
+        }
+        for(let [name, size] of BATCH_ATTRIBUTES) geometry.setAttribute(name, new THREE.BufferAttribute(arrays[name], size));
+        geometry.setIndex(new THREE.BufferAttribute(index, 1));
+        geometry.boundingBox = box;
+        geometry.boundingSphere = box.getBoundingSphere(new THREE.Sphere());
+        let mesh = new THREE.Mesh(geometry, this.material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.matrixAutoUpdate = false;
+        this.captureGroup.add(mesh);
+        piece.mesh = mesh;
     }
 
     // ---- render batching ------------------------------------------------------
