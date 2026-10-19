@@ -41,7 +41,7 @@ const EXTRA = [ // textured triplanar (see src/terrain/materials.js); the team s
     { name: 'Blue Stone', color: 0xa3bdea, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
     { name: 'Wood',       color: 0x8a5a2b, texture: 'assets/textures/weathered_brown_planks.jpg', scale: 3 },
     { name: 'Cobble',     color: 0x6f6f78, texture: 'assets/textures/cobblestone_floor_08.jpg', scale: 4 },
-    { name: 'Dark Rock',  color: 0x8a8480, texture: 'assets/textures/dark_rock.jpg', scale: 7, tint: true }, // the texture alone reads as pitch black at a distance; tinted lighter
+    { name: 'Dark Rock',  color: 0xd8d0c8, texture: 'assets/textures/dark_rock.jpg', scale: 7, tint: true }, // the texture is lightened in the asset (README); it averaged 0.015 linear, and a tint only darkens, so the slabs at the level's edge were black in full sun
 ];
 const RED_STONE = MATERIALS.length, BLUE_STONE = RED_STONE + 1, WOOD = RED_STONE + 2, COBBLE = RED_STONE + 3, DARK = RED_STONE + 4;
 

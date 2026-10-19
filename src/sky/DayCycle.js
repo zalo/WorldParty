@@ -33,6 +33,9 @@ export class DayCycle {
 		this.azimuth = opts.azimuth ?? 0;               // degrees, rotates the sun path
 		this.dayLengthMinutes = opts.dayLengthMinutes ?? 0; // 0 = frozen time of day
 		this.latitude = opts.latitude ?? 24;
+		// the key light relative to the physical sun: a little under, so sunlit sand and cobbles keep texture
+		// under ACES while the sky-lit shade (boosted in ProbeLighting) is not left behind
+		this.sunScale = opts.sunScale ?? 0.85;
 		this.time = 0;
 
 		this.atmosphere = new Atmosphere( renderer );
@@ -75,7 +78,7 @@ export class DayCycle {
 		else c = new THREE.Color( 0.6, 0.7, 1.0 ).multiplyScalar( 0.12 * G.night.value );
 		G.sunColor.value.copy( c );
 		this.sun.color.copy( c );
-		this.sun.intensity = 1;
+		this.sun.intensity = this.sunScale;
 		const irr = a.skyIrradiance;
 		const nightAmb = 0.012 * G.night.value;
 		G.skyIrradiance.value.setRGB( irr[ 0 ] + nightAmb * 0.6, irr[ 1 ] + nightAmb * 0.7, irr[ 2 ] + nightAmb );
@@ -92,10 +95,19 @@ export class DayCycle {
 		if ( this.dayLengthMinutes > 0 ) this.setTimeOfDay( this.timeOfDay + dt * 24 / ( this.dayLengthMinutes * 60 ) );
 		this.updateSun();
 
-		// keep the shadow frustum centred on the camera
-		this.sun.target.position.copy( camera.position );
-		this.sun.position.copy( camera.position ).addScaledVector( this.light, 100 );
-		this.sun.target.updateMatrixWorld();
+		if ( this.sun.isSunLight ) {
+
+			// a SunLight is a direction (its position); its cascades are fitted to the view camera every render
+			this.sun.position.copy( this.light );
+
+		} else {
+
+			// keep the shadow frustum centred on the camera
+			this.sun.target.position.copy( camera.position );
+			this.sun.position.copy( camera.position ).addScaledVector( this.light, 100 );
+			this.sun.target.updateMatrixWorld();
+
+		}
 
 		this.atmosphere.update( dt, camera.position.y );
 		this.applyReadback();

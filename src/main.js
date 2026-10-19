@@ -201,7 +201,8 @@ export default class Main {
     /** A world config arrived (or changed): refresh textures and anything sized by the bounds. */
     onWorldChanged(world) {
         this.textures.load(world).then(layers => this.terrain.setTextureLayers(layers));
-        this.probes?.setBounds(...this.probeBounds(world));
+        this.probeRows = null; // a new world: the probe band starts over
+        let band = this.probeBounds(world); if(band) this.probes?.setBounds(...band);
         // Fort War: a level manifest's rules arm the player and bring up the HUD (src/client/GameClient.js)
         if(world.game && !this.game && this.constructorFinished) this.game = new GameClient(this, world.game);
         else if(world.game && this.game) this.game.configure(world.game);
@@ -209,12 +210,17 @@ export default class Main {
 
     /** The probe volume: the world bounds, clipped vertically to the rows of chunks the client holds, so a
      *  deep world's probes are spent on the band with terrain in it rather than on empty sky and buried rock
-     *  (Twin Forts: 40 m of content inside 80 m of bounds, 3x the probe density for the same count). */
+     *  (Twin Forts: 40 m of content inside 80 m of bounds, 3x the probe density for the same count). The band
+     *  only ever grows (the union of every row held so far), so a trip into the vault adds a row of probes
+     *  (ProbeLighting keeps the baked ones) rather than shrinking the band again on the way back. Null until
+     *  the first chunks arrive: a grid over the full bounds would be thrown away a second later. */
     probeBounds(w) {
         const CHUNK = 10;
-        let min = new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), max = new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK));
         let rows = [...this.terrain.versions.keys()].map(k => +k.split(',')[1]);
-        if(rows.length) { min.y = Math.max(min.y, Math.min(...rows) * CHUNK); max.y = Math.min(max.y, (Math.max(...rows) + 1) * CHUNK); }
+        if(!rows.length) return null;
+        this.probeRows = { min: Math.min(this.probeRows?.min ?? Infinity, ...rows), max: Math.max(this.probeRows?.max ?? -Infinity, ...rows) };
+        let min = new THREE.Vector3(...w.bounds.min.map(v => v * CHUNK)), max = new THREE.Vector3(...w.bounds.max.map(v => (v + 1) * CHUNK));
+        min.y = Math.max(min.y, this.probeRows.min * CHUNK); max.y = Math.min(max.y, (this.probeRows.max + 1) * CHUNK);
         return [min, max];
     }
 
@@ -223,16 +229,17 @@ export default class Main {
         if(!this.probes) return;
         clearTimeout(this.probeRefit);
         this.probeRefit = setTimeout(() => {
-            let [min, max] = this.probeBounds(this.terrain.world);
-            if(this.probes.min.equals(min) && this.probes.max.equals(max)) return;
-            this.probes.setBounds(min, max);
+            let band = this.probeBounds(this.terrain.world);
+            if(band) this.probes.setBounds(...band); // a no-op for the band it already covers
         }, 1500);
     }
 
     /** Probe grid follows the world bounds and rebakes around every chunk change. */
     attachProbes(probes) {
         this.probes = probes;
-        probes.setBounds(...this.probeBounds(this.terrain.world));
+        probes.occluders = this.terrain.group; // chunk meshes with BVHs: probes that land inside rock bake from the nearest air
+        let band = this.probeBounds(this.terrain.world);
+        if(band) probes.setBounds(...band);
         this.terrain.onChunkChanged = (key) => probes.markDirty(this.terrain.bbox(key));
     }
 
