@@ -8,14 +8,27 @@
  *  instead of starting from black: before this, every refit threw the whole bake away and the grid never
  *  finished in normal play (walking into the vault was enough), which is why "the probes did nothing". */
 import * as THREE from 'three/webgpu';
-import { array, getShIrradianceAt, normalWorld, positionWorld, texture3D, vec3 } from 'three/tsl';
+import { array, attribute, getShIrradianceAt, normalWorld, positionWorld, texture3D, uniform, vec3 } from 'three/tsl';
 import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
 import { LightProbeGridNode, ATLAS_PADDING } from 'three/addons/tsl/lighting/LightProbeGridNode.js';
+import { LightProbeGridHelper } from 'three/addons/helpers/LightProbeGridHelper.js';
 
 /** Sample offset along the surface normal, metres. three's node pushes the sample half a probe spacing into the
  *  surface (3 m here), which on a wall between a sunlit courtyard and a sewer reads the probes on the far side:
  *  the sewer wall lit like the courtyard. One metre still clears the surface's own cell. */
 const SAMPLE_OFFSET = 1.0;
+
+/** Irradiance of a grid's baked SH atlas at texel-centre coordinates `uvw` for a normal (seven RGBA sub-volumes
+ *  stacked along Z, each nz + 2 padding slices: LightProbeGrid._repackProbes). */
+function shAt(grid, uvw, normal) {
+    const atlas = texture3D(grid.texture), res = uniform(grid.resolution.clone());
+    const nz = res.z, paddedSlices = nz.add(2.0 * ATLAS_PADDING), atlasDepth = paddedSlices.mul(7.0);
+    const uvZBase = uvw.z.mul(nz).add(ATLAS_PADDING);
+    const slice = (t) => atlas.sample(vec3(uvw.xy, uvZBase.add(paddedSlices.mul(t)).div(atlasDepth)));
+    const s0 = slice(0), s1 = slice(1), s2 = slice(2), s3 = slice(3), s4 = slice(4), s5 = slice(5), s6 = slice(6);
+    const sh = array([ s0.xyz, vec3(s0.w, s1.xy), vec3(s1.zw, s2.x), s2.yzw, s3.xyz, vec3(s3.w, s4.xy), vec3(s4.zw, s5.x), s5.yzw, s6.xyz ]);
+    return getShIrradianceAt(normal, sh).max(vec3(0.0));
+}
 
 /** three's LightProbeGridNode with a fixed sample offset instead of half the spacing (see SAMPLE_OFFSET). */
 class ProbeGridNode extends LightProbeGridNode {
@@ -71,6 +84,8 @@ export class ProbeLighting {
         let q = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
         let num = (k, d) => q.has(k) && Number.isFinite(parseFloat(q.get(k))) ? parseFloat(q.get(k)) : d;
         ambient = num('ambient', ambient); environmentFloor = num('envfloor', environmentFloor); bakeEnvironment = num('bakeenv', bakeEnvironment);
+        this.showProbes = q.get('probes') === 'show'; // debug: a sphere per probe, shaded by what it baked, where it baked from
+        this.helper = null;
         this.bakeEnvironment = bakeEnvironment;
         this.environmentFloor = environmentFloor;
         this.environmentUnbaked = environmentUnbaked;
@@ -189,6 +204,7 @@ export class ProbeLighting {
             try { this.inherit(old); } catch(e) { console.warn('probe grid: could not keep the old bake: ' + e.message); }
             this.scene.remove(old.grid); old.grid.dispose();
         }
+        if(this.helper) { this.scene.remove(this.helper); this.helper.dispose(); this.helper = null; }
     }
 
     /** Copy the rows of the previous grid that share this grid's lattice (same step, same x/z lattice). */
@@ -261,6 +277,7 @@ export class ProbeLighting {
     update(camera = null) {
         if(!this.grid) return;
         this.grid.intensity = this.ambient * Math.min(1, this.bakedFraction() * 1.25);
+        if(this.showProbes) this.updateHelper();
         if(this.disabled || this.dirty.size === 0 || this.renderer.initialized === false) return;
         if(this.pauseUntil && performance.now() < this.pauseUntil) return;
         this.budgetMs ??= 5;
@@ -283,9 +300,11 @@ export class ProbeLighting {
             let t0 = performance.now();
             for(let l of this.mute) l.intensity = 0;
             this.scene.environmentIntensity = this.bakeEnvironment;
+            if(this.helper) this.helper.visible = false;
             for(let r of runs) this.grid.bake(this.renderer, this.scene, { start: r.start, count: r.count, cubemapSize: this.cubemapSize, near: 0.1, far: 200 });
             this.mute.forEach((l, i) => l.intensity = muted[i]);
             this.scene.environmentIntensity = env;
+            if(this.helper) this.helper.visible = true;
             this.bakedOnce = true;
             this.failures = 0;
             this.lastBakeMs = performance.now() - t0;
@@ -294,6 +313,7 @@ export class ProbeLighting {
         } catch(e) {
             this.mute.forEach((l, i) => l.intensity = muted[i]);
             this.scene.environmentIntensity = env;
+            if(this.helper) this.helper.visible = true;
             for(let i of take) this.dirty.add(i);
             this.failures++;
             this.pauseUntil = performance.now() + 2000 * this.failures;
@@ -306,6 +326,25 @@ export class ProbeLighting {
      *  diffuse sky light themselves, then only `environmentFloor` (it lights every surface alike, the vault as much as
      *  the plaza, so anything more washes out what the probes know about occlusion). */
     environmentIntensity() { let f = this.bakedFraction(); return this.environmentUnbaked + (this.environmentFloor - this.environmentUnbaked) * f; }
+
+    /** ?probes=show: the grid's own helper (three's LightProbeGridHelper: one sphere per probe shaded by its
+     *  irradiance) at the positions the probes baked from; hidden while baking so the probes never see it. */
+    updateHelper() {
+        if(!this.grid.texture) return;
+        let now = performance.now();
+        if(!this.helper) {
+            this.helper = new LightProbeGridHelper(this.grid, 0.3);
+            // its own shading shows raw irradiance (white at these levels) without tone mapping; the same SH read as
+            // the colour of an unlit material instead, scaled to what a grey (0.2) surface facing that way receives
+            this.helper.material.dispose();
+            this.helper.material = new THREE.MeshBasicNodeMaterial();
+            this.helper.material.colorNode = shAt(this.grid, attribute('instanceUVW', 'vec3'), normalWorld).mul(this.ambient * 0.2 / Math.PI);
+            this.helper.frustumCulled = false;
+            this.scene.add(this.helper);
+            this.helperAt = 0;
+        }
+        if(now - this.helperAt > 2000) { this.helperAt = now; this.helper.update(); } // positions move as probes relocate
+    }
 
     stats() { return this.grid ? { probes: this.grid.resolution.x * this.grid.resolution.y * this.grid.resolution.z, dirty: this.dirty.size, step: this.step } : null; }
 }
