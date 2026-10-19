@@ -10,7 +10,7 @@ export async function buildSite({ watch = false, host = process.env.SERVER_HOST 
     for(let page of ['index.html', 'terms.html', 'privacy.html']) cpSync(page, 'public/' + page); // the legal pages are what Discord's app verification links to
     cpSync('assets', 'public/assets', { recursive: true });
     let options = {
-        entryPoints: ['src/main.js'], bundle: true, format: 'esm', outdir: 'public/dist',
+        entryPoints: { main: 'src/main.js', giWorker: 'src/client/giWorker.js' }, bundle: true, format: 'esm', outdir: 'public/dist', // the vertex GI's worker is its own bundle, next to main.js
         minify: !watch, sourcemap: true, logLevel: 'info',
         define: { PARTYKIT_HOST: JSON.stringify(host) }, // fallback host when the page is not served over http(s)
     };

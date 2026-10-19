@@ -1,4 +1,8 @@
-/** Vertex GI, the GPU half (the CPU half, refinement, records and scheduling, is giCore.js; read its comment first).
+/** Vertex GI, the main thread's half: the GPU (buffers, passes, the packed BVH) and TerrainMirror. The CPU half
+ *  (refinement, records, adaptive splits, scheduling, light seeding, crystal bookkeeping: giCore.js, read its comment
+ *  first) runs in a worker (giHost.js / giWorker.js), or on this thread if a worker cannot start; they talk in messages.
+ *  A chunk's refined mesh therefore arrives a frame or two after its coarse geometry: TerrainMirror keeps drawing what
+ *  it drew before a carve until then (`deferDraw`), so a dig never flashes the probe grid's light.
  *
  *  Rays: three-mesh-bvh's BVHComputeData packs the coarse chunk meshes (the collision meshes TerrainMirror already
  *  builds, each with its own BVH, so only a changed chunk's BVH is rebuilt; the top level is a ClusteredBVH over them)
@@ -22,7 +26,8 @@
 import * as THREE from 'three/webgpu';
 import { Fn, If, instanceIndex, storage, uniform, attribute, varying, vec3, vec4, float, uint, min, max, select } from 'three/tsl';
 import { BVHComputeData, rayStruct, rayIntersectionResultStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { GICore, OP_INIT, NO_RECORD } from './giCore.js';
+import { GI_DEFAULTS, OP_INIT, NO_RECORD } from './giCore.js';
+import { GIHost } from './giHost.js';
 import { G } from '../sky/Globals.js';
 import { CHUNK_SIZE, isRockKey } from '../terrain/grid.js';
 
@@ -33,16 +38,16 @@ export class TerrainGI {
         this.renderer = renderer; this.scene = scene; this.terrain = terrain; this.materials = materials;
         this.layersOf = layersOf;                     // () => average linear colour per texture layer, or null
         // a phone gets half the records and a coarser base mesh (Twin Forts: ~97k records at 2 m, of 131k)
-        this.core = new GICore(mobile ? { capacity: 1 << 17, maxEdge: 3 } : { capacity: 1 << 18 });
-        let C = this.core.p.capacity, R = this.core.records;
+        let params = mobile ? { capacity: 1 << 17, maxEdge: 3 } : { capacity: 1 << 18 }, C = params.capacity;
+        this.p = { ...GI_DEFAULTS, ...params };
         this.maxJobs = jobs || (mobile ? 4096 : 32768);
         this.maxOps = 16384;
         this.maxDistance = 120;
-        // records: position and normal (CPU-written, two vec4s each), sum and count, sample sequence (GPU-written). The
-        // gather pass may bind 8 storage buffers (WebGPU's default, and many phones' limit): these four, the jobs, and
-        // the BVH's four; the sun and sky go in as uniforms.
-        this.geoAttr = new THREE.StorageBufferAttribute(R.geo, 4);
-        // two vec4s per record: [sum of the gathered irradiance, count], [the crystals' light, baked, 0]
+        // records: position and normal (written by the worker, mirrored here; two vec4s each), light (two vec4s: [sum of
+        // the gathered irradiance, count], [the crystals' baked light, 0]) and sample sequence (GPU-written). The gather
+        // pass may bind 8 storage buffers (WebGPU's default, and many phones' limit): these four, the jobs, and the
+        // BVH's four; the sun and sky go in as uniforms.
+        this.geoAttr = new THREE.StorageBufferAttribute(new Float32Array(C * 8), 4);
         this.stateAttr = new THREE.StorageBufferAttribute(new Float32Array(C * 8), 4);
         this.seqAttr = new THREE.StorageBufferAttribute(new Uint32Array(C), 1);
         this.jobsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxJobs), 1);
@@ -50,7 +55,10 @@ export class TerrainGI {
         this.geo = storage(this.geoAttr, 'vec4', C * 2).toReadOnly();
         this.state = storage(this.stateAttr, 'vec4', C * 2);
         this.stateRead = storage(this.stateAttr, 'vec4', C * 2).toReadOnly(); // the vertex stage may only read
-        // glow rocks ("crystals"): a light each, baked into the records within reach by the glow pass (see setRock)
+        this.seq = storage(this.seqAttr, 'uint', C);
+        this.jobs = storage(this.jobsAttr, 'uint', this.maxJobs).toReadOnly();
+        this.ops = storage(this.opsAttr, 'uvec4', this.maxOps).toReadOnly();
+        // glow rocks ("crystals"): a light each, baked into the records within reach by the glow pass (see giHost)
         this.maxCrystals = 8192; this.maxGlowJobs = mobile ? 4096 : 16384;
         this.crystalsAttr = new THREE.StorageBufferAttribute(new Float32Array(this.maxCrystals * 8), 4); // [light position, reach], [colour * power, 0]
         this.glowJobsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxGlowJobs * 8), 4);  // [record, 3 crystals], [4 crystals]
@@ -59,16 +67,6 @@ export class TerrainGI {
         this.glowCount = uniform(0, 'uint');
         this.glowGain = 3.0;      // in records' units (the display multiplies by giScale, 10); 3.5 matched the glow volume's 35 but its pools read stronger
         this.uGlow = uniform(new THREE.Vector4(this.glowGain, 3.5, 1.4, 0)); // gain, reach, falloff distance
-        this.crystals = new Map();    // rock id -> slot
-        this.slots = [];              // slot -> { id, x, y, z, radius, lx, ly, lz, rgb, recs: Set } or null
-        this.freeSlots = [];
-        this.crystalCells = new Map();// 4 m cell -> Set of slots (by light position)
-        this.recCrystals = new Map(); // record -> slots lighting it (at most 7)
-        this.glowQueue = new Set();   // records whose baked crystal light needs (re)computing
-        this.glowAwaitBvh = new Set();// slots to re-bake once the packed BVH has the terrain they were placed against
-        this.seq = storage(this.seqAttr, 'uint', C);
-        this.jobs = storage(this.jobsAttr, 'uint', this.maxJobs).toReadOnly();
-        this.ops = storage(this.opsAttr, 'uvec4', this.maxOps).toReadOnly();
         this.uSun = uniform(new THREE.Vector4(0.3, 0.8, -0.5, this.maxDistance)); // direction to the sun, ray length
         this.uSunE = uniform(new THREE.Vector3(8, 8, 8));    // sun irradiance
         this.uSkyZ = uniform(new THREE.Vector3());           // sky radiance at the zenith ...
@@ -77,24 +75,53 @@ export class TerrainGI {
         this.uE0 = uniform(new THREE.Vector3());             // what an unsampled record stands in with
         this.jobCount = uniform(0, 'uint');
         this.opCount = uniform(0, 'uint');
-        this.maxSamples = uniform(this.core.p.maxSamples);
+        this.maxSamples = uniform(this.p.maxSamples);
         this.giScale = uniform(10);
         // the BVH: a proxy mesh per chunk sharing the collision geometry (and its BVH), not in the scene
         this.proxies = new Map();     // key -> Mesh
         this.bvh = new BVHComputeData([], { attributes: { position: 'vec4f', surface: 'vec4f' } });
         this.bvhDirty = false; this.bvhAt = 0; this.bvhReady = false; this.bvhEpoch = 0;
-        this.pendingReady = new Set(); // chunks waiting for the packed BVH to include them
+        this.pendingReady = new Set(); // chunks the packed BVH does not have yet
+        this.pending = new Map();     // key -> { geometry, alb } sent to the worker, waiting for its refined mesh
         this.classes = new Map();     // "r,g,b,slot,tile" -> material class (render vertices of different classes are not shared)
         this.classList = [];
-        this.staged = [];             // chunks waiting for a readback to decide adaptive splits
+        this.work = null;             // the worker's latest work package, not yet dispatched
+        this.asked = false;           // a frame message is out
         this.readbackAt = 0; this.reading = false;
-        this.stats = { jobs: 0, ops: 0, bvhUpdates: 0, bvhMs: 0, readbacks: 0, chunks: 0, glowJobs: 0, crystals: 0 };
+        this.hostStats = {};
+        this.stats = { jobs: 0, ops: 0, bvhUpdates: 0, bvhMs: 0, readbacks: 0, glowJobs: 0, worker: false };
         this.buildOps();
         this.attachMaterials();
-        this.core.visible = (ax, ay, az, bx, by, bz) => this.visible(ax, ay, az, bx, by, bz);
-        this.core.records.onDrop = (id) => this.forgetRecord(id);
+        this.startHost(params);
+        terrain.deferDraw = true;
         terrain.onGeometry = (key, geometry) => this.onGeometry(key, geometry);
         for(let [key, mesh] of terrain.objects) this.onGeometry(key, mesh.geometry); // chunks that arrived before us
+    }
+
+    /** The CPU half in a worker (giWorker.js, a bundle next to this one); on this thread if that fails. */
+    startHost(params) {
+        let init = { t: 'init', params, maxJobs: this.maxJobs, maxGlowJobs: this.maxGlowJobs, maxCrystals: this.maxCrystals, reach: this.uGlow.value.y };
+        try {
+            let url = new URL('./giWorker.js' + new URL(import.meta.url).search, import.meta.url); // (the bundle's ?v= busts the cache)
+            this.worker = new Worker(url, { type: 'module' });
+            this.worker.onmessage = (e) => this.onHost(e.data);
+            this.worker.onerror = (e) => { console.warn('TerrainGI worker failed (' + (e.message || 'error') + '); running on the main thread'); this.worker = null; this.localHost(init, true); };
+            this.toHost = (m, transfer) => this.worker.postMessage(m, transfer || []);
+            this.toHost(init);
+            this.stats.worker = true;
+        } catch(e) {
+            console.warn('TerrainGI: no worker (' + e.message + '); running on the main thread');
+            this.localHost(init, false);
+        }
+    }
+
+    /** Run the host here (messages become calls; replies are delivered in a microtask, like the worker's would be). */
+    localHost(init, replay) {
+        let host = new GIHost((m) => queueMicrotask(() => this.onHost(m)));
+        this.toHost = (m) => host.handle(m);
+        this.stats.worker = false;
+        host.handle(init);
+        if(replay) { this.pending.clear(); this.asked = false; for(let [key, mesh] of this.terrain.objects) this.onGeometry(key, mesh.geometry); }
     }
 
     // ---- shaders --------------------------------------------------------------------
@@ -270,7 +297,7 @@ export class TerrainGI {
 
     /** The terrain materials read their vertices' records (per vertex, interpolated). */
     attachMaterials() {
-        let rec = attribute('rec', 'float'), wAt = this.core.p.weightAt, valid = rec.greaterThanEqual(0.0), r2 = uint(max(rec, 0.0)).mul(uint(2));
+        let rec = attribute('rec', 'float'), wAt = this.p.weightAt, valid = rec.greaterThanEqual(0.0), r2 = uint(max(rec, 0.0)).mul(uint(2));
         let st = this.stateRead.element(r2), gl = this.stateRead.element(r2.add(uint(1)));
         let giNode = varying(vec4(st.xyz.div(max(st.w, 1.0)), select(valid, min(st.w.div(wAt), 1.0), 0.0)), 'vTerrainGI');
         let glowNode = varying(select(valid, gl.xyz, vec3(0.0)), 'vTerrainGlow');
@@ -292,16 +319,15 @@ export class TerrainGI {
         return k;
     }
 
-    /** A chunk's collision geometry changed (or went): refine it, give TerrainMirror the render geometry, and put the
-     *  coarse one (with each corner's record and albedo) in the BVH. */
+    /** A chunk's collision geometry changed (or went): the worker refines it (onHost 'chunk' brings the render mesh and
+     *  each coarse corner's record, which go to TerrainMirror and into the BVH's `surface` attribute). */
     onGeometry(key, geometry) {
-        let old = this.proxies.get(key);
-        if(old) { this.proxies.delete(key); this.bvhDirty = true; }
+        if(this.proxies.delete(key)) this.bvhDirty = true;
         this.pendingReady.delete(key);
-        if(!geometry) { this.core.removeChunk(key); return; }
+        if(!geometry) { this.pending.delete(key); this.toHost({ t: 'remove', key }); return; }
         let A = geometry.attributes, I = geometry.index.array, nt = geometry.index.count / 3;
         let P = A.position.array, Nn = A.normal.array, U = A.uv ? A.uv.array : null, Cc = A.color.array, S = A.slot.array, T = A.tile.array;
-        let pos = new Float32Array(nt * 9), nrm = new Float32Array(nt * 9), uv = new Float32Array(nt * 6), cls = new Uint16Array(nt), alb = new Float32Array(nt * 3);
+        let pos = new Float32Array(nt * 9), nrm = new Float32Array(nt * 9), uv = U ? new Float32Array(nt * 6) : null, cls = new Uint16Array(nt), alb = new Float32Array(nt * 3);
         let layers = this.layersOf ? this.layersOf() : null;
         for(let t = 0; t < nt; t++) {
             for(let k = 0; k < 3; k++) {
@@ -316,24 +342,55 @@ export class TerrainGI {
         }
         let skip = this.hiddenOnPlanes(key, pos, nrm, nt);
         let carved = this.terrain.changing && this.terrain.changing.key === key ? this.terrain.changing.box : null;
-        let ch = this.core.setChunk(key, geometry.uuid, { pos, nrm, uv: U ? uv : null, cls, skip }, carved);
-        this.pushRender(ch);
-        this.assignCrystals(ch);
-        // the coarse geometry for the BVH: per vertex the record of that corner and the triangle's albedo
-        let surface = new Float32Array(A.position.count * 4);
+        this.pending.set(key, { geometry, alb });
+        let msg = { t: 'chunk', key, version: geometry.uuid, pos, nrm, uv, cls, skip, carved: carved ? { min: carved.min.clone(), max: carved.max.clone() } : null };
+        this.toHost(msg, [pos.buffer, nrm.buffer, cls.buffer, skip.buffer].concat(uv ? [uv.buffer] : []));
+    }
+
+    /** The worker's messages. Record uploads (new records' positions, init and knock ops) come first, always. */
+    onHost(m) {
+        if(m.geo) {
+            this.geoAttr.array.set(m.geo, m.geoLo * 8);
+            this.geoAttr.addUpdateRange(m.geoLo * 8, m.geo.length); this.geoAttr.needsUpdate = true;
+        }
+        if(m.ops) this.runOps(m.ops);
+        if(m.t === 'chunk') this.onChunk(m);
+        else if(m.t === 'work') { this.work = m; this.asked = false; if(m.stats) this.hostStats = m.stats; }
+    }
+
+    /** A refined mesh: to TerrainMirror (if it is still of the chunk's current geometry), and the first one for a
+     *  geometry also puts that geometry in the BVH with its corners' records and albedo. */
+    onChunk(m) {
+        let mesh = this.terrain.objects.get(m.key);
+        if(!mesh || mesh.geometry.uuid !== m.version) return; // replaced since
+        this.pushRender(m, mesh.geometry);
+        let p = this.pending.get(m.key);
+        if(!p || p.geometry !== mesh.geometry) return;        // an adaptive pass: same coarse geometry and corner records
+        this.pending.delete(m.key);
+        let geometry = p.geometry, I = geometry.index.array, nt = geometry.index.count / 3, alb = p.alb;
+        let surface = new Float32Array(geometry.attributes.position.count * 4);
         for(let t = 0; t < nt; t++) for(let k = 0; k < 3; k++) {
             let v = I[t * 3 + k];
-            surface[v * 4] = ch.coarseRec[t * 3 + k];
+            surface[v * 4] = m.coarseRec[t * 3 + k];
             surface[v * 4 + 1] = alb[t * 3]; surface[v * 4 + 2] = alb[t * 3 + 1]; surface[v * 4 + 3] = alb[t * 3 + 2];
         }
         geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 4));
         let proxy = new THREE.Mesh(geometry);
         proxy.updateMatrixWorld();
-        this.proxies.set(key, proxy);
-        this.pendingReady.add(key);
-        ch.ready = false;
+        this.proxies.set(m.key, proxy);
+        this.pendingReady.add(m.key);
         this.bvhDirty = true;
-        this.stats.chunks = this.core.chunks.size;
+    }
+
+    runOps(ops) {
+        for(let at = 0; at < ops.length; at += this.maxOps * 4) {
+            let part = ops.subarray(at, at + this.maxOps * 4), n = part.length / 4;
+            this.opsAttr.array.set(part);
+            this.opsAttr.clearUpdateRanges(); this.opsAttr.addUpdateRange(0, part.length); this.opsAttr.needsUpdate = true;
+            this.opCount.value = n;
+            this.renderer.compute(this.opsKernel, n);
+            this.stats.ops += n;
+        }
     }
 
     /** Flags the triangles of a chunk that lie on one of its boundary planes and cannot be seen: facing into the chunk
@@ -399,198 +456,12 @@ export class TerrainGI {
         return out;
     }
 
-    /** Can one point see another (nothing of the terrain between them)? For copying light to new vertices. */
-    visible(ax, ay, az, bx, by, bz) {
-        let dx = bx - ax, dy = by - ay, dz = bz - az, len = Math.hypot(dx, dy, dz);
-        if(len < 1e-4) return true;
-        let T = this.terrain, ray = this._ray || (this._ray = new THREE.Ray()), box = this._box || (this._box = new THREE.Box3());
-        ray.origin.set(ax, ay, az); ray.direction.set(dx / len, dy / len, dz / len);
-        box.min.set(Math.min(ax, bx), Math.min(ay, by), Math.min(az, bz)); box.max.set(Math.max(ax, bx), Math.max(ay, by), Math.max(az, bz));
-        for(let key of T.intersecting(box)) {
-            let bvh = T.bvh(key);
-            if(bvh && bvh.raycastFirst(ray, THREE.DoubleSide, 0, len)) return false;
-        }
-        return true;
-    }
+    /** A carve changed a region (records around it re-converge; crystals reaching it are placed again: the worker). */
+    changed(box) { this.toHost({ t: 'changed', box: { min: box.min.clone(), max: box.max.clone() } }); }
 
-    /** A carve changed a region: the records around it re-converge (the chunk itself was re-refined by onGeometry), and
-     *  the crystals whose light reaches it are placed and baked again once the packed BVH has the new terrain. */
-    changed(box) {
-        this.core.knockAround(box);
-        let R = this.uGlow.value.y;
-        for(let slot of this.crystalsNear((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, (box.min.z + box.max.z) / 2, R + box.max.distanceTo(box.min) / 2)) this.glowAwaitBvh.add(slot);
-    }
-
-    // ---- crystals ---------------------------------------------------------------------
-
-    static cell4(x, y, z) { return ((Math.floor(x / 4) + 1024) * 2048 + (Math.floor(y / 4) + 1024)) * 2048 + (Math.floor(z / 4) + 1024); }
-
-    /** Slots of crystals whose light position is within `reach` of a point. */
-    crystalsNear(x, y, z, reach) {
-        let out = [], r = Math.ceil(reach / 4);
-        let cx = Math.floor(x / 4), cy = Math.floor(y / 4), cz = Math.floor(z / 4);
-        for(let i = -r; i <= r; i++) for(let j = -r; j <= r; j++) for(let k = -r; k <= r; k++) {
-            let set = this.crystalCells.get(((cx + i + 1024) * 2048 + (cy + j + 1024)) * 2048 + (cz + k + 1024));
-            if(!set) continue;
-            for(let slot of set) { let c = this.slots[slot]; if((c.lx - x) ** 2 + (c.ly - y) ** 2 + (c.lz - z) ** 2 <= reach * reach) out.push(slot); }
-        }
-        return out;
-    }
-
-    /** Where a crystal's light stands: a little out of the wall, along the normal of the terrain surface nearest it (a
-     *  crystal pokes through that surface: it is partly exposed), as the glow volume placed it: a source flush with the
-     *  wall would light that wall only at grazing angles. (Averaging the directions rays could travel put many lights
-     *  inside the rock: a ray starting in solid with no surface within reach looked open.) */
-    placeCrystal(c) {
-        let T = this.terrain, p = this._p || (this._p = new THREE.Vector3()), hit = this._hit || (this._hit = {});
-        let box = this._box || (this._box = new THREE.Box3()), e = c.radius + 1;
-        p.set(c.x, c.y, c.z); box.min.set(c.x - e, c.y - e, c.z - e); box.max.set(c.x + e, c.y + e, c.z + e);
-        let best = Infinity, nx = 0, ny = 0, nz = 0;
-        for(let key of T.intersecting(box)) {
-            let bvh = T.bvh(key);
-            if(!bvh || !bvh.closestPointToPoint(p, hit, 0, Math.min(best, e)) || hit.distance >= best) continue;
-            let g = bvh.geometry, P = g.attributes.position.array, I = g.index.array, f = hit.faceIndex * 3;
-            let a = I[f] * 3, b = I[f + 1] * 3, d = I[f + 2] * 3;
-            let ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2], vx = P[d] - P[a], vy = P[d + 1] - P[a + 1], vz = P[d + 2] - P[a + 2];
-            let cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx, l = Math.hypot(cx, cy, cz);
-            if(l < 1e-12) continue;
-            best = hit.distance; nx = cx / l; ny = cy / l; nz = cz / l;
-        }
-        let k = best < Infinity ? c.radius + 0.35 : 0;
-        c.lx = c.x + nx * k; c.ly = c.y + ny * k; c.lz = c.z + nz * k;
-    }
-
-    /** Write a crystal into the GPU buffer and link it with the records within its reach (each record keeps the 7 that
-     *  are closest), queueing those records for the glow pass. */
-    linkCrystal(slot) {
-        let c = this.slots[slot], a = this.crystalsAttr.array, o = slot * 8, reach = this.uGlow.value.y;
-        a[o] = c.lx; a[o + 1] = c.ly; a[o + 2] = c.lz; a[o + 3] = reach;
-        a[o + 4] = c.rgb[0]; a[o + 5] = c.rgb[1]; a[o + 6] = c.rgb[2]; a[o + 7] = 0;
-        this.crystalsAttr.addUpdateRange(o, 8); this.crystalsAttr.needsUpdate = true;
-        let cell = TerrainGI.cell4(c.lx, c.ly, c.lz), set = this.crystalCells.get(cell);
-        if(set) set.add(slot); else this.crystalCells.set(cell, new Set([slot]));
-        c.cell = cell;
-        let R = this.core.records, g = R.geo, r = Math.ceil(reach);
-        let cx = Math.floor(c.lx), cy = Math.floor(c.ly), cz = Math.floor(c.lz);
-        for(let i = -r; i <= r; i++) for(let j = -r; j <= r; j++) for(let k = -r; k <= r; k++) {
-            let list = R.cells.get(((cx + i + 4096) * 8192 + (cy + j + 4096)) * 8192 + (cz + k + 4096));
-            if(!list) continue;
-            for(let id of list) {
-                let q = id * 8;
-                if((g[q] - c.lx) ** 2 + (g[q + 1] - c.ly) ** 2 + (g[q + 2] - c.lz) ** 2 > reach * reach) continue;
-                this.addCrystalTo(id, slot);
-            }
-        }
-    }
-
-    /** Give a record a crystal (keeping its 7 closest) and queue it. */
-    addCrystalTo(id, slot) {
-        let list = this.recCrystals.get(id), g = this.core.records.geo, q = id * 8;
-        let d2 = (s) => { let c = this.slots[s]; return (g[q] - c.lx) ** 2 + (g[q + 1] - c.ly) ** 2 + (g[q + 2] - c.lz) ** 2; };
-        if(!list) { list = []; this.recCrystals.set(id, list); }
-        if(list.includes(slot)) { this.glowQueue.add(id); return; }
-        if(list.length >= 7) {
-            let worst = 0; for(let i = 1; i < list.length; i++) if(d2(list[i]) > d2(list[worst])) worst = i;
-            if(d2(list[worst]) <= d2(slot)) return;
-            this.slots[list[worst]].recs.delete(id);
-            list[worst] = slot;
-        } else list.push(slot);
-        this.slots[slot].recs.add(id);
-        this.glowQueue.add(id);
-    }
-
-    /** Undo linkCrystal: the records it lit are queued (to bake without it). */
-    unlinkCrystal(slot) {
-        let c = this.slots[slot];
-        for(let id of c.recs) {
-            let list = this.recCrystals.get(id);
-            if(list) { let i = list.indexOf(slot); if(i >= 0) list.splice(i, 1); if(!list.length) this.recCrystals.delete(id); }
-            this.glowQueue.add(id);
-        }
-        c.recs.clear();
-        let set = this.crystalCells.get(c.cell);
-        if(set) { set.delete(slot); if(!set.size) this.crystalCells.delete(c.cell); }
-    }
-
-    /** A glow rock showed up or changed (GlowRockRenderSystem): `color` linear, `power` its exposure's share of the light. */
-    setRock(id, x, y, z, radius, color, power) {
-        let slot = this.crystals.get(id);
-        if(slot !== undefined) {
-            let c = this.slots[slot];
-            if(c.x === x && c.y === y && c.z === z) {
-                if(Math.abs(c.power - power) < 0.01) return;
-                c.power = power; c.rgb = [color.r * power, color.g * power, color.b * power];
-                let a = this.crystalsAttr.array, o = slot * 8;
-                a[o + 4] = c.rgb[0]; a[o + 5] = c.rgb[1]; a[o + 6] = c.rgb[2];
-                this.crystalsAttr.addUpdateRange(o + 4, 3); this.crystalsAttr.needsUpdate = true;
-                for(let r of c.recs) this.glowQueue.add(r);
-                return;
-            }
-            this.removeRock(id);
-        }
-        slot = this.freeSlots.length ? this.freeSlots.pop() : this.slots.length;
-        if(slot >= this.maxCrystals) return;
-        let c = { id, x, y, z, radius, power, rgb: [color.r * power, color.g * power, color.b * power], recs: new Set(), lx: x, ly: y, lz: z, cell: 0 };
-        this.slots[slot] = c;
-        this.crystals.set(id, slot);
-        this.placeCrystal(c);
-        this.linkCrystal(slot);
-        this.glowAwaitBvh.add(slot);   // the packed BVH may not have the dig that exposed it yet
-        this.stats.crystals = this.crystals.size;
-        // the bounce around it changes too
-        this.core.knockAround({ min: { x: c.lx, y: c.ly, z: c.lz }, max: { x: c.lx, y: c.ly, z: c.lz } });
-    }
-
-    removeRock(id) {
-        let slot = this.crystals.get(id);
-        if(slot === undefined) return;
-        this.unlinkCrystal(slot);
-        let a = this.crystalsAttr.array, o = slot * 8;
-        a.fill(0, o, o + 8); this.crystalsAttr.addUpdateRange(o, 8); this.crystalsAttr.needsUpdate = true;
-        this.glowAwaitBvh.delete(slot);
-        this.slots[slot] = null; this.freeSlots.push(slot);
-        this.crystals.delete(id);
-        this.stats.crystals = this.crystals.size;
-    }
-
-    /** New records near crystals (a refined or carved chunk) get theirs. */
-    assignCrystals(ch) {
-        if(!this.crystals.size) return;
-        let g = this.core.records.geo, reach = this.uGlow.value.y;
-        for(let id of ch.recs) {
-            if(this.recCrystals.has(id)) continue;
-            let q = id * 8;
-            for(let slot of this.crystalsNear(g[q], g[q + 1], g[q + 2], reach)) this.addCrystalTo(id, slot);
-        }
-    }
-
-    /** A record was freed: its slot may be reused by another vertex. */
-    forgetRecord(id) {
-        let list = this.recCrystals.get(id);
-        if(list) { for(let slot of list) this.slots[slot]?.recs.delete(id); this.recCrystals.delete(id); }
-        this.glowQueue.delete(id);
-    }
-
-    /** Bake queued records' crystal light (within the per-frame budget). */
-    runGlow() {
-        if(!this.glowQueue.size) return;
-        let a = this.glowJobsAttr.array, n = 0, NO = NO_RECORD;
-        for(let id of this.glowQueue) {
-            if(n >= this.maxGlowJobs) break;
-            this.glowQueue.delete(id);
-            if(this.core.records.refs[id] === 0) continue;
-            let list = this.recCrystals.get(id) || [], o = n * 8;
-            a[o] = id;
-            for(let i = 0; i < 7; i++) a[o + 1 + i] = i < list.length ? list[i] : NO;
-            n++;
-        }
-        if(!n) return;
-        this.glowJobsAttr.clearUpdateRanges(); this.glowJobsAttr.addUpdateRange(0, n * 8); this.glowJobsAttr.needsUpdate = true;
-        this.glowCount.value = n;
-        this.uGlow.value.x = this.glowGain;
-        this.renderer.compute(this.glowKernel, n);
-        this.stats.glowJobs += n;
-    }
+    /** Glow rocks (GlowRockRenderSystem, through GameClient's glowSink): their light is baked into the records. */
+    setRock(id, x, y, z, radius, color, power) { this.toHost({ t: 'rock', id, x, y, z, radius, rgb: [color.r, color.g, color.b], power }); }
+    removeRock(id) { this.toHost({ t: 'unrock', id }); }
 
     // ---- per frame --------------------------------------------------------------------
 
@@ -618,7 +489,7 @@ export class TerrainGI {
 
     update(camera) {
         if(this.renderer.initialized === false) return;
-        let now = performance.now(), core = this.core, R = core.records;
+        let now = performance.now();
         // the packed BVH, at most once a second, once the chunks arriving in a burst have settled
         if(this.bvhDirty && this.proxies.size && now - this.bvhAt > 1000) {
             let t0 = performance.now();
@@ -627,63 +498,56 @@ export class TerrainGI {
                 this.bvh.update();
                 this.buildGather();
                 this.bvhReady = true; this.bvhEpoch++;
-                for(let key of this.pendingReady) { let ch = core.chunks.get(key); if(ch) ch.ready = true; }
+                this.toHost({ t: 'ready', keys: [...this.pendingReady] });
                 this.pendingReady.clear();
-                // crystals placed or changed since: placed again against the terrain as it is now, and baked again
-                for(let slot of this.glowAwaitBvh) { let c = this.slots[slot]; if(!c) continue; this.unlinkCrystal(slot); this.placeCrystal(c); this.linkCrystal(slot); }
-                this.glowAwaitBvh.clear();
             } catch(e) { console.warn('TerrainGI: BVH update failed: ' + e.message); }
             this.bvhDirty = false; this.bvhAt = now;
             this.stats.bvhUpdates++; this.stats.bvhMs = performance.now() - t0;
         }
-        // new records' positions and normals, then the ops (initialise, knock back), then the rays
-        let dirty = R.takeDirty();
-        if(dirty) {
-            let [lo, hi] = dirty;
-            let a = this.geoAttr; a.clearUpdateRanges(); a.addUpdateRange(lo * 8, (hi - lo + 1) * 8); a.needsUpdate = true;
+        // the worker's latest work package: crystal buffer writes, the glow pass, the rays
+        let w = this.work;
+        if(w && this.bvhReady) {
+            this.work = null;
+            for(let [slot, data] of w.crystals) { this.crystalsAttr.array.set(data, slot * 8); this.crystalsAttr.addUpdateRange(slot * 8, 8); this.crystalsAttr.needsUpdate = true; }
+            if(w.glow) {
+                let n = w.glow.length / 8;
+                this.glowJobsAttr.array.set(w.glow);
+                this.glowJobsAttr.clearUpdateRanges(); this.glowJobsAttr.addUpdateRange(0, w.glow.length); this.glowJobsAttr.needsUpdate = true;
+                this.glowCount.value = n; this.uGlow.value.x = this.glowGain;
+                this.renderer.compute(this.glowKernel, n);
+                this.stats.glowJobs += n;
+            }
+            let count = w.jobs.length;
+            if(count > 0) {
+                this.jobsAttr.array.set(w.jobs);
+                this.jobsAttr.clearUpdateRanges(); this.jobsAttr.addUpdateRange(0, count); this.jobsAttr.needsUpdate = true;
+                this.jobCount.value = count;
+                this.renderer.compute(this.gatherKernel, count);
+                this.stats.jobs += count;
+            }
+            if(w.wantState && !this.reading && now - this.readbackAt > 1500) this.readback();
+        } else if(w && !this.bvhReady) {
+            // nothing to trace against yet: keep the crystal writes, drop the jobs (the worker counted them, harmlessly)
+            for(let [slot, data] of w.crystals) { this.crystalsAttr.array.set(data, slot * 8); this.crystalsAttr.addUpdateRange(slot * 8, 8); this.crystalsAttr.needsUpdate = true; }
+            this.work = null;
         }
-        let ops = R.takeOps();
-        for(let at = 0; at < ops.length; at += this.maxOps * 4) {
-            let part = ops.slice(at, at + this.maxOps * 4), n = part.length / 4;
-            this.opsAttr.array.set(part);
-            this.opsAttr.clearUpdateRanges(); this.opsAttr.addUpdateRange(0, part.length); this.opsAttr.needsUpdate = true;
-            this.opCount.value = n;
-            this.renderer.compute(this.opsKernel, n);
-            this.stats.ops += n;
-        }
-        if(!this.bvhReady) return;
-        this.runGlow();
-        let { count, staged } = core.schedule(this.jobsAttr.array, camera.position);
-        for(let ch of staged) this.staged.push(ch);
-        if(count > 0) {
-            this.jobsAttr.clearUpdateRanges(); this.jobsAttr.addUpdateRange(0, count); this.jobsAttr.needsUpdate = true;
-            this.jobCount.value = count;
-            this.renderer.compute(this.gatherKernel, count);
-            this.stats.jobs += count;
-        }
-        // adaptive splits need the sums: read them back now and then
-        if(this.staged.length && !this.reading && now - this.readbackAt > 2000) this.readback();
+        if(!this.asked) { this.asked = true; this.toHost({ t: 'frame', cam: [camera.position.x, camera.position.y, camera.position.z] }); }
     }
 
+    /** The records' light, for the worker's adaptive splits (sent, not copied). */
     async readback() {
         this.reading = true; this.readbackAt = performance.now();
         try {
             let buf = await this.renderer.getArrayBufferAsync(this.stateAttr);
-            let state = new Float32Array(buf), list = this.staged; this.staged = [];
+            this.toHost({ t: 'state', buf }, [buf]);
             this.stats.readbacks++;
-            let redo = new Set();
-            for(let ch of list) {
-                if(this.core.chunks.get(ch.key) !== ch) continue; // replaced since
-                for(let c of this.core.adapt(ch, state)) redo.add(c);
-            }
-            for(let c of redo) { this.pushRender(c); this.assignCrystals(c); }
         } catch(e) { console.warn('TerrainGI: readback failed: ' + e.message); }
         this.reading = false;
     }
 
     /** Hand TerrainMirror a chunk's refined render geometry (after onGeometry, or an adaptive pass: same coarse geometry
-     *  and corner records, more vertices). */
-    pushRender(ch) {
+     *  and corner records, more vertices), for the coarse geometry it was refined from. */
+    pushRender(ch, coarse) {
         let n = ch.cls.length, col = new Float32Array(n * 3), slot = new Float32Array(n), tile = new Float32Array(n), rec = new Float32Array(n);
         for(let i = 0; i < n; i++) {
             let c = this.classList[ch.cls[i]];
@@ -698,12 +562,8 @@ export class TerrainGI {
         g.setAttribute('normal', new THREE.BufferAttribute(ch.normals, 3));
         g.setAttribute('rec', new THREE.BufferAttribute(rec, 1));
         g.setIndex(new THREE.BufferAttribute(ch.index, 1));
-        this.terrain.setRenderGeometry(ch.key, g);
+        this.terrain.setRenderGeometry(ch.key, g, coarse);
     }
 
-    info() {
-        let c = this.core, n = 0, ready = 0, minS = Infinity;
-        for(let ch of c.chunks.values()) { n += ch.recs.length; if(ch.ready) ready++; if(ch.recs.length) minS = Math.min(minS, ch.minSamples); }
-        return { chunks: c.chunks.size, ready, records: c.records.size, crystalRecords: this.recCrystals.size, glowQueue: this.glowQueue.size, refs: n, full: c.records.full, minSamples: minS, splits: c.splitEdges.size, ...this.stats, refineMs: Math.round(c.stats.refineMs) };
-    }
+    info() { return { ...this.hostStats, ...this.stats, bvhChunks: this.proxies.size, pending: this.pending.size }; }
 }

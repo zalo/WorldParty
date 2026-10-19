@@ -33,6 +33,7 @@ const SETTLE_MS = 2000;
 const GATHER_MS = 250;                 // a batch waits this long after a chunk settles into it, for its neighbours
 const FORCE_MS = 10000;                // a batch that keeps changing is rebuilt anyway this long after it first did
 const REBUILD_TRIS_PER_FRAME = 65536;  // rebuild work per update (at least one batch)
+const DEFER_MS = 250;                  // longest a chunk keeps its previous drawing while its refined mesh is on its way
 const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3], ['rec', 1]];
 
 function regionOf(key) {
@@ -146,6 +147,8 @@ export class TerrainMirror {
         this.render = new Map();    // key -> refined render geometry (TerrainGI), drawn instead of the collision geometry
         this.onGeometry = null;     // (key, geometry|null) => void, after a chunk's collision geometry was replaced
         this.changing = null;       // { key, box } while a chunk whose content a carve changed is being rebuilt
+        this.deferDraw = false;     // see setGeometry
+        this.waiting = new Map();   // key -> time until which the chunk's previous drawing stays (deferDraw)
         // render batching (see REGION); the Raycaster and the BVH users ignore `visible`, the renderer skips the subtree
         this.batching = batching;
         this.group.visible = !batching;
@@ -349,10 +352,14 @@ export class TerrainMirror {
 
     setGeometry(key, geometry) {
         let mesh = this.objects.get(key);
-        this.undraw(key);
+        // With deferDraw (TerrainGI, whose refined mesh comes back from a worker a frame or two later), a chunk that was
+        // drawn refined keeps drawing that until the new one arrives (setRenderGeometry) or DEFER_MS pass: drawn as the
+        // bare collision geometry meanwhile, a fresh dig showed the probe grid's light for those frames.
+        let keep = this.deferDraw && geometry && this.batching && this.render.has(key) && this.drawn.has(key);
+        if(!keep) this.undraw(key);
         this.render.delete(key); // refined from the old content
-        if(mesh) { this.group.remove(mesh); mesh.geometry.dispose(); this.objects.delete(key); }
-        if(!geometry) { this.forget(key); this.onGeometry?.(key, null); return; }
+        if(mesh) { this.group.remove(mesh); if(!keep) mesh.geometry.dispose(); this.objects.delete(key); }
+        if(!geometry) { this.waiting.delete(key); this.forget(key); this.onGeometry?.(key, null); return; }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();
@@ -365,8 +372,9 @@ export class TerrainMirror {
         mesh.userData.chunkKey = key;
         this.group.add(mesh);
         this.objects.set(key, mesh);
-        if(this.batching) this.drawHot(key, geometry);
-        this.onGeometry?.(key, geometry); // TerrainGI refines it now and hands back a render geometry (setRenderGeometry)
+        if(keep) this.waiting.set(key, performance.now() + DEFER_MS);
+        else if(this.batching) this.drawHot(key, geometry);
+        this.onGeometry?.(key, geometry); // TerrainGI refines it and hands back a render geometry (setRenderGeometry)
     }
 
     /** What is drawn for a chunk: its refined render geometry when there is one, else the collision geometry. */
@@ -374,16 +382,18 @@ export class TerrainMirror {
 
     /** A refined render geometry for a chunk (same surface, more vertices, a GI record per vertex). Drawn at once if the
      *  chunk is drawn on its own; a batch keeps drawing the old one until its rebuild, which is the same surface. */
-    setRenderGeometry(key, geometry) {
-        if(!this.objects.has(key)) return;
+    setRenderGeometry(key, geometry, coarse = null) {
+        let mesh = this.objects.get(key);
+        if(!mesh || (coarse && mesh.geometry !== coarse)) return; // refined from a geometry the chunk no longer has
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         this.render.set(key, geometry);
         if(!this.batching) return;
+        if(this.waiting.delete(key)) { this.undraw(key); this.drawHot(key, mesh.geometry); return; } // the old drawing goes now
         let st = this.drawn.get(key);
         if(!st) return;
         if(st.hot) {
-            this.renderGroup.remove(st.hot);
+            this.dropHot(key, st.hot);
             let hot = new THREE.Mesh(geometry, this.material);
             hot.castShadow = true; hot.receiveShadow = true; hot.matrixAutoUpdate = false; hot.userData.chunkKey = key;
             this.renderGroup.add(hot);
@@ -393,11 +403,19 @@ export class TerrainMirror {
 
     // ---- render batching ------------------------------------------------------
 
+    /** Remove a chunk's own mesh; a refined geometry it drew that is no longer current frees its GPU buffers (the
+     *  collision geometry and the current render geometry stay: batches and the BVHs read their arrays). */
+    dropHot(key, hot) {
+        this.renderGroup.remove(hot);
+        let g = hot.geometry;
+        if(g !== this.objects.get(key)?.geometry && g !== this.render.get(key)) g.dispose();
+    }
+
     /** Take a chunk out of what is drawn: its own mesh, and its range of its batch (zeroed indices, until the rebuild). */
     undraw(key) {
         let st = this.drawn.get(key);
         if(!st) return;
-        if(st.hot) { this.renderGroup.remove(st.hot); st.hot = null; }
+        if(st.hot) { this.dropHot(key, st.hot); st.hot = null; }
         this.hotKeys.delete(key);
         if(st.batch && st.inMesh) {
             let b = st.batch, r = b.ranges.get(key), index = b.mesh.geometry.index;
@@ -462,6 +480,11 @@ export class TerrainMirror {
     update() {
         if(!this.batching) return;
         let now = performance.now();
+        for(let [key, until] of this.waiting) {
+            if(now < until) continue;
+            this.waiting.delete(key); this.undraw(key);
+            let m = this.objects.get(key); if(m) this.drawHot(key, m.geometry);
+        }
         for(let key of this.hotKeys) {
             let st = this.drawn.get(key);
             if(!st || st.settled || now - st.changedAt < SETTLE_MS) continue;

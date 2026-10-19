@@ -297,7 +297,8 @@ export class GICore {
     }
 
     /** Split the edges of a chunk whose ends disagree (see `contrast`), given the GPU's sums and counts (`state`, 8
-     *  floats per record); returns the chunks to re-refine (the chunk, and neighbours sharing a split edge on a face). */
+     *  floats per record); returns the chunks to refine again (`redo`: the chunk, and neighbours sharing a split edge on
+     *  a face). */
     adapt(ch, state) {
         let p = this.p, I = ch.index, P = ch.positions, rec = ch.recOf, added = 0, planes = [];
         if(this.records.full) return [];
@@ -323,20 +324,24 @@ export class GICore {
         }
         this.stats.adapts++; this.stats.splits += added;
         if(!added) return [];
-        this.records.batch++;
         let again = new Set([ch]);
         for(let [axis, s] of planes) {
             let c = ch.min.slice(); c[axis] = s === ch.min[axis] ? ch.min[axis] - CHUNK : ch.min[axis] + CHUNK;
             let nb = this.chunks.get(`${Math.round(c[0] / CHUNK)},${Math.round(c[1] / CHUNK)},${Math.round(c[2] / CHUNK)}`);
             if(nb) again.add(nb);
         }
-        for(let c of again) {
-            let oldRecs = c.recOf;
-            this.refine(c);
-            for(let r of oldRecs) if(r >= 0) this.records.release(r);
-        }
-        this.records.sweep();
         return [...again];
+    }
+
+    /** Refine a chunk again with the split edges as they are now (after adapt): its records carry over by key. The
+     *  caller collects the chunks of a whole batch of adapt passes and redoes each once (a neighbour sharing several
+     *  split faces used to be refined once per pass: 36 passes refined 174 chunks). */
+    redo(c) {
+        this.records.batch++;
+        let oldRecs = c.recOf;
+        this.refine(c);
+        for(let r of oldRecs) if(r >= 0) this.records.release(r);
+        this.records.sweep();
     }
 
     // ---- scheduling ------------------------------------------------------------------
