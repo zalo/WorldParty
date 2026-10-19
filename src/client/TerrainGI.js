@@ -42,13 +42,30 @@ export class TerrainGI {
         // gather pass may bind 8 storage buffers (WebGPU's default, and many phones' limit): these four, the jobs, and
         // the BVH's four; the sun and sky go in as uniforms.
         this.geoAttr = new THREE.StorageBufferAttribute(R.geo, 4);
-        this.stateAttr = new THREE.StorageBufferAttribute(new Float32Array(C * 4), 4);
+        // two vec4s per record: [sum of the gathered irradiance, count], [the crystals' light, baked, 0]
+        this.stateAttr = new THREE.StorageBufferAttribute(new Float32Array(C * 8), 4);
         this.seqAttr = new THREE.StorageBufferAttribute(new Uint32Array(C), 1);
         this.jobsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxJobs), 1);
         this.opsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxOps * 4), 4);
         this.geo = storage(this.geoAttr, 'vec4', C * 2).toReadOnly();
-        this.state = storage(this.stateAttr, 'vec4', C);
-        this.stateRead = storage(this.stateAttr, 'vec4', C).toReadOnly(); // the vertex stage may only read
+        this.state = storage(this.stateAttr, 'vec4', C * 2);
+        this.stateRead = storage(this.stateAttr, 'vec4', C * 2).toReadOnly(); // the vertex stage may only read
+        // glow rocks ("crystals"): a light each, baked into the records within reach by the glow pass (see setRock)
+        this.maxCrystals = 8192; this.maxGlowJobs = mobile ? 4096 : 16384;
+        this.crystalsAttr = new THREE.StorageBufferAttribute(new Float32Array(this.maxCrystals * 8), 4); // [light position, reach], [colour * power, 0]
+        this.glowJobsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxGlowJobs * 8), 4);  // [record, 3 crystals], [4 crystals]
+        this.crystalsBuf = storage(this.crystalsAttr, 'vec4', this.maxCrystals * 2).toReadOnly();
+        this.glowJobs = storage(this.glowJobsAttr, 'uvec4', this.maxGlowJobs * 2).toReadOnly();
+        this.glowCount = uniform(0, 'uint');
+        this.glowGain = 3.0;      // in records' units (the display multiplies by giScale, 10); 3.5 matched the glow volume's 35 but its pools read stronger
+        this.uGlow = uniform(new THREE.Vector4(this.glowGain, 3.5, 1.4, 0)); // gain, reach, falloff distance
+        this.crystals = new Map();    // rock id -> slot
+        this.slots = [];              // slot -> { id, x, y, z, radius, lx, ly, lz, rgb, recs: Set } or null
+        this.freeSlots = [];
+        this.crystalCells = new Map();// 4 m cell -> Set of slots (by light position)
+        this.recCrystals = new Map(); // record -> slots lighting it (at most 7)
+        this.glowQueue = new Set();   // records whose baked crystal light needs (re)computing
+        this.glowAwaitBvh = new Set();// slots to re-bake once the packed BVH has the terrain they were placed against
         this.seq = storage(this.seqAttr, 'uint', C);
         this.jobs = storage(this.jobsAttr, 'uint', this.maxJobs).toReadOnly();
         this.ops = storage(this.opsAttr, 'uvec4', this.maxOps).toReadOnly();
@@ -71,10 +88,11 @@ export class TerrainGI {
         this.classList = [];
         this.staged = [];             // chunks waiting for a readback to decide adaptive splits
         this.readbackAt = 0; this.reading = false;
-        this.stats = { jobs: 0, ops: 0, bvhUpdates: 0, bvhMs: 0, readbacks: 0, chunks: 0 };
+        this.stats = { jobs: 0, ops: 0, bvhUpdates: 0, bvhMs: 0, readbacks: 0, chunks: 0, glowJobs: 0, crystals: 0 };
         this.buildOps();
         this.attachMaterials();
         this.core.visible = (ax, ay, az, bx, by, bz) => this.visible(ax, ay, az, bx, by, bz);
+        this.core.records.onDrop = (id) => this.forgetRecord(id);
         terrain.onGeometry = (key, geometry) => this.onGeometry(key, geometry);
         for(let [key, mesh] of terrain.objects) this.onGeometry(key, mesh.geometry); // chunks that arrived before us
     }
@@ -91,9 +109,10 @@ export class TerrainGI {
             // fn
             fn giCached( r: f32, e0: vec3f ) -> vec3f {
                 if ( r < 0.0 ) { return e0; }
-                let s = ${ state }[ u32( r ) ];
-                if ( s.w < 1.0 ) { return e0; }
-                return s.xyz / s.w;
+                let s = ${ state }[ u32( r ) * 2u ];
+                let glow = ${ state }[ u32( r ) * 2u + 1u ].xyz;
+                if ( s.w < 1.0 ) { return e0 + glow; }
+                return s.xyz / s.w + glow;
             }
         `;
         // one sample of the irradiance at a record: pi times the radiance from one cosine-distributed direction
@@ -155,12 +174,67 @@ export class TerrainGI {
                 const n = seq.element(id).toVar();
                 const e = sample(id, n, this.uSun, this.uSunE, this.uSkyZ, this.uSkyH, this.uGround, this.uE0).toVar();
                 seq.element(id).assign(n.add(uint(1)));
-                const s = state.element(id).toVar();
+                const s = state.element(id.mul(uint(2))).toVar();
                 s.addAssign(vec4(e, 1.0));
                 If(s.w.greaterThan(maxS), () => { s.mulAssign(maxS.div(s.w)); });
-                state.element(id).assign(s);
+                state.element(id.mul(uint(2))).assign(s);
             });
         })().compute(this.maxJobs).setName('TerrainGI gather');
+        old?.dispose?.();
+        this.buildGlow();
+    }
+
+    /** The glow pass: the crystals' light at a record, one shadow ray per crystal (they are small: a point light each,
+     *  standing a little out of the wall, see setRock), with the glow volume's falloff. Run once per record whenever a
+     *  crystal near it appears, changes or goes, or the terrain around changes; the gather then sees the crystals' light
+     *  at its hits (giCached), so it bounces. Binds 8 storage buffers, like the gather: records, light, crystals, jobs,
+     *  and the BVH's four. */
+    buildGlow() {
+        let { geo, state, crystalsBuf, glowJobs, bvh, glowCount } = this;
+        let raycast = bvh.fns.raycastFirstHit;
+        const glowFn = wgslTagFn/* wgsl */`
+            // fn
+            fn giGlow( j: u32, gp: vec4f ) -> vec3f {
+                let A = ${ glowJobs }[ j * 2u ];
+                let B = ${ glowJobs }[ j * 2u + 1u ];
+                let P = ${ geo }[ A.x * 2u ].xyz;
+                let n = normalize( ${ geo }[ A.x * 2u + 1u ].xyz );
+                var slots = array<u32, 7>( A.y, A.z, A.w, B.x, B.y, B.z, B.w );
+                var E = vec3f( 0.0 );
+                for ( var i = 0u; i < 7u; i = i + 1u ) {
+                    let c = slots[ i ];
+                    if ( c == 0xffffffffu ) { continue; }
+                    let C0 = ${ crystalsBuf }[ c * 2u ];
+                    let C1 = ${ crystalsBuf }[ c * 2u + 1u ];
+                    let L = C0.xyz - P;
+                    let d = length( L );
+                    if ( d >= C0.w || d < 1e-4 ) { continue; }
+                    let l = L / d;
+                    let cs = dot( n, l );
+                    if ( cs <= 0.0 ) { continue; }
+                    var ray: ${ rayStruct };
+                    ray.origin = P + n * 0.004;
+                    ray.direction = l;
+                    ray.maxDist = max( d - 0.03, 0.001 );
+                    var hit: ${ rayIntersectionResultStruct };
+                    ${ raycast }( ray, &hit );
+                    if ( hit.didHit ) { continue; }
+                    let s = d / C0.w;
+                    let t = 1.0 - s * s;
+                    let q = d / gp.z;
+                    E += C1.xyz * ( cs * t * t / ( 1.0 + q * q ) );
+                }
+                return E * gp.x;
+            }
+        `;
+        let old = this.glowKernel;
+        this.glowKernel = Fn(() => {
+            If(instanceIndex.lessThan(glowCount), () => {
+                const id = glowJobs.element(instanceIndex.mul(uint(2))).x.toVar();
+                const e = glowFn(instanceIndex, this.uGlow).toVar();
+                state.element(id.mul(uint(2)).add(uint(1))).assign(vec4(e, 0.0));
+            });
+        })().compute(this.maxGlowJobs).setName('TerrainGI glow');
         old?.dispose?.();
     }
 
@@ -176,18 +250,19 @@ export class TerrainGI {
                 const k = float(op.x.shiftRight(uint(16)).bitAnd(uint(255))).div(255.0);
                 If(op.x.bitAnd(uint(255)).equal(uint(OP_INIT)), () => {
                     If(op.z.equal(uint(NO_RECORD)), () => {
-                        state.element(id).assign(vec4(0.0, 0.0, 0.0, w)); // empty (unknown, w 0) or dark (a carve with nothing in sight)
+                        state.element(id.mul(uint(2))).assign(vec4(0.0, 0.0, 0.0, w)); // empty (unknown, w 0) or dark (a carve with nothing in sight)
                     }).Else(() => {
                         // copied from two gathered records: their mean at weight w
-                        const sa = state.element(op.z).toVar(), sb = state.element(op.w).toVar();
+                        const sa = state.element(op.z.mul(uint(2))).toVar(), sb = state.element(op.w.mul(uint(2))).toVar();
                         const mean = sa.xyz.div(max(sa.w, 1.0)).add(sb.xyz.div(max(sb.w, 1.0))).mul(k.mul(0.5));
-                        state.element(id).assign(vec4(mean.mul(w), w));
+                        state.element(id.mul(uint(2))).assign(vec4(mean.mul(w), w));
                     });
+                    state.element(id.mul(uint(2)).add(uint(1))).assign(vec4(0.0)); // no crystal light until the glow pass says so
                     seq.element(id).assign(uint(0));
                 }).Else(() => {
                     // keep at most n samples' worth: the mean stays, its weight drops
-                    const s = state.element(id).toVar(), n = float(op.z);
-                    If(s.w.greaterThan(n), () => { state.element(id).assign(s.mul(n.div(s.w))); });
+                    const s = state.element(id.mul(uint(2))).toVar(), n = float(op.z);
+                    If(s.w.greaterThan(n), () => { state.element(id.mul(uint(2))).assign(s.mul(n.div(s.w))); });
                 });
             });
         })().compute(this.maxOps).setName('TerrainGI ops');
@@ -195,14 +270,15 @@ export class TerrainGI {
 
     /** The terrain materials read their vertices' records (per vertex, interpolated). */
     attachMaterials() {
-        let rec = attribute('rec', 'float'), wAt = this.core.p.weightAt;
-        let st = this.stateRead.element(uint(max(rec, 0.0)));
-        let giNode = varying(vec4(st.xyz.div(max(st.w, 1.0)), select(rec.greaterThanEqual(0.0), min(st.w.div(wAt), 1.0), 0.0)), 'vTerrainGI');
+        let rec = attribute('rec', 'float'), wAt = this.core.p.weightAt, valid = rec.greaterThanEqual(0.0), r2 = uint(max(rec, 0.0)).mul(uint(2));
+        let st = this.stateRead.element(r2), gl = this.stateRead.element(r2.add(uint(1)));
+        let giNode = varying(vec4(st.xyz.div(max(st.w, 1.0)), select(valid, min(st.w.div(wAt), 1.0), 0.0)), 'vTerrainGI');
+        let glowNode = varying(select(valid, gl.xyz, vec3(0.0)), 'vTerrainGlow');
         for(let m of this.materials) {
-            if(m.tridebug === 7) m.colorNode = giNode.xyz.mul(this.giScale).mul(0.25 / Math.PI);
+            if(m.tridebug === 7) m.colorNode = giNode.xyz.mul(giNode.w).add(glowNode).mul(this.giScale).mul(0.25 / Math.PI);
             else if(m.tridebug === 8) m.colorNode = vec3(giNode.w);
             else if(m.tridebug >= 6) continue;
-            else { m.giNode = giNode; m.giScale = this.giScale; }
+            else { m.giNode = giNode; m.glowNode = glowNode; m.giScale = this.giScale; }
             m.needsUpdate = true;
         }
     }
@@ -242,6 +318,7 @@ export class TerrainGI {
         let carved = this.terrain.changing && this.terrain.changing.key === key ? this.terrain.changing.box : null;
         let ch = this.core.setChunk(key, geometry.uuid, { pos, nrm, uv: U ? uv : null, cls, skip }, carved);
         this.pushRender(ch);
+        this.assignCrystals(ch);
         // the coarse geometry for the BVH: per vertex the record of that corner and the triangle's albedo
         let surface = new Float32Array(A.position.count * 4);
         for(let t = 0; t < nt; t++) for(let k = 0; k < 3; k++) {
@@ -336,8 +413,184 @@ export class TerrainGI {
         return true;
     }
 
-    /** A carve changed a region: the records around it re-converge (the chunk itself was re-refined by onGeometry). */
-    changed(box) { this.core.knockAround(box); }
+    /** A carve changed a region: the records around it re-converge (the chunk itself was re-refined by onGeometry), and
+     *  the crystals whose light reaches it are placed and baked again once the packed BVH has the new terrain. */
+    changed(box) {
+        this.core.knockAround(box);
+        let R = this.uGlow.value.y;
+        for(let slot of this.crystalsNear((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, (box.min.z + box.max.z) / 2, R + box.max.distanceTo(box.min) / 2)) this.glowAwaitBvh.add(slot);
+    }
+
+    // ---- crystals ---------------------------------------------------------------------
+
+    static cell4(x, y, z) { return ((Math.floor(x / 4) + 1024) * 2048 + (Math.floor(y / 4) + 1024)) * 2048 + (Math.floor(z / 4) + 1024); }
+
+    /** Slots of crystals whose light position is within `reach` of a point. */
+    crystalsNear(x, y, z, reach) {
+        let out = [], r = Math.ceil(reach / 4);
+        let cx = Math.floor(x / 4), cy = Math.floor(y / 4), cz = Math.floor(z / 4);
+        for(let i = -r; i <= r; i++) for(let j = -r; j <= r; j++) for(let k = -r; k <= r; k++) {
+            let set = this.crystalCells.get(((cx + i + 1024) * 2048 + (cy + j + 1024)) * 2048 + (cz + k + 1024));
+            if(!set) continue;
+            for(let slot of set) { let c = this.slots[slot]; if((c.lx - x) ** 2 + (c.ly - y) ** 2 + (c.lz - z) ** 2 <= reach * reach) out.push(slot); }
+        }
+        return out;
+    }
+
+    /** Where a crystal's light stands: a little out of the wall, along the normal of the terrain surface nearest it (a
+     *  crystal pokes through that surface: it is partly exposed), as the glow volume placed it: a source flush with the
+     *  wall would light that wall only at grazing angles. (Averaging the directions rays could travel put many lights
+     *  inside the rock: a ray starting in solid with no surface within reach looked open.) */
+    placeCrystal(c) {
+        let T = this.terrain, p = this._p || (this._p = new THREE.Vector3()), hit = this._hit || (this._hit = {});
+        let box = this._box || (this._box = new THREE.Box3()), e = c.radius + 1;
+        p.set(c.x, c.y, c.z); box.min.set(c.x - e, c.y - e, c.z - e); box.max.set(c.x + e, c.y + e, c.z + e);
+        let best = Infinity, nx = 0, ny = 0, nz = 0;
+        for(let key of T.intersecting(box)) {
+            let bvh = T.bvh(key);
+            if(!bvh || !bvh.closestPointToPoint(p, hit, 0, Math.min(best, e)) || hit.distance >= best) continue;
+            let g = bvh.geometry, P = g.attributes.position.array, I = g.index.array, f = hit.faceIndex * 3;
+            let a = I[f] * 3, b = I[f + 1] * 3, d = I[f + 2] * 3;
+            let ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2], vx = P[d] - P[a], vy = P[d + 1] - P[a + 1], vz = P[d + 2] - P[a + 2];
+            let cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx, l = Math.hypot(cx, cy, cz);
+            if(l < 1e-12) continue;
+            best = hit.distance; nx = cx / l; ny = cy / l; nz = cz / l;
+        }
+        let k = best < Infinity ? c.radius + 0.35 : 0;
+        c.lx = c.x + nx * k; c.ly = c.y + ny * k; c.lz = c.z + nz * k;
+    }
+
+    /** Write a crystal into the GPU buffer and link it with the records within its reach (each record keeps the 7 that
+     *  are closest), queueing those records for the glow pass. */
+    linkCrystal(slot) {
+        let c = this.slots[slot], a = this.crystalsAttr.array, o = slot * 8, reach = this.uGlow.value.y;
+        a[o] = c.lx; a[o + 1] = c.ly; a[o + 2] = c.lz; a[o + 3] = reach;
+        a[o + 4] = c.rgb[0]; a[o + 5] = c.rgb[1]; a[o + 6] = c.rgb[2]; a[o + 7] = 0;
+        this.crystalsAttr.addUpdateRange(o, 8); this.crystalsAttr.needsUpdate = true;
+        let cell = TerrainGI.cell4(c.lx, c.ly, c.lz), set = this.crystalCells.get(cell);
+        if(set) set.add(slot); else this.crystalCells.set(cell, new Set([slot]));
+        c.cell = cell;
+        let R = this.core.records, g = R.geo, r = Math.ceil(reach);
+        let cx = Math.floor(c.lx), cy = Math.floor(c.ly), cz = Math.floor(c.lz);
+        for(let i = -r; i <= r; i++) for(let j = -r; j <= r; j++) for(let k = -r; k <= r; k++) {
+            let list = R.cells.get(((cx + i + 4096) * 8192 + (cy + j + 4096)) * 8192 + (cz + k + 4096));
+            if(!list) continue;
+            for(let id of list) {
+                let q = id * 8;
+                if((g[q] - c.lx) ** 2 + (g[q + 1] - c.ly) ** 2 + (g[q + 2] - c.lz) ** 2 > reach * reach) continue;
+                this.addCrystalTo(id, slot);
+            }
+        }
+    }
+
+    /** Give a record a crystal (keeping its 7 closest) and queue it. */
+    addCrystalTo(id, slot) {
+        let list = this.recCrystals.get(id), g = this.core.records.geo, q = id * 8;
+        let d2 = (s) => { let c = this.slots[s]; return (g[q] - c.lx) ** 2 + (g[q + 1] - c.ly) ** 2 + (g[q + 2] - c.lz) ** 2; };
+        if(!list) { list = []; this.recCrystals.set(id, list); }
+        if(list.includes(slot)) { this.glowQueue.add(id); return; }
+        if(list.length >= 7) {
+            let worst = 0; for(let i = 1; i < list.length; i++) if(d2(list[i]) > d2(list[worst])) worst = i;
+            if(d2(list[worst]) <= d2(slot)) return;
+            this.slots[list[worst]].recs.delete(id);
+            list[worst] = slot;
+        } else list.push(slot);
+        this.slots[slot].recs.add(id);
+        this.glowQueue.add(id);
+    }
+
+    /** Undo linkCrystal: the records it lit are queued (to bake without it). */
+    unlinkCrystal(slot) {
+        let c = this.slots[slot];
+        for(let id of c.recs) {
+            let list = this.recCrystals.get(id);
+            if(list) { let i = list.indexOf(slot); if(i >= 0) list.splice(i, 1); if(!list.length) this.recCrystals.delete(id); }
+            this.glowQueue.add(id);
+        }
+        c.recs.clear();
+        let set = this.crystalCells.get(c.cell);
+        if(set) { set.delete(slot); if(!set.size) this.crystalCells.delete(c.cell); }
+    }
+
+    /** A glow rock showed up or changed (GlowRockRenderSystem): `color` linear, `power` its exposure's share of the light. */
+    setRock(id, x, y, z, radius, color, power) {
+        let slot = this.crystals.get(id);
+        if(slot !== undefined) {
+            let c = this.slots[slot];
+            if(c.x === x && c.y === y && c.z === z) {
+                if(Math.abs(c.power - power) < 0.01) return;
+                c.power = power; c.rgb = [color.r * power, color.g * power, color.b * power];
+                let a = this.crystalsAttr.array, o = slot * 8;
+                a[o + 4] = c.rgb[0]; a[o + 5] = c.rgb[1]; a[o + 6] = c.rgb[2];
+                this.crystalsAttr.addUpdateRange(o + 4, 3); this.crystalsAttr.needsUpdate = true;
+                for(let r of c.recs) this.glowQueue.add(r);
+                return;
+            }
+            this.removeRock(id);
+        }
+        slot = this.freeSlots.length ? this.freeSlots.pop() : this.slots.length;
+        if(slot >= this.maxCrystals) return;
+        let c = { id, x, y, z, radius, power, rgb: [color.r * power, color.g * power, color.b * power], recs: new Set(), lx: x, ly: y, lz: z, cell: 0 };
+        this.slots[slot] = c;
+        this.crystals.set(id, slot);
+        this.placeCrystal(c);
+        this.linkCrystal(slot);
+        this.glowAwaitBvh.add(slot);   // the packed BVH may not have the dig that exposed it yet
+        this.stats.crystals = this.crystals.size;
+        // the bounce around it changes too
+        this.core.knockAround({ min: { x: c.lx, y: c.ly, z: c.lz }, max: { x: c.lx, y: c.ly, z: c.lz } });
+    }
+
+    removeRock(id) {
+        let slot = this.crystals.get(id);
+        if(slot === undefined) return;
+        this.unlinkCrystal(slot);
+        let a = this.crystalsAttr.array, o = slot * 8;
+        a.fill(0, o, o + 8); this.crystalsAttr.addUpdateRange(o, 8); this.crystalsAttr.needsUpdate = true;
+        this.glowAwaitBvh.delete(slot);
+        this.slots[slot] = null; this.freeSlots.push(slot);
+        this.crystals.delete(id);
+        this.stats.crystals = this.crystals.size;
+    }
+
+    /** New records near crystals (a refined or carved chunk) get theirs. */
+    assignCrystals(ch) {
+        if(!this.crystals.size) return;
+        let g = this.core.records.geo, reach = this.uGlow.value.y;
+        for(let id of ch.recs) {
+            if(this.recCrystals.has(id)) continue;
+            let q = id * 8;
+            for(let slot of this.crystalsNear(g[q], g[q + 1], g[q + 2], reach)) this.addCrystalTo(id, slot);
+        }
+    }
+
+    /** A record was freed: its slot may be reused by another vertex. */
+    forgetRecord(id) {
+        let list = this.recCrystals.get(id);
+        if(list) { for(let slot of list) this.slots[slot]?.recs.delete(id); this.recCrystals.delete(id); }
+        this.glowQueue.delete(id);
+    }
+
+    /** Bake queued records' crystal light (within the per-frame budget). */
+    runGlow() {
+        if(!this.glowQueue.size) return;
+        let a = this.glowJobsAttr.array, n = 0, NO = NO_RECORD;
+        for(let id of this.glowQueue) {
+            if(n >= this.maxGlowJobs) break;
+            this.glowQueue.delete(id);
+            if(this.core.records.refs[id] === 0) continue;
+            let list = this.recCrystals.get(id) || [], o = n * 8;
+            a[o] = id;
+            for(let i = 0; i < 7; i++) a[o + 1 + i] = i < list.length ? list[i] : NO;
+            n++;
+        }
+        if(!n) return;
+        this.glowJobsAttr.clearUpdateRanges(); this.glowJobsAttr.addUpdateRange(0, n * 8); this.glowJobsAttr.needsUpdate = true;
+        this.glowCount.value = n;
+        this.uGlow.value.x = this.glowGain;
+        this.renderer.compute(this.glowKernel, n);
+        this.stats.glowJobs += n;
+    }
 
     // ---- per frame --------------------------------------------------------------------
 
@@ -376,6 +629,9 @@ export class TerrainGI {
                 this.bvhReady = true; this.bvhEpoch++;
                 for(let key of this.pendingReady) { let ch = core.chunks.get(key); if(ch) ch.ready = true; }
                 this.pendingReady.clear();
+                // crystals placed or changed since: placed again against the terrain as it is now, and baked again
+                for(let slot of this.glowAwaitBvh) { let c = this.slots[slot]; if(!c) continue; this.unlinkCrystal(slot); this.placeCrystal(c); this.linkCrystal(slot); }
+                this.glowAwaitBvh.clear();
             } catch(e) { console.warn('TerrainGI: BVH update failed: ' + e.message); }
             this.bvhDirty = false; this.bvhAt = now;
             this.stats.bvhUpdates++; this.stats.bvhMs = performance.now() - t0;
@@ -396,6 +652,7 @@ export class TerrainGI {
             this.stats.ops += n;
         }
         if(!this.bvhReady) return;
+        this.runGlow();
         let { count, staged } = core.schedule(this.jobsAttr.array, camera.position);
         for(let ch of staged) this.staged.push(ch);
         if(count > 0) {
@@ -419,7 +676,7 @@ export class TerrainGI {
                 if(this.core.chunks.get(ch.key) !== ch) continue; // replaced since
                 for(let c of this.core.adapt(ch, state)) redo.add(c);
             }
-            for(let c of redo) this.pushRender(c);
+            for(let c of redo) { this.pushRender(c); this.assignCrystals(c); }
         } catch(e) { console.warn('TerrainGI: readback failed: ' + e.message); }
         this.reading = false;
     }
@@ -447,6 +704,6 @@ export class TerrainGI {
     info() {
         let c = this.core, n = 0, ready = 0, minS = Infinity;
         for(let ch of c.chunks.values()) { n += ch.recs.length; if(ch.ready) ready++; if(ch.recs.length) minS = Math.min(minS, ch.minSamples); }
-        return { chunks: c.chunks.size, ready, records: c.records.size, refs: n, full: c.records.full, minSamples: minS, splits: c.splitEdges.size, ...this.stats, refineMs: Math.round(c.stats.refineMs) };
+        return { chunks: c.chunks.size, ready, records: c.records.size, crystalRecords: this.recCrystals.size, glowQueue: this.glowQueue.size, refs: n, full: c.records.full, minSamples: minS, splits: c.splitEdges.size, ...this.stats, refineMs: Math.round(c.stats.refineMs) };
     }
 }

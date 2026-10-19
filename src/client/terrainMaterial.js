@@ -10,9 +10,10 @@ import { attribute, texture, uv, select, vertexColor, positionWorld, positionLoc
  *  uses). The probe grid's light is faded out by the same weight (ProbeLighting's node), so a vertex without samples
  *  yet shows the probes and one with enough shows its own gathered light. */
 export class TerrainNodeMaterial extends THREE.MeshStandardNodeMaterial {
-    constructor(params) { super(params); this.giNode = null; this.giScale = null; }
+    constructor(params) { super(params); this.giNode = null; this.glowNode = null; this.giScale = null; }
     setupLightMap(builder) {
-        if(this.giNode) return new THREE.IrradianceNode(this.giNode.xyz.mul(this.giNode.w).mul(this.giScale));
+        // the gathered light at its weight, plus the crystals' light baked into the same vertices (TerrainGI's glow pass)
+        if(this.giNode) return new THREE.IrradianceNode(this.giNode.xyz.mul(this.giNode.w).add(this.glowNode).mul(this.giScale));
         return super.setupLightMap(builder);
     }
 }

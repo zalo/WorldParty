@@ -258,6 +258,7 @@ export default class Main {
 
     /** Vertex GI on the terrain (src/client/TerrainGI.js), once the renderer is up; ?vgi=0 leaves the probe grid to it. */
     attachGI() {
+        this.giDecided = true; // (GameClient waits for this to know where the glow rocks' light goes)
         let r = this.world.renderer;
         if(this.gi || !TerrainGI.supported(r) || this.queryParams.get('vgi') === '0') return;
         let jobs = parseInt(this.queryParams.get('girays') || '0') || undefined;

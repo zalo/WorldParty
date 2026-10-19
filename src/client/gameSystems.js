@@ -181,8 +181,8 @@ function lumpyGeometry() {
 
 /** Glow rocks: the pebbles the server materialized from the field (src/server/GlowRocks.js). They are instances of one
  *  lumpy icosphere per colour with an emissive material (the terrain hides whatever part is still in the ground), and
- *  each one is splatted into the glow volume (src/client/GlowLighting.js), which is what lights the tunnel around it:
- *  every rock, not a pool of point lights on the nearest dozen. A rock dug all the way out shatters on the server; the
+ *  each one is handed to what lights the tunnel around it (`glow`: the terrain's vertex GI, TerrainGI.setRock, or the
+ *  glow volume, GlowLighting, where that does not run): every rock, not a pool of point lights on the nearest dozen. A rock dug all the way out shatters on the server; the
  *  `glowpop` message brings the sparkle (GlowSparkFx). */
 export class GlowRockRenderSystem {
     constructor(scene, fieldFn, glow = null) {
@@ -209,7 +209,7 @@ export class GlowRockRenderSystem {
         // exposure changed: the light follows (a rock barely out of the wall barely lights it)
         world.on('set', (id, name, g) => { if(name === 'GlowRock' && world.has(id, '$GlowInst')) this.light(id, world.get(id, '$GlowInst'), g); });
     }
-    /** Splat (or re-splat) a rock into the glow volume. */
+    /** Hand a rock (again) to what lights with it. */
     light(id, inst, g) {
         if(!this.glow || !inst) return;
         this.glow.setRock(id, inst.x, inst.y, inst.z, inst.radius, this.colors[inst.color], g.free ? 0 : 0.35 + 0.65 * g.exposure);

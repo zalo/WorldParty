@@ -38,16 +38,16 @@ export class GameClient {
         ecs.addSystem(new ProjectileRenderSystem(main.world.scene));
         ecs.addSystem(new SupplyRenderSystem(main.world.scene, main.world.camera, () => main.conn.id, t => this.teamColor(t)));
         ecs.addSystem(new FuseFxSystem());
-        // the glow rocks light the tunnels through a volume texture around the camera (GlowLighting); ?glow=0 turns it off,
-        // ?glow=<intensity> tunes it. The probe bake mutes it (the probes would bake it in again at 6 m).
-        let glowParam = main.queryParams.get('glow');
-        if(glowParam !== '0') {
-            let mobile = main.isMobile();
-            this.glow = new GlowLighting(main.world.renderer, main.world.scene, main.terrain, { dims: mobile ? [64, 32, 64] : [80, 32, 80], ...(glowParam ? { intensity: parseFloat(glowParam) } : {}) });
-            main.chunkListeners.push((key, region) => this.glow.chunkChanged(region));
-            main.muteDuringProbeBake?.(this.glow.light);
-        }
-        ecs.addSystem(new GlowRockRenderSystem(main.world.scene, () => this.config.glowRocks, this.glow));
+        // The glow rocks' light: baked into the terrain's vertex GI when it runs (TerrainGI.setRock: no per-frame cost, and
+        // nothing switching on and off as you move), else the glow volume around the camera (GlowLighting). Which one is
+        // only known once the renderer is up (Main.giDecided), so the rocks are held here until then (bindGlow).
+        // ?glow=0 turns crystal light off, ?glow=<n> sets its intensity (35 in the glow volume's units).
+        this.glowSink = {
+            rocks: new Map(), target: null,
+            setRock(id, ...a) { this.rocks.set(id, a); this.target?.setRock(id, ...a); },
+            removeRock(id) { this.rocks.delete(id); this.target?.removeRock(id); },
+        };
+        ecs.addSystem(new GlowRockRenderSystem(main.world.scene, () => this.config.glowRocks, this.glowSink));
         this.sparks = new GlowSparkFx(main.world.scene);
         ecs.on('set', (id, name, s) => {
             if(name === 'Supply' && s.state === 'carried' && s.carriedBy === main.conn.id && !this.carryingNoted) { this.carryingNoted = true; this.sfx.pickup(); this.hud.flashText('Supply grabbed! Get it to your vault', 2000); }
@@ -191,10 +191,30 @@ export class GameClient {
         this.hud.spectating = best.p.name;
     }
 
+    /** Send the glow rocks to whatever lights with them (see glowSink). */
+    bindGlow() {
+        let main = this.main, param = main.queryParams.get('glow');
+        this.glowBound = true;
+        if(param === '0') return;
+        let target;
+        if(main.gi) {
+            target = main.gi;
+            if(param) main.gi.glowGain = parseFloat(param) / 10;
+        } else {
+            let mobile = main.isMobile();
+            this.glow = target = new GlowLighting(main.world.renderer, main.world.scene, main.terrain, { dims: mobile ? [64, 32, 64] : [80, 32, 80], ...(param ? { intensity: parseFloat(param) } : {}) });
+            main.chunkListeners.push((key, region) => this.glow.chunkChanged(region));
+            main.muteDuringProbeBake?.(this.glow.light);
+        }
+        this.glowSink.target = target;
+        for(let [id, a] of this.glowSink.rocks) target.setRock(id, ...a);
+    }
+
     update(dt) {
         let main = this.main, me = this.me;
         this.fx.update(dt);
         this.sparks.update(dt);
+        if(!this.glowBound && main.giDecided) this.bindGlow();
         this.glow?.update(main.world.camera);
         if(me) {
             if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; this.carryingNoted = false; for(let t of this.tools) if(t.release) t.release(main); this.sfx.drillLoop(false); this.sfx.reel(false); }

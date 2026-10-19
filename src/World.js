@@ -207,6 +207,7 @@ export default class World {
                 return;
             }
             console.warn('DayCycle needs WebGPU; using the static skybox');
+            mainObject.attachGI?.(); // (no vertex GI here; this tells the game the glow volume lights the crystals)
             this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0x444444, 3.0 );
             this.scene.add( this.hemiLight );
             this.dirLight.color.setHex(0xfff2e0);

@@ -69,6 +69,7 @@ export class Records {
         this.cells = new Map();                      // 1 m cell -> record ids, to find gathered neighbours
         this.cellOf = new Float64Array(capacity);
         this.seeder = null;                          // (id, x, y, z, nx, ny, nz, pa, pb) => [a, b, weight] (GICore.seed)
+        this.onDrop = null;                          // (id) => void, when a record is freed (TerrainGI forgets its crystals)
     }
     static cellKey(x, y, z) { return ((Math.floor(x) + 4096) * 8192 + (Math.floor(y) + 4096)) * 8192 + (Math.floor(z) + 4096); }
     /** Old enough to copy light from: referenced, created before this batch, and sampled. */
@@ -104,6 +105,7 @@ export class Records {
     release(id) { if(--this.refs[id] <= 0) this.drop(id); }
     drop(id) {
         this.keys.delete(this.keyOf[id]); this.keyOf[id] = undefined; this.refs[id] = 0; this.free.push(id);
+        this.onDrop?.(id);
         let list = this.cells.get(this.cellOf[id]);
         if(list) { let i = list.indexOf(id); if(i >= 0) { list[i] = list[list.length - 1]; list.pop(); } if(!list.length) this.cells.delete(this.cellOf[id]); }
     }
@@ -294,12 +296,14 @@ export class GICore {
         this.stats.refines++;
     }
 
-    /** Split the edges of a chunk whose ends disagree (see `contrast`), given the GPU's sums and counts (`state`, 4
+    /** Split the edges of a chunk whose ends disagree (see `contrast`), given the GPU's sums and counts (`state`, 8
      *  floats per record); returns the chunks to re-refine (the chunk, and neighbours sharing a split edge on a face). */
     adapt(ch, state) {
         let p = this.p, I = ch.index, P = ch.positions, rec = ch.recOf, added = 0, planes = [];
         if(this.records.full) return [];
-        let lum = (r) => { let c = state[r * 4 + 3]; return c > 0 ? (0.2126 * state[r * 4] + 0.7152 * state[r * 4 + 1] + 0.0722 * state[r * 4 + 2]) / c : -1; };
+        // state: 8 floats per record (sum rgb + count, then the crystals' baked light, which counts too: their pools are
+        // where the light changes fastest)
+        let lum = (r) => { let o = r * 8, c = state[o + 3]; return c > 0 ? (0.2126 * (state[o] / c + state[o + 4]) + 0.7152 * (state[o + 1] / c + state[o + 5]) + 0.0722 * (state[o + 2] / c + state[o + 6])) : -1; };
         // a floor under the difference, so noise in the near-black (a sealed pocket) does not split everything
         let floor = 0.02;
         for(let t = 0; t < I.length; t += 3) for(let e = 0; e < 3; e++) {
