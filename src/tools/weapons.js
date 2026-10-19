@@ -37,6 +37,7 @@ export class RocketTool extends Weapon {
         this.spend();
         let { origin, dir } = aim(main);
         main.conn.send(JSON.stringify({ type: 'fire', weapon: 'rocket', origin, dir }));
+        main.game.rockets.predict(origin, dir); // flies now; the server's comes a round trip later and is matched to it
         main.game.sfx.shoot();
         main.player.knock({ x: -dir.x * 1.5, y: 0, z: -dir.z * 1.5 });
         main.player.shake = Math.max(main.player.shake, 0.15);

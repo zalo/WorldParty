@@ -1,47 +1,133 @@
-/** Fort War client systems: rockets (dead-reckoned between updates), supply markers and carried crates, fuse
+/** Fort War client systems: rockets (dead-reckoned between updates; our own predicted), supply markers and carried crates, fuse
  *  blinking, glow rocks, and short-lived explosion effects. */
 import * as THREE from 'three/webgpu';
-import { SUPPLY, TEAM_DEFAULTS, GLOW_ROCK, virtualRock } from '../game/rules.js';
+import { SUPPLY, TEAM_DEFAULTS, GLOW_ROCK, WEAPONS, virtualRock } from '../game/rules.js';
 
 const toVec3 = (p) => new THREE.Vector3(p.x, p.y, p.z);
 
-/** Rockets fly on the client from their last replicated position and velocity; a new Transform snaps them. */
+/** Rockets fly on the client from their last replicated position and velocity; a new Transform snaps them.
+ *
+ *  The local player's own rockets are predicted (`predict`): the server only creates a rocket when the `fire` message
+ *  arrives and everyone sees it in the next update, a round trip and up to a tick (33 ms) after the click, 70-140 ms
+ *  from this desktop to the room and more on a phone, so the rocket came out late. A predicted rocket starts where the
+ *  server's will (1.3 m ahead of the eye), flies the same ballistics and is the only one drawn: the server's rocket of
+ *  ours is matched to it (oldest first) and hidden. `hitTest` stops it where it would hit; `onImpact` (GameClient)
+ *  plays the explosion at once for terrain, which both sides hold alike, while a body or a player (whose positions
+ *  differ between clients) keeps the rocket parked there for the server's verdict. It goes when the server's rocket
+ *  goes; if the server's flies on past a parked one, or never comes, the server's is drawn after all. */
+const PARK_MS = 600;       // a rocket parked on a body or player waits this long for the server's to end
+const ORPHAN_MS = 2000;    // a predicted rocket the server never sent (refused) goes after this long
+
 export class ProjectileRenderSystem {
-    constructor(scene) {
+    constructor(scene, { localId = () => null, hitTest = null, onImpact = null } = {}) {
         this.scene = scene;
         this.geometry = new THREE.SphereGeometry(0.22, 10, 8);
         this.material = new THREE.MeshBasicMaterial({ color: 0xffaa33 });
         this.trailMaterial = new THREE.LineBasicMaterial({ color: 0xffdd88, transparent: true, opacity: 0.7 });
+        this.localId = localId;
+        this.hitTest = hitTest;     // (from, dir, length) => { point, distance, terrain } | null
+        this.onImpact = onImpact;   // (position, kind, terrain) => void
+        this.predicted = [];        // { object, pos, vel, born, serverId, parkedAt, kind }
+        this.own = new Map();       // server id of one of our rockets -> its predicted rocket, or null (drawn as is)
     }
     init(world) {
         world.on('set', (id, name, tf) => {
             if(name !== 'Transform' || !world.has(id, 'Projectile')) return;
             let m = world.get(id, '$Mesh'); if(m) m.object.position.copy(toVec3(tf.position));
         });
+        world.on('destroy', (id) => this.own.delete(id));
+    }
+    /** A rocket's ball and trail (the trail lives in the scene, beside the moving group). */
+    makeVisual(position) {
+        let object = new THREE.Group();
+        let ball = new THREE.Mesh(this.geometry, this.material);
+        ball.userData.sharedGeometry = true;
+        object.add(ball);
+        let trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(Array.from({ length: 8 }, () => position.clone())), this.trailMaterial);
+        trail.frustumCulled = false;
+        this.scene.add(trail);
+        object.userData.trail = trail;
+        object.position.copy(position);
+        this.scene.add(object);
+        return object;
+    }
+    pushTrail(object) {
+        let trail = object.userData.trail, pos = trail.geometry.attributes.position.array;
+        for(let i = pos.length - 3; i >= 3; i -= 3) { pos[i] = pos[i - 3]; pos[i + 1] = pos[i - 2]; pos[i + 2] = pos[i - 1]; }
+        pos[0] = object.position.x; pos[1] = object.position.y; pos[2] = object.position.z;
+        trail.geometry.attributes.position.needsUpdate = true;
+    }
+    /** Fly one of our own rockets from the eye (`origin`, unit `dir`) now, as the server will (Game.fire). */
+    predict(origin, dir, kind = 'rocket') {
+        let def = WEAPONS[kind];
+        let o = toVec3(origin), d = toVec3(dir);
+        // point blank: the server traces the first 1.3 m and explodes there without a rocket
+        let pre = this.hitTest?.(o, d, 1.3);
+        if(pre) { this.onImpact?.(pre.point.clone().addScaledVector(d, -0.15), kind, pre.terrain); return; }
+        let pos = o.clone().addScaledVector(d, 1.3);
+        this.predicted.push({ object: this.makeVisual(pos), pos, dir: d, vel: d.clone().multiplyScalar(def.speed), born: performance.now(), serverId: null, parkedAt: 0, kind });
+    }
+    dropPredicted(p) {
+        let i = this.predicted.indexOf(p);
+        if(i >= 0) this.predicted.splice(i, 1);
+        if(p.serverId) this.own.set(p.serverId, null);
+        ProjectileRenderSystem.dispose(p.object);
+        p.object.removeFromParent();
+    }
+    /** The server exploded one of our rockets somewhere we did not predict a hit (an explosion GameClient did not
+     *  match): if it was never sent as an entity (it hit within its first tick), the oldest unmatched prediction was it. */
+    serverExploded() {
+        let p = this.predicted.find(q => !q.serverId);
+        if(p) this.dropPredicted(p);
+    }
+    /** Step a predicted rocket as the server does (gravity, then a raycast over the step). */
+    stepPredicted(world, p, dt, now) {
+        let def = WEAPONS[p.kind];
+        let ended = p.serverId && !world.has(p.serverId, 'Projectile'); // the server's rocket exploded or expired
+        // a matched rocket ends with the server's (which expires a little after ours, by the latency), else it would pop up
+        if(ended || now - p.born > def.lifeMs + (p.serverId ? ORPHAN_MS : 0)) return this.dropPredicted(p);
+        if(p.parkedAt) {
+            if(!p.serverId ? now - p.born > ORPHAN_MS : now - p.parkedAt > PARK_MS) this.dropPredicted(p);
+            return;
+        }
+        if(!p.serverId && now - p.born > ORPHAN_MS) return this.dropPredicted(p);
+        p.vel.y -= def.gravity * dt;
+        let step = p.vel.clone().multiplyScalar(dt), len = step.length();
+        if(len < 1e-4) return;
+        let dir = step.divideScalar(len);
+        let hit = this.hitTest?.(p.pos, dir, len + 0.25);
+        if(hit) {
+            p.pos.copy(hit.point).addScaledVector(dir, -0.15);
+            p.object.position.copy(p.pos);
+            p.parkedAt = now;
+            this.onImpact?.(p.pos.clone(), p.kind, hit.terrain);
+            if(hit.terrain) { p.object.visible = false; p.object.userData.trail.visible = false; } // exploded here already
+            return;
+        }
+        p.pos.addScaledVector(dir, len);
+        p.object.position.copy(p.pos);
+        this.pushTrail(p.object);
     }
     update(world, dt) {
+        let now = performance.now(), me = this.localId();
         for(let [id, pr, tf] of world.each('Projectile', 'Transform')) {
-            let m = world.get(id, '$Mesh');
-            if(!m) {
-                let object = new THREE.Group();
-                let ball = new THREE.Mesh(this.geometry, this.material);
-                ball.userData.sharedGeometry = true;
-                object.add(ball);
-                let trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(Array.from({ length: 8 }, () => toVec3(tf.position))), this.trailMaterial);
-                trail.frustumCulled = false;
-                this.scene.add(trail);
-                object.userData.trail = trail;
-                object.position.copy(toVec3(tf.position));
-                this.scene.add(object);
-                m = world.add(id, '$Mesh', { object });
-                continue;
+            if(pr.owner === me && me) {
+                if(!this.own.has(id)) {
+                    // the oldest predicted rocket still waiting for its server twin and fired the same way (a shot the
+                    // server refused must not take the next one's place)
+                    let v = pr.vel, speed = Math.hypot(v.x, v.y, v.z) || 1;
+                    let p = this.predicted.find(q => !q.serverId && (q.dir.x * v.x + q.dir.y * v.y + q.dir.z * v.z) / speed > 0.95);
+                    if(p) p.serverId = id;
+                    this.own.set(id, p || null);
+                }
+                if(this.own.get(id)) continue; // drawn by its prediction
             }
+            let m = world.get(id, '$Mesh');
+            if(!m) { world.add(id, '$Mesh', { object: this.makeVisual(toVec3(tf.position)) }); continue; }
             m.object.position.x += pr.vel.x * dt; m.object.position.y += pr.vel.y * dt; m.object.position.z += pr.vel.z * dt;
-            let trail = m.object.userData.trail, pos = trail.geometry.attributes.position.array;
-            for(let i = pos.length - 3; i >= 3; i -= 3) { pos[i] = pos[i - 3]; pos[i + 1] = pos[i - 2]; pos[i + 2] = pos[i - 1]; }
-            pos[0] = m.object.position.x; pos[1] = m.object.position.y; pos[2] = m.object.position.z;
-            trail.geometry.attributes.position.needsUpdate = true;
+            this.pushTrail(m.object);
         }
+        for(let p of [...this.predicted]) this.stepPredicted(world, p, dt, now);
     }
     /** Called by the cleanup hook: trails live outside the group. */
     static dispose(object) { let t = object.userData.trail; if(t) { t.removeFromParent(); t.geometry.dispose(); } }

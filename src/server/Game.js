@@ -312,7 +312,7 @@ export class Game {
             let dmg = def.damage * f * (pid === by ? SELF_DAMAGE_SCALE : 1);
             this.damage(pid, Math.round(dmg), by, kind === 'buster' ? 'busted' : kind === 'grenade' ? 'fragged' : 'rocketed', impulse, now);
         }
-        this.server.broadcast(JSON.stringify({ type: 'explosion', position: center, radius: R, kind }));
+        this.server.broadcast(JSON.stringify({ type: 'explosion', position: center, radius: R, kind, by })); // `by`: the shooter matches it to a predicted rocket
         let shooter = by && w.get(by, 'Player'); if(shooter) w.set(by, 'Player', { blasts: shooter.blasts + 1 });
     }
 

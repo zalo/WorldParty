@@ -12,6 +12,9 @@ import { GlowLighting } from './GlowLighting.js';
 import { PROPS } from '../props/PropRegistry.js';
 import { GAME_PROPS, RESPAWN_MS, VOTE, WEAPONS } from '../game/rules.js';
 
+const _ray = new THREE.Ray(), _inv = new THREE.Matrix4(), _min = new THREE.Vector3(), _max = new THREE.Vector3();
+const PREDICTED_BOOM_MS = 2000; // how long a predicted explosion waits for the server's to be matched (and not shown again)
+
 export class GameClient {
     constructor(main, config) {
         this.main = main;
@@ -35,7 +38,15 @@ export class GameClient {
         this.hud.setWeapons(this.tools.slice(0, 5));
 
         let ecs = main.ecs;
-        ecs.addSystem(new ProjectileRenderSystem(main.world.scene));
+        // our own rockets fly from the click (predicted); see ProjectileRenderSystem
+        this.raycaster = new THREE.Raycaster();
+        this.predictedBooms = []; // { position, at }: explosions shown at a predicted impact, for the server's to match
+        this.rockets = new ProjectileRenderSystem(main.world.scene, {
+            localId: () => main.conn.id,
+            hitTest: (from, dir, length) => this.rocketHit(from, dir, length),
+            onImpact: (position, kind, terrain) => { if(terrain) this.predictedBoom(position, kind); },
+        });
+        ecs.addSystem(this.rockets);
         ecs.addSystem(new SupplyRenderSystem(main.world.scene, main.world.camera, () => main.conn.id, t => this.teamColor(t)));
         ecs.addSystem(new FuseFxSystem());
         // The glow rocks' light: baked into the terrain's vertex GI when it runs (TerrainGI.setRock: no per-frame cost, and
@@ -144,11 +155,13 @@ export class GameClient {
             }
             case 'explosion': {
                 let p = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
-                this.fx.spawn(p, data.radius, data.kind);
-                let d = p.distanceTo(main.player.position);
-                this.sfx.boom(d, data.radius, data.kind, p);
-                this.recentBooms += d < 50 ? 1 : 0.3; // the music leans in while things blow up nearby
-                if(d < data.radius * 4) { main.player.shake = Math.max(main.player.shake, 0.5 * (1 - d / (data.radius * 4))); this.hud.whiteFlash(0.6 * (1 - d / (data.radius * 4))); }
+                if(data.by === main.conn.id && data.kind === 'rocket') {
+                    // one of ours: already shown if its predicted rocket hit terrain there
+                    let now = performance.now(), i = this.predictedBooms.findIndex(b => now - b.at < PREDICTED_BOOM_MS && b.position.distanceTo(p) < 3);
+                    if(i >= 0) { this.predictedBooms.splice(i, 1); return true; }
+                    this.rockets.serverExploded();
+                }
+                this.boomFx(p, data.radius, data.kind);
                 return true;
             }
             case 'event': {
@@ -174,6 +187,48 @@ export class GameClient {
                 return true;
         }
         return false;
+    }
+
+    /** Flash, debris, sound, shake and the music's lean for an explosion at `p`. */
+    boomFx(p, radius, kind) {
+        let main = this.main;
+        this.fx.spawn(p, radius, kind);
+        let d = p.distanceTo(main.player.position);
+        this.sfx.boom(d, radius, kind, p);
+        this.recentBooms += d < 50 ? 1 : 0.3; // the music leans in while things blow up nearby
+        if(d < radius * 4) { main.player.shake = Math.max(main.player.shake, 0.5 * (1 - d / (radius * 4))); this.hud.whiteFlash(0.6 * (1 - d / (radius * 4))); }
+    }
+
+    /** Our rocket hit terrain on this side: explode now; the server's explosion for it (a round trip later) is not
+     *  shown again. The crater still comes with the server's chunk update. */
+    predictedBoom(position, kind) {
+        let now = performance.now();
+        this.predictedBooms = this.predictedBooms.filter(b => now - b.at < PREDICTED_BOOM_MS);
+        this.predictedBooms.push({ position, at: now });
+        this.boomFx(position, WEAPONS[kind].radius, kind);
+    }
+
+    /** What a rocket flying from `from` along the unit `dir` hits within `length`, as near as this side can tell the
+     *  server's PhysX raycast: the terrain (the chunk BVHs along the segment), bodies, and other players. */
+    rocketHit(from, dir, length) {
+        let main = this.main, T = main.terrain, best = null;
+        _min.copy(from).min(_max.copy(from).addScaledVector(dir, length));
+        _max.copy(from).max(_ray.origin.copy(from).addScaledVector(dir, length));
+        for(let k of T.intersecting({ min: _min, max: _max })) {
+            let mesh = T.objects.get(k), bvh = mesh?.geometry.boundsTree;
+            if(!bvh) continue;
+            _ray.origin.copy(from); _ray.direction.copy(dir);
+            _ray.applyMatrix4(_inv.copy(mesh.matrixWorld).invert());
+            let hit = bvh.raycastFirst(_ray, THREE.DoubleSide, 0, best ? best.distance : length);
+            if(hit && (!best || hit.distance < best.distance)) best = { distance: hit.distance, point: hit.point.applyMatrix4(mesh.matrixWorld), terrain: true };
+        }
+        let targets = [main.physBodiesParent];
+        for(let [id, , m] of main.ecs.each('Player', '$Mesh')) if(id !== main.conn.id && m.object.visible) targets.push(m.object);
+        this.raycaster.set(from, dir);
+        this.raycaster.far = best ? best.distance : length;
+        let hits = this.raycaster.intersectObjects(targets, true);
+        if(hits.length) best = { distance: hits[0].distance, point: hits[0].point.clone(), terrain: false };
+        return best;
     }
 
     /** While dead, watch the nearest living teammate (the camera hovers behind them). */
