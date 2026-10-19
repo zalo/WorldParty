@@ -59,13 +59,15 @@ export class ProbeLighting {
      *  zenith is about half as bright as a real one, and a walled courtyard floor sees only the zenith cone, so
      *  physically its shade sat near 1:80 of the sunlit cobbles next to it (a linear render has no eye to adapt);
      *  a game reads well near 1:5, which is what this multiplier buys (with the exposure in World.js). */
-    constructor(renderer, scene, { spacing = 6, maxProbes = 4000, perFrame = 8, cubemapSize = 8, ambient = 7 } = {}) {
+    constructor(renderer, scene, { spacing = 6, maxProbes = 4000, perFrame = 8, cubemapSize = 8, ambient = 7, budgetMs = 5 } = {}) {
         this.renderer = renderer;
         this.scene = scene;
         this.spacing = spacing;   // requested lattice step (metres); `step` is the one in use (coarser if the cap binds)
         this.step = spacing;
         this.maxProbes = maxProbes;
         this.perFrame = perFrame;
+        this.budgetMs = budgetMs;         // bake CPU time per frame to aim for (a phone gets less: World)
+        this.skipFrames = 0;              // frames to rest after a single probe that took longer than the budget
         this.cubemapSize = cubemapSize;
         this.ambient = ambient;
         this.grid = null;
@@ -236,7 +238,9 @@ export class ProbeLighting {
     }
 
     /** Bake a few dirty probes per frame, nearest the camera first, grouped into contiguous ranges. The batch
-     *  size adapts to keep the bake around `budgetMs` per frame, so a heavy scene does not stall interaction.
+     *  size adapts to keep the bake around `budgetMs` per frame, so a heavy scene does not stall interaction; when a
+     *  single probe already costs more than that (a phone: ~5x this desktop's 4 ms), the bake rests for as many frames
+     *  as it overran, so the average stays within the budget instead of costing a probe every frame.
      *  While the grid is still mostly unbaked its intensity is held down (an unbaked probe is black) and the
      *  caller keeps the sky's image based light up instead; see `environmentIntensity()`. A failed bake puts
      *  its probes back and pauses; it never pretends the grid is done (a cleared queue over an empty atlas was
@@ -246,15 +250,12 @@ export class ProbeLighting {
         this.grid.intensity = this.ambient * Math.min(1, this.bakedFraction() * 1.25);
         if(this.disabled || this.dirty.size === 0 || this.renderer.initialized === false) return;
         if(this.pauseUntil && performance.now() < this.pauseUntil) return;
-        this.budgetMs ??= 5;
+        if(this.skipFrames > 0) { this.skipFrames--; return; }
         if(this.lastBakeMs !== undefined) {
             if(this.lastBakeMs > this.budgetMs * 1.5) this.perFrame = Math.max(1, Math.floor(this.perFrame / 2));
             else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(32, this.perFrame + 1);
         }
-        let order = [...this.dirty];
-        if(camera) { let c = camera.position; order.sort((a, b) => this.probePosition(a).distanceToSquared(c) - this.probePosition(b).distanceToSquared(c)); }
-        else order.sort((a, b) => a - b);
-        let take = order.slice(0, this.perFrame).sort((a, b) => a - b);
+        let take = this.nearestDirty(camera, this.perFrame).sort((a, b) => a - b);
         for(let i of take) this.dirty.delete(i);
         let runs = [];
         for(let i of take) {
@@ -268,6 +269,7 @@ export class ProbeLighting {
             this.failures = 0;
             this.lastBakeMs = performance.now() - t0;
             this.bakedTotal = (this.bakedTotal || 0) + take.length;
+            if(take.length === 1 && this.lastBakeMs > this.budgetMs) this.skipFrames = Math.min(30, Math.ceil(this.lastBakeMs / this.budgetMs) - 1);
             if(this.lastBakeMs > 50) console.log(`probe bake: ${take.length} probes in ${this.lastBakeMs.toFixed(0)} ms (${this.dirty.size} left, now ${this.perFrame}/frame)`);
         } catch(e) {
             for(let i of take) this.dirty.add(i);
@@ -276,6 +278,26 @@ export class ProbeLighting {
             console.warn(`probe bake failed (${this.failures}): ${e.message}`);
             if(this.failures >= 5) { console.warn('probe lighting disabled; the sky light stays up'); this.disabled = true; this.grid.intensity = 0; }
         }
+    }
+
+    /** The `k` dirty probes nearest the camera (lowest indices without one), by a linear scan: sorting the whole queue
+     *  with a Vector3 per comparison every frame cost more than a probe bake on a big grid. */
+    nearestDirty(camera, k) {
+        if(!camera) return [...this.dirty].sort((a, b) => a - b).slice(0, k);
+        let r = this.grid.resolution, nx = r.x, nxz = r.x * r.z, step = this.step, c = camera.position;
+        let ox = (c.x - this.min.x) / step, oy = (c.y - this.min.y) / step, oz = (c.z - this.min.z) / step;
+        let best = [], bestD = [];
+        for(let i of this.dirty) {
+            let dx = i % nx - ox, dz = Math.floor(i / nx) % r.z - oz, dy = Math.floor(i / nxz) - oy, d = dx * dx + dy * dy + dz * dz;
+            if(best.length < k) { best.push(i); bestD.push(d); }
+            else if(d < bestD[k - 1]) { best[k - 1] = i; bestD[k - 1] = d; }
+            else continue;
+            for(let j = best.length - 1; j > 0 && bestD[j - 1] > bestD[j]; j--) {   // keep the list sorted by distance
+                let t = best[j]; best[j] = best[j - 1]; best[j - 1] = t;
+                t = bestD[j]; bestD[j] = bestD[j - 1]; bestD[j - 1] = t;
+            }
+        }
+        return best;
     }
 
     /** How much of the sky's image based light the scene should use: all of it (times `ambient`) until the
