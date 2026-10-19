@@ -4,7 +4,10 @@ import {
 	normalWorldGeometry, fract, floor, sin, pow, length, log2, select, saturate, If,
 } from 'three/tsl';
 import { G } from './Globals.js';
-import { SUN_ANGULAR_RADIUS } from './Atmosphere.js';
+import { SUN_ANGULAR_RADIUS, PLANET_RADIUS } from './Atmosphere.js';
+
+// sea level extinction per km (Rayleigh + Mie at Atmosphere's mieScale 2) for the view of the ground below the horizon
+const SEA_LEVEL_EXTINCTION = vec3( 0.0147, 0.0225, 0.042 );
 
 // hash without sine (D. Hoskins): keeps full precision for large integer coordinates
 const hash13 = ( p ) => {
@@ -121,6 +124,16 @@ export class Sky {
 	_background( dir, starK = 1 ) {
 
 		const L = this.atmosphere.skyLuminance( dir ).toVar();
+		// Below the horizon the sky view LUT holds only the in-scatter on the way down to the planet, so the
+		// ground between a level's edge and the horizon was a black band. Put the sunlit plain behind it: the
+		// atmosphere's ground albedo under the key light and the sky, seen through the sea level extinction
+		// along the path from the view height down to it. The environment map (and so the probes) gets a
+		// ground-coloured lower hemisphere from the same term.
+		const a = this.atmosphere;
+		const pathKm = a.viewHeight.sub( PLANET_RADIUS ).div( dir.y.negate().max( 1e-4 ) ).min( 60.0 );
+		const T = exp( SEA_LEVEL_EXTINCTION.mul( pathKm ).negate() );
+		const ground = a.groundAlbedo.mul( G.sunColor.mul( max( G.sunDir.y, 0 ) ).div( Math.PI ).add( G.skyIrradiance ) );
+		L.addAssign( ground.mul( T ).mul( saturate( dir.y.negate().mul( 400 ) ) ) );
 		If( this.starIntensity.greaterThan( 0.001 ), () => {
 
 			L.addAssign( this.moonSky( dir ).add( this.stars( dir ).mul( starK ) ) );

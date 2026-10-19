@@ -10,6 +10,12 @@ import { attribute, texture, uv, select, vertexColor, positionWorld, positionLoc
 export function makeTerrainMaterial(arrayTexture, space = 'world', debug = false) {
     // normals come from the geometry (per face, blended across smooth materials: buildTerrainGeometry), not from derivatives
     let material = debug === 6 ? new THREE.MeshBasicNodeMaterial() : new THREE.MeshStandardNodeMaterial({ roughness: 0.75, metalness: 0.05 }); // 6: unlit
+    // Terrain is closed solid, so cast shadows with its front faces: three's default (back faces) stores the
+    // depth of the far side of every wall and ceiling, and at the base of a wall or the top edge of a sewer
+    // wall the stored depth meets the lit surface within the bias, which drew a bright line of leaked light
+    // there. With the sun-facing surface in the map every point behind it has the wall's full thickness of
+    // margin; the lit surfaces themselves are kept off the map by the shadow's normalBias.
+    material.shadowSide = THREE.FrontSide;
     const slot = attribute('slot', 'float');
     const tile = attribute('tile', 'float');
     const layer = slot.add(0.5).toInt(); // round: the interpolated float lands a hair under the integer on some pixels, which truncation turned into the previous layer

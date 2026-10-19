@@ -1,8 +1,11 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec4, packNormalToRGB, unpackRGBToNormal, sample } from 'three/tsl';
+import { pass, mrt, output, normalView, diffuseColor, velocity, add, vec4, packNormalToRGB, unpackRGBToNormal, sample, fog, densityFogFactor, uniform } from 'three/tsl';
+import { G } from './sky/Globals.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
+import { SunLight } from 'three/addons/lights/SunLight.js';
+import { SunLightNode } from 'three/addons/lights/SunLightNode.js';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { DayCycle } from './sky/DayCycle.js';
 import { ProbeLighting } from './client/ProbeLighting.js';
@@ -27,42 +30,60 @@ export default class World {
         this.camera.layers.enableAll();
         this.scene.add(this.camera);
 
-        this.dirLight = new THREE.DirectionalLight( 0xffffff, Math.PI * 3.0 );
-        this.dirLight.position.set( 30, 60, -70 );
-        this.dirLight.castShadow = true;
-        this.dirLight.shadow.mapSize.width  = 2048;
-        this.dirLight.shadow.mapSize.height = 2048;
-        this.dirLight.shadow.bias = -0.0002;
-        this.dirLight.shadow.normalBias = 0.02;
-        // One 180 m shadow box (4096², soft PCF) centred on the player (DayCycle moves it): it spans the whole
-        // level, so nothing in view goes unshadowed, at 4 cm texels. The cascaded CSMShadowNode (?csm=1) rendered
-        // no shadows at all under the post-processing pipeline in this three version, even bound to the view
-        // camera, so it is only kept for experiments. The sun sits 150 m out, so the depth range must reach past
-        // the target: far objects on the sun's far side were clipped by the old -150..150.
+        // The sun: three's SunLight (r186), a directional light with two view-fitted shadow cascades in one atlas
+        // (near cascade to ~33 m at 2 cm texels, far cascade to CSM_FAR at ~7 cm, blended over a fade band, texel
+        // snapped against shimmer). The light's position is its direction (DayCycle sets it); there is no target.
+        // The older CSMShadowNode addon never drew a shadow here; SunLight is the supported path in this three
+        // version and the probe bake knows to swap it for a fitted plain light while it captures.
+        // ?csm=0 falls back to one 180 m shadow box (4096², 4 cm texels) centred on the player by DayCycle.
         let params = mainObject.queryParams || new URLSearchParams();
-        if(params.get('csm') === '1') {
-            this.csm = new CSMShadowNode( this.dirLight, { cascades: 3, maxFar: 140, mode: 'practical', lightMargin: 120 } );
-            this.csm.fade = true;
-            this.dirLight.shadow.shadowNode = this.csm;
+        const CSM_FAR = 130;   // shadows reach this far from the camera: the far fort from the walkway of the other
+        let mapSize = this.isMobile ? 2048 : 4096;
+        this.cascaded = params.get('csm') !== '0' && params.get('csm') !== 'old';
+        if(this.cascaded) {
+            this.dirLight = new SunLight( 0xffffff, 1 );
+            this.dirLight.position.set( 30, 60, -70 ).normalize();
+            this.dirLight.castShadow = true;
+            this.dirLight.shadow.mapSize.set( mapSize, mapSize ); // per cascade
+            this.dirLight.shadow.camera.far = CSM_FAR;
+            this.dirLight.shadow.camera.near = 1;
         } else {
-            this.dirLight.shadow.camera.near = 1; this.dirLight.shadow.camera.far = 400;
-            this.dirLight.shadow.camera.left = -90; this.dirLight.shadow.camera.right = 90;
-            this.dirLight.shadow.camera.top = 90; this.dirLight.shadow.camera.bottom = -90;
-            this.dirLight.shadow.mapSize.width = this.dirLight.shadow.mapSize.height = 4096;
+            this.dirLight = new THREE.DirectionalLight( 0xffffff, 1 );
+            this.dirLight.position.set( 30, 60, -70 );
+            this.dirLight.castShadow = true;
+            this.dirLight.shadow.mapSize.set( mapSize, mapSize );
+            if(params.get('csm') === 'old') {
+                // the CSMShadowNode addon, kept only to reproduce its failure here (it works in a bare scene: tools/csm-test.js)
+                this.csm = new CSMShadowNode( this.dirLight, { cascades: 3, maxFar: 140, mode: 'practical', lightMargin: 120 } );
+                this.csm.fade = true;
+                this.dirLight.shadow.shadowNode = this.csm;
+            } else {
+                this.dirLight.shadow.camera.near = 1; this.dirLight.shadow.camera.far = 400;
+                this.dirLight.shadow.camera.left = -90; this.dirLight.shadow.camera.right = 90;
+                this.dirLight.shadow.camera.top = 90; this.dirLight.shadow.camera.bottom = -90;
+            }
+            this.scene.add( this.dirLight.target );
         }
+        // Terrain casts with its front faces (terrainMaterial.js), so a constant bias is not needed; the normal
+        // offset keeps lit surfaces off their own map (about a texel of the far cascade at grazing angles).
+        this.dirLight.shadow.bias = 0;
+        this.dirLight.shadow.normalBias = 0.06;
+        this.dirLight.shadow.radius = 1.5;   // texels of the 5 tap PCF disk, resolved by TRAA
         this.scene.add( this.dirLight );
-        this.scene.add( this.dirLight.target );
 
         // Mobile renders at half resolution
         let pixelRatio = this.isMobile ? Math.max(0.5, window.devicePixelRatio * 0.25) : Math.min(1, window.devicePixelRatio);
 
         // WebGPU Renderer — no hardware AA since TRAA handles it
         this.renderer = new THREE.WebGPURenderer();
+        this.renderer.library.addLight( SunLightNode, SunLight );
         this.renderer.setPixelRatio( pixelRatio );
         this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoft is gone in r186 (the renderer substitutes this one, with a warning)
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 0.55;
+        // Exposure sits where sunlit cobbles and sand land around 190/255 after ACES (0.55 blew them out to 230,
+        // and crushed the shade); the ambient multiplier in ProbeLighting and DayCycle's sunScale set the ratio.
+        this.renderer.toneMappingExposure = 0.42;
         this.container.appendChild(this.renderer.domElement);
         this.renderer.setAnimationLoop(mainObject.update.bind(mainObject));
         this.renderer.setClearColor( 0x000000, 0 );
@@ -117,6 +138,15 @@ export default class World {
 
         this.renderPipeline.outputNode = flags.get('traa') === '0' ? compositePass : traaPass;
 
+        // Aerial perspective: a thin haze in the sky's horizon colour (the same radiance units as the sky, so it
+        // tone maps with it), 1 - exp(-(d k)^2): 3% at 50 m, 12% at 100 m, 25% at 150 m. It separates the far
+        // fort from the near one and keeps distant shaded rock from reading as a black cutout. ?fog=0 / ?fog=<k>.
+        let fogDensity = flags.has('fog') ? parseFloat(flags.get('fog')) : 0.0036;
+        if(fogDensity > 0) {
+            this.fogDensity = uniform(fogDensity);
+            this.scene.fogNode = fog(G.horizonColor, densityFogFactor(this.fogDensity));
+        }
+
         this._onWindowResize();
         this._setupSky(mainObject);
 
@@ -169,10 +199,15 @@ export default class World {
     update(dt) {
         if(this.dayCycle) this.dayCycle.update(dt, this.camera);
         if(this.probes) { this.probes.update(this.camera); this.scene.environmentIntensity = this.probes.environmentIntensity(); }
-        // The cascade node adopts whichever camera first builds a material with it, which here is a probe or
-        // environment cube camera: its cascades then followed that camera and nothing in the player's view was
-        // ever shadowed. Point it at the view camera once it exists.
-        if(this.csm && this.csm.camera && this.csm.camera !== this.camera) { this.csm.camera = this.camera; this.csm.updateFrustums(); }
+        // ?csm=old: why the addon drew nothing here. It clones the sun's LightShadow for each cascade when the first
+        // material is built with it, and that build happens inside a probe bake, which has just set every shadow
+        // casting light to autoUpdate=false / needsUpdate=true (LightProbeGrid.bake); LightShadow.copy carries both
+        // flags, so the cascade maps rendered exactly once, from the probe's cube camera, and never again. It also
+        // adopts that cube camera as the view camera. Undo both every frame.
+        if(this.csm) {
+            if(this.csm.camera && this.csm.camera !== this.camera) { this.csm.camera = this.camera; this.csm.updateFrustums(); }
+            for(let l of this.csm.lights) l.shadow.autoUpdate = true;
+        }
     }
 
     /** **INTERNAL**: This function recalculates the viewport based on the new window size. */
@@ -181,7 +216,6 @@ export default class World {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
-        if(this.csm && this.csm.camera) this.csm.updateFrustums();
     }
 
 }

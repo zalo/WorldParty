@@ -11,6 +11,7 @@ import { G } from './Globals.js';
 
 const RG = 6360.0;
 const RT = 6460.0;
+export const PLANET_RADIUS = RG; // km; the view height uniform is measured from the planet's centre
 const PI = Math.PI;
 
 export const SUN_ILLUMINANCE = 11.0; // scene units (sun irradiance outside the atmosphere)
@@ -44,10 +45,14 @@ export class Atmosphere {
 		this.skyViewLUT.wrapS = THREE.ClampToEdgeWrapping;
 
 		this.rayleighScale = uniform( 1 ).setName( 'atmoRay' );
-		this.mieScale = uniform( 1 ).setName( 'atmoMie' );
+		// A little haze and a sandy ground: the clean Rayleigh sky over dark ground gave a hemisphere irradiance
+		// of (0.10, 0.21, 0.46), 1:4.5 red to blue, so everything in shade went navy. With aerosols and a ground
+		// that bounces (the level is sand, grass and pale stone) it is (0.16, 0.28, 0.53): half again brighter and
+		// much less saturated, and the horizon reads pale instead of electric blue.
+		this.mieScale = uniform( 2.0 ).setName( 'atmoMie' );
 		this.mieG = uniform( 0.8 ).setName( 'atmoMieG' );
 		this.ozoneScale = uniform( 1 ).setName( 'atmoOzone' );
-		this.groundAlbedo = uniform( new THREE.Color( 0.06, 0.08, 0.1 ) ).setName( 'atmoAlbedo' );
+		this.groundAlbedo = uniform( new THREE.Color( 0.3, 0.28, 0.22 ) ).setName( 'atmoAlbedo' );
 		this.viewHeight = uniform( RG + 0.002 ).setName( 'atmoViewH' ); // km
 		this.sunIlluminance = uniform( new THREE.Color( SUN_ILLUMINANCE, SUN_ILLUMINANCE, SUN_ILLUMINANCE ) ).setName( 'atmoSunE' );
 		// the real sun (may be below the horizon: twilight, night). G.sunDir is the key light, which
