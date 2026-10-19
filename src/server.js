@@ -833,9 +833,32 @@ export default {
       return res || new Response('Not found', { status: 404 });
     }
     if(url.pathname === '/api/discord/token') return discordToken(request, env);
+    if(url.pathname.startsWith('/assets/music/')) return rangedAsset(request, env);
     return (await routePartykitRequest(request, env)) || env.ASSETS.fetch(request);
   }
 };
+
+/** Static assets ignore Range (a 200 with the whole file), and Safari and iOS want byte ranges for <audio>; Discord's
+ *  CSP (`default-src 'self'`) rules out the usual way around it, a blob URL. So the music (MusicTrack.js) is served
+ *  through here (`run_worker_first`), sliced to the requested range. */
+async function rangedAsset(request, env) {
+  let headers = new Headers(request.headers), range = headers.get('Range');
+  headers.delete('Range');
+  let res = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers }));
+  let m = range && /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if(request.method !== 'GET' || res.status !== 200 || !m || (m[1] === '' && m[2] === '')) {
+    if(res.status !== 200) return res;
+    let out = new Response(res.body, res); out.headers.set('Accept-Ranges', 'bytes'); return out;
+  }
+  let body = await res.arrayBuffer(), size = body.byteLength;
+  let start = m[1] === '' ? Math.max(0, size - Number(m[2])) : Number(m[1]);
+  let end = m[1] === '' || m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+  if(start > end) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  let out = new Headers(res.headers);
+  out.delete('Content-Encoding'); // the body here is the decoded bytes
+  out.set('Accept-Ranges', 'bytes'); out.set('Content-Range', `bytes ${start}-${end}/${size}`); out.set('Content-Length', String(end - start + 1));
+  return new Response(body.slice(start, end + 1), { status: 206, headers: out });
+}
 
 /** Discord Activity sign-in: the client trades the OAuth2 code it got from the Embedded App SDK for an access
  *  token here, where the app's client secret lives (`wrangler secret put DISCORD_CLIENT_SECRET`). The client id

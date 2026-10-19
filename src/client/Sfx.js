@@ -1,5 +1,6 @@
 /** Undermine's sound effects, all synthesized in WebAudio: no audio files (the Discord Activity's CSP forbids
- *  loading from any other origin and the repo stays small). The context is created and resumed on the first user
+ *  loading from any other origin and the repo stays small; the music track, MusicTrack.js, is the one file and is
+ *  served from the app's own origin). The context is created and resumed on the first user
  *  gesture, as browsers require; every public method is a no-op until then, or when WebAudio is missing.
  *
  *  Palette, so new sounds fit the old ones (Music.js shares it):

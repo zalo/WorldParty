@@ -1,4 +1,5 @@
-/** Undermine's score: generated live, never quite the same twice, in the key of the effects (Sfx.js: D Mixolydian).
+/** Undermine's generated score (`?music=score`; the default music is the Gold Rush Heist track, MusicTrack.js):
+ *  generated live, never quite the same twice, in the key of the effects (Sfx.js: D Mixolydian).
  *  An adventure-game siege: cheerful bells over a slow modal pad, a soft pulse underneath, more drums and a melody
  *  when something is at stake.
  *

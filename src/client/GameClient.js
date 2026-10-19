@@ -7,6 +7,7 @@ import { PhysGunTool } from '../tools/PhysGunTool.js';
 import { GameHud } from './GameHud.js';
 import { Sfx } from './Sfx.js';
 import { Music } from './Music.js';
+import { MusicTrack } from './MusicTrack.js';
 import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, GlowRockRenderSystem, GlowSparkFx, ExplosionFx, teamColorOf } from './gameSystems.js';
 import { GlowLighting } from './GlowLighting.js';
 import { PROPS } from '../props/PropRegistry.js';
@@ -20,8 +21,10 @@ export class GameClient {
         this.main = main;
         this.config = config;
         this.sfx = new Sfx();
-        this.music = new Music(this.sfx);
-        if(new URLSearchParams(location.search).get('music') !== '0') this.sfx.onReady(() => this.music.start());
+        // the music is the Gold Rush Heist track (MusicTrack); ?music=score plays the generated score, ?music=0 nothing
+        let music = new URLSearchParams(location.search).get('music');
+        this.music = music === 'score' ? new Music(this.sfx) : new MusicTrack(this.sfx);
+        if(music !== '0') this.sfx.onReady(() => this.music.start());
         this.fx = new ExplosionFx(main.world.scene);
         this.hud = new GameHud(this);
         this.respawnAt = 0;

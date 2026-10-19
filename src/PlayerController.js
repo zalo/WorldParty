@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { bool } from 'three/tsl';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { MeshBVH, MeshBVHHelper, StaticGeometryGenerator } from 'three-mesh-bvh';
@@ -89,11 +90,13 @@ export class PlayerController extends THREE.Group {
             }
         });
 
-        // Character mesh
-        this.playerMesh = new THREE.Mesh(
-            new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5),
-            new THREE.MeshStandardMaterial()
-        );
+        // Character mesh: only its shadow is seen. The eye sits at the top of the rounded box, so any camera shake
+        // (every rocket fired) lifted it out and flashed the box's top across the bottom of the screen; the view
+        // discards it (maskNode) while the shadow pass, which takes maskShadowNode first, keeps it.
+        let material = new THREE.MeshStandardNodeMaterial();
+        material.maskNode = bool(false);
+        material.maskShadowNode = bool(true);
+        this.playerMesh = new THREE.Mesh(new RoundedBoxGeometry(1.0, 2.0, 1.0, 10, 0.5), material);
         this.playerMesh.geometry.translate(0, - 0.5, 0);
         this.capsuleInfo = {
             radius: 0.5,

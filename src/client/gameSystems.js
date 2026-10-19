@@ -17,6 +17,7 @@ const toVec3 = (p) => new THREE.Vector3(p.x, p.y, p.z);
  *  goes; if the server's flies on past a parked one, or never comes, the server's is drawn after all. */
 const PARK_MS = 600;       // a rocket parked on a body or player waits this long for the server's to end
 const ORPHAN_MS = 2000;    // a predicted rocket the server never sent (refused) goes after this long
+const GROW_M = 6;          // a predicted rocket's ball is shrunk within this distance of the eye (see eyeScale)
 
 export class ProjectileRenderSystem {
     constructor(scene, { localId = () => null, hitTest = null, onImpact = null } = {}) {
@@ -64,9 +65,15 @@ export class ProjectileRenderSystem {
         // point blank: the server traces the first 1.3 m and explodes there without a rocket
         let pre = this.hitTest?.(o, d, 1.3);
         if(pre) { this.onImpact?.(pre.point.clone().addScaledVector(d, -0.15), kind, pre.terrain); return; }
-        let pos = o.clone().addScaledVector(d, 1.3);
-        this.predicted.push({ object: this.makeVisual(pos), pos, dir: d, vel: d.clone().multiplyScalar(def.speed), born: performance.now(), serverId: null, parkedAt: 0, kind });
+        let pos = o.clone().addScaledVector(d, 1.3), object = this.makeVisual(pos);
+        let p = { object, pos, origin: o, dir: d, vel: d.clone().multiplyScalar(def.speed), born: performance.now(), serverId: null, parkedAt: 0, kind };
+        this.eyeScale(p);
+        this.predicted.push(p);
     }
+    /** A predicted rocket starts 1.3 m from the eye and is drawn from its first frame (the server's appeared metres
+     *  out), where the 22 cm ball covered a quarter of the screen's height at the crosshair: an orange flash on every
+     *  shot. Within GROW_M of the eye it is scaled to keep the size it has there (about 4 degrees across). */
+    eyeScale(p) { p.object.scale.setScalar(Math.min(1, p.pos.distanceTo(p.origin) / GROW_M)); }
     dropPredicted(p) {
         let i = this.predicted.indexOf(p);
         if(i >= 0) this.predicted.splice(i, 1);
@@ -106,6 +113,7 @@ export class ProjectileRenderSystem {
         }
         p.pos.addScaledVector(dir, len);
         p.object.position.copy(p.pos);
+        this.eyeScale(p);
         this.pushTrail(p.object);
     }
     update(world, dt) {
