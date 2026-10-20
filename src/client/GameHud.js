@@ -1,7 +1,7 @@
 /** Fort War HUD: scores and clock, the health bar alone in the top left, weapon slots (the selected one framed; they
  *  are also how a phone switches weapons, and the mason's shows its stone), the event feed, death and match-over
- *  overlays, the treasure finder (how far the nearest neutral supply is and how far above or below), and the vote
- *  panel (V). The only instruction is "Find the Treasure." */
+ *  overlays, the treasure finder (how far the nearest neutral supply is and how far above or below), the scoreboard
+ *  (hold Tab, or tap the score bar on a phone), and the vote panel (V). The only instruction is "Find the Treasure." */
 import { SUPPLY, MATCH_OVER_MS, VOTE } from '../game/rules.js';
 
 // the HUD updates every frame: write only what changed (a same-text write still invalidates layout and paint)
@@ -9,6 +9,7 @@ const setText = (el, text) => { text = String(text); if(el.textContent !== text)
 
 const FONT = "font-family: 'Segoe UI', system-ui, sans-serif;";
 const el = (tag, css, parent = document.body) => { let e = document.createElement(tag); e.style.cssText = css; parent.appendChild(e); return e; };
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 export class GameHud {
     constructor(game) {
@@ -32,6 +33,11 @@ export class GameHud {
         this.scoreRed = el('span', 'min-width:34px;text-align:right;', this.score);
         this.clock = el('span', 'font-size:18px;font-weight:normal;opacity:0.9;min-width:60px;text-align:center;', this.score);
         this.scoreBlue = el('span', 'min-width:34px;text-align:left;', this.score);
+        this.score.style.pointerEvents = 'auto'; this.score.style.cursor = 'pointer'; // a tap shows the scoreboard (phones have no Tab)
+        this.score.addEventListener('click', (e) => { e.stopPropagation(); this.toggleBoard(!this.boardOpen); });
+        // scoreboard (hold Tab): a column per team, players best first
+        this.board = el('div', `position:absolute;top:84px;left:50%;transform:translateX(-50%);display:none;gap:14px;flex-wrap:wrap;justify-content:center;max-width:96vw;`, root);
+        this.boardOpen = false; this.boardKey = '';
         this.round = el('div', `position:absolute;top:50px;left:50%;transform:translateX(-50%);font-size:12px;opacity:0.7;`, root);
         // top left: the health bar, nothing else
         let left = el('div', 'position:absolute;top:10px;left:10px;', root);
@@ -69,7 +75,7 @@ export class GameHud {
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
             <div>Walk into a crate to carry it and bring it to your vault: every crate there is worth 100 to your team. Every crystal you dig or blast out of the ground is worth 1. Most at the end wins. Bottom right says how far the nearest treasure is, and how far above or below you.</div>
-            <div style="margin-top:8px;opacity:0.8"><b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason shape / physgun freeze &nbsp; <b>R</b> turn block &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
+            <div style="margin-top:8px;opacity:0.8"><b>Tab</b> scores &nbsp; <b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason shape / physgun freeze &nbsp; <b>R</b> turn block &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
         this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
         let title = el('div', 'font-weight:bold;font-size:16px;', this.votePanel); title.textContent = 'Call a vote';
@@ -113,6 +119,30 @@ export class GameHud {
 
     openChat() { this.chat.style.display = 'block'; this.chat.value = ''; this.chat.focus(); this.main.player.controls?.unlock(); }
     closeChat() { this.chat.style.display = 'none'; this.chat.blur(); }
+    toggleBoard(on) { this.boardOpen = on; this.board.style.display = on ? 'flex' : 'none'; if(on) this.renderBoard(); }
+    /** The scoreboard's content, rebuilt only when something on it changed (names come from players: escaped). */
+    renderBoard() {
+        let g = this.game, ecs = this.main.ecs, m = ecs.get('match', 'Match'), myId = this.main.conn.id;
+        let players = [...ecs.each('Player')].filter(([, p]) => p.team);
+        let key = JSON.stringify([m?.scores, players.map(([id, p]) => [id, p.name, p.team, p.score, p.crystals, p.carries, p.kills, p.deaths, p.dead, !!p.carrying])]);
+        if(key === this.boardKey) return;
+        this.boardKey = key;
+        let cell = 'padding:3px 7px;text-align:right;';
+        let html = '';
+        for(let team of ['red', 'blue']) {
+            let t = g.config.teams[team], rows = players.filter(([, p]) => p.team === team).sort((a, b) => b[1].score - a[1].score || b[1].kills - a[1].kills);
+            html += `<div style="min-width:300px;background:rgba(10,10,20,0.88);border:1px solid #555;border-top:3px solid ${t.color};border-radius:10px;padding:10px 12px;">`
+                + `<div style="display:flex;justify-content:space-between;font-size:18px;font-weight:bold;color:${t.color};margin-bottom:6px;"><span>${esc(t.name)}</span><span>${m?.scores?.[team] ?? 0}</span></div>`
+                + `<table style="border-collapse:collapse;font-size:13px;width:100%;"><tr style="opacity:0.6;font-size:11px;"><td style="padding:3px 7px;">player</td><td style="${cell}" title="units">units</td><td style="${cell}" title="crystals">💎</td><td style="${cell}" title="crates brought home">📦</td><td style="${cell}" title="kills">K</td><td style="${cell}" title="deaths">D</td></tr>`;
+            for(let [id, p] of rows) {
+                let me = id === myId, style = (me ? 'background:rgba(255,255,255,0.12);font-weight:bold;' : '') + (p.dead ? 'opacity:0.45;' : '');
+                html += `<tr style="${style}"><td style="padding:3px 7px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.carrying ? '💰 ' : ''}${esc(p.name)}</td><td style="${cell}">${p.score}</td><td style="${cell}">${p.crystals || 0}</td><td style="${cell}">${p.carries}</td><td style="${cell}">${p.kills}</td><td style="${cell}">${p.deaths}</td></tr>`;
+            }
+            if(!rows.length) html += `<tr><td colspan="6" style="padding:6px 7px;opacity:0.5;">nobody yet</td></tr>`;
+            html += '</table></div>';
+        }
+        this.board.innerHTML = html;
+    }
     toggleHelp(force) { this.helpOpen = force ?? !this.helpOpen; this.help.style.display = this.helpOpen ? 'block' : 'none'; }
     toggleVote(force) { this.voteOpen = force ?? !this.voteOpen; this.votePanel.style.display = this.voteOpen ? 'flex' : 'none'; if(this.voteOpen) this.main.player.controls?.unlock(); }
 
@@ -183,6 +213,7 @@ export class GameHud {
             finder = best < SUPPLY.senseRange ? `💰 Treasure ${best.toFixed(0)} m away, ${level}` : 'Find the Treasure.';
         }
         setText(this.finder, finder);
+        if(this.boardOpen && now - (this.boardAt || 0) > 250) { this.boardAt = now; this.renderBoard(); }
         // fades
         if(this.flashUntil && now > this.flashUntil) { this.flash.style.opacity = '0'; this.flashUntil = 0; }
         if(this.damageUntil && now > this.damageUntil) { this.vignette.style.opacity = '0'; this.damageUntil = 0; }

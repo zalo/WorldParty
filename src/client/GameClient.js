@@ -79,6 +79,8 @@ export class GameClient {
         // for our old team back. GameClient exists from the first full update on, so every `open` it sees is a reconnect.
         main.conn.addEventListener('open', () => { this.reopened = { at: performance.now(), team: this.team, alive: !this.dead }; });
         window.addEventListener('keydown', (e) => this.onKey(e));
+        window.addEventListener('keyup', (e) => { if(e.code === 'Tab') { e.preventDefault(); this.hud.toggleBoard(false); } });
+        window.addEventListener('blur', () => this.hud.toggleBoard(false)); // Tab held while the window lost focus
         this.hud.chat.addEventListener('keydown', (e) => {
             e.stopPropagation();
             if(e.code === 'Enter') {
@@ -115,6 +117,7 @@ export class GameClient {
     onKey(e) {
         if(this.hud.chat.style.display === 'block') return;
         if(e.code === 'Enter') { e.preventDefault(); this.hud.openChat(); }
+        else if(e.code === 'Tab') { e.preventDefault(); if(!e.repeat) this.hud.toggleBoard(true); } // held: the scoreboard
         else if(e.code === 'KeyH') this.hud.toggleHelp();
         else if(e.code === 'KeyV') this.hud.toggleVote();
         else if(e.code === 'Escape' && this.hud.voteOpen) this.hud.toggleVote(false);
