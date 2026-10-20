@@ -288,7 +288,7 @@ export class GameClient {
         if(!this.glowBound && main.giDecided) this.bindGlow();
         this.glow?.update(main.world.camera);
         if(me) {
-            if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; for(let t of this.tools) if(t.release) t.release(main); this.grapple.release(main); this.sfx.drillLoop(false); this.sfx.reel(false); }
+            if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; for(let t of this.tools) if(t.release) t.release(main); this.grapple.release(main); this.sfx.reel(false); }
             if(!me.dead && this.wasDead) { main.player.frozen = false; main.player.spectate = null; this.hud.spectating = ''; this.hud.killedBy = ''; }
             if(me.dead) this.spectateTeammate();
             this.wasDead = me.dead;

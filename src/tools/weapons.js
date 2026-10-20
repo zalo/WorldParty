@@ -87,7 +87,6 @@ export class DrillTool extends Weapon {
         super('drill');
         this.mobileActions = [{ label: 'Dig', icon: '⛏️', action: 'primary' }];
     }
-    onUnequip(main) { main.game?.sfx.drillLoop(false); }
     onPrimaryFire(main) { this.dig(main); }
     dig(main) {
         if(!this.canFire(main)) return;
@@ -100,7 +99,6 @@ export class DrillTool extends Weapon {
     update(main) {
         let held = main.primaryHeld && !main.simulationParams.mobile;
         if(held) this.dig(main);
-        main.game?.sfx.drillLoop(held && !main.game.dead); // the motor runs while the button is held; dig() adds a bite per carve
     }
 }
 

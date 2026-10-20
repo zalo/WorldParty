@@ -13,8 +13,8 @@
  *  - World sounds take a position: `listen()` (called by GameClient every frame with the camera) gives distance
  *    attenuation (full within 5 m, 1/(1 + d/18) beyond, floor 0.03), a lowpass that closes with distance (a far
  *    boom is a muffled thud) and a stereo pan from the camera's right vector.
- *  - Loops (drill motor and grind, grapple reel) are stateful: `drillLoop(true|false)` / `reel(true|false)` start
- *    a graph once and wind it down with ramps; one-shots (`drill()` = a bite per actual carve) land on top.
+ *  - Loops (the grapple reel) are stateful: `reel(true|false)` starts a graph once and winds it down with ramps. The
+ *    drill is one-shots only: `drill()` = a pickaxe strike per dig.
  *  - Voices: `Synth` holds the primitives (noise, tone, metal = FM clink, bell, brass, kick) bound to a context and
  *    an output, so the same sound functions (`SOUNDS`) play live or render into an OfflineAudioContext for the
  *    `Sfx.renderOffline(name, seconds, opts)` debug helper (peak, RMS, duration, spectral centroid, band split).
@@ -195,41 +195,16 @@ export const SOUNDS = {
             if(progress > 0.7) s.tone(at, 70, { dur: 0.08, gain: 0.18 * a, out });
         } else s.tone(at, 1400 + progress * 1300, { dur: 0.03, gain: 0.14 * a, type: 'square', attack: 0.001, lowpass: 5000, out });
     },
-    /** The drill motor and grind while the button is held: detuned saws under a wobbling lowpass, noise chopped by the teeth, a hiss. */
-    drillLoop(s, { at = s.now } = {}) {
-        let ctx = s.ctx, out = s.bus({ send: 0.08 }), r = rnd(0.95, 1.05);
-        let master = ctx.createGain(); master.gain.setValueAtTime(0.0001, at); master.gain.exponentialRampToValueAtTime(1, at + 0.12); master.connect(out);
-        let stops = [], nodes = [];
-        let lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 650; lp.Q.value = 2;
-        let mg = ctx.createGain(); mg.gain.value = 0.18; lp.connect(mg); mg.connect(master);
-        let oscs = [['sawtooth', 92, 0], ['sawtooth', 92, 9], ['square', 46, 0]].map(([type, f, d]) => { let o = ctx.createOscillator(); o.type = type; o.frequency.value = f * r; o.detune.value = d; o.connect(lp); o.start(at); stops.push(o); return o; });
-        let wob = ctx.createOscillator(); wob.frequency.value = 0.7; let wg = ctx.createGain(); wg.gain.value = 180; wob.connect(wg); wg.connect(lp.frequency); wob.start(at); stops.push(wob);
-        let strain = ctx.createOscillator(); strain.frequency.value = 2.7; let sg = ctx.createGain(); sg.gain.value = 25; strain.connect(sg); for(let o of oscs) sg.connect(o.detune); strain.start(at); stops.push(strain);
-        // grind: bandpassed noise chopped at 14 Hz
-        let n1 = ctx.createBufferSource(); n1.buffer = s.noiseBuffer(); n1.loop = true;
-        let bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1100 * r; bp.Q.value = 1.5;
-        let chop = ctx.createGain(); chop.gain.value = 0.5; let lfo = ctx.createOscillator(); lfo.type = 'square'; lfo.frequency.value = 14; let lg = ctx.createGain(); lg.gain.value = 0.45; lfo.connect(lg); lg.connect(chop.gain);
-        let gg = ctx.createGain(); gg.gain.value = 0.2; n1.connect(bp); bp.connect(chop); chop.connect(gg); gg.connect(master); n1.start(at, Math.random()); lfo.start(at); stops.push(n1, lfo);
-        // rattle: a shimmering hiss
-        let n2 = ctx.createBufferSource(); n2.buffer = s.noiseBuffer(); n2.loop = true;
-        let hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
-        let sh = ctx.createGain(); sh.gain.value = 0.04; let lfo2 = ctx.createOscillator(); lfo2.frequency.value = 29; let lg2 = ctx.createGain(); lg2.gain.value = 0.025; lfo2.connect(lg2); lg2.connect(sh.gain);
-        n2.connect(hp); hp.connect(sh); sh.connect(master); n2.start(at, Math.random()); lfo2.start(at); stops.push(n2, lfo2);
-        nodes.push(master, lp, mg, bp, chop, gg, hp, sh);
-        return (t = ctx.currentTime) => {
-            let g = master.gain; if(g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(t); else { g.cancelScheduledValues(t); g.setValueAtTime(1, t); }
-            g.exponentialRampToValueAtTime(0.0001, t + 0.3);
-            for(let o of oscs) { o.frequency.setValueAtTime(o.frequency.value, t); o.frequency.exponentialRampToValueAtTime(o.frequency.value * 0.55, t + 0.3); } // winding down
-            for(let n of stops) n.stop(t + 0.35);
-            setTimeout(() => { for(let n of nodes) n.disconnect(); }, (t - ctx.currentTime) * 1000 + 500);
-        };
-    },
-    /** One bite of the drill (per actual carve, every 420 ms while held): a crunch, a thud, gravel. */
-    bite(s, { at = s.now } = {}) {
-        let r = rnd(0.9, 1.1), out = s.bus({ send: 0.12 });
-        s.noise(at, { dur: 0.18, gain: 0.45, type: 'lowpass', freq: 420 * r, freqEnd: 110, q: 1, attack: 0.003, out });
-        s.tone(at, 85 * r, { dur: 0.15, gain: 0.35, freqEnd: 38, out });
-        for(let i = 0; i < 4; i++) s.noise(at + 0.02 + Math.random() * 0.22, { dur: rnd(0.015, 0.035), gain: 0.16, type: 'bandpass', freq: rnd(700, 2600), q: 3, attack: 0.001, out });
+    /** One strike of the pickaxe (per actual carve, every 420 ms while the button is held): the point's tink on stone,
+     *  a dry thunk of earth giving way, a little grit falling. Short and bright, nothing deep: it replaced a drill
+     *  motor (saws at 46-92 Hz under a chopped grind) and a deep thud per bite, which together read as menacing. */
+    pick(s, { at = s.now } = {}) {
+        let r = rnd(0.93, 1.07), out = s.bus({ send: 0.1 });
+        s.noise(at, { dur: 0.012, gain: 0.3, type: 'bandpass', freq: 2400 * r, q: 1.2, attack: 0.001, out }); // the point's contact
+        s.metal(at, 1250 * r, { dur: 0.16, gain: 0.08, ratio: 2.4, index: 1.5, out });                        // a short ring, not a clang
+        s.noise(at + 0.004, { dur: 0.08, gain: 0.4, type: 'lowpass', freq: 1100 * r, freqEnd: 380, q: 0.8, attack: 0.002, out }); // earth giving way
+        s.tone(at + 0.004, 240 * r, { dur: 0.05, gain: 0.07, freqEnd: 170, out });                           // a little body
+        for(let i = 0; i < 3; i++) s.noise(at + 0.05 + Math.random() * 0.18, { dur: rnd(0.01, 0.025), gain: rnd(0.04, 0.08), type: 'bandpass', freq: rnd(1500, 4000), q: 2.5, attack: 0.001, out }); // grit
     },
     /** A glow rock dug out: it shatters with a glassy tinkle (high bell partials in D, a breath of sparkle noise). */
     crystal(s, { at = s.now, count = 1, distance = 0, pan = 0 } = {}) {
@@ -465,8 +440,7 @@ export class Sfx {
     throw(power = 0.6, kind = 'grenade') { this.play('throw', { power, kind }); }
     bounce(kind, impact, pos) { this.play('bounce', { kind, impact, ...this.spatial(pos) }); }
     fuseTick(kind, progress, pos) { let sp = this.spatial(pos); if(sp.distance < 40) this.play('fuse', { kind, progress, ...sp }); }
-    drillLoop(on) { this.loop('drillLoop', on); }
-    drill() { this.play('bite'); }
+    drill() { this.play('pick'); }
     build(dims) { this.play('build', { size: SIZE_OF_SHAPE(dims) }); }
     hook() { this.play('hook'); }
     reel(on) { this.loop('reelLoop', on); }
