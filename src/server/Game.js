@@ -5,11 +5,12 @@
  *  Fuse), explosions (a sphere carve plus a radial velocity change on bodies and knockback and damage on players),
  *  the supplies (physics crates: steal, carry, deposit, drop on death, return when abandoned), rubble damage, rubble
  *  fading, the mason's build budget, the glow rocks in the ground (src/server/GlowRocks.js), and the match timer with
- *  terrain restored from the pristine import between rounds.
+ *  terrain restored from the pristine import between rounds. A team scores units (UNITS): 100 per supply in its vault
+ *  and 1 per crystal its players free (`onTerrainChanged`: GlowRocks credits each shattered rock to the carve's author).
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
 import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y, VOTE,
-         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, MAX_PLAYER_PROPS, GAME_PROPS, AWARDS, inBox, otherTeam } from '../game/rules.js';
+         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, AWARDS, UNITS, inBox, otherTeam } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
 import { chunksInBox } from '../terrain/grid.js';
 import { GlowRocks } from './GlowRocks.js';
@@ -69,8 +70,8 @@ export class Game {
         if(!this.active) return;
         let w = this.world;
         this.resetSupplies();
-        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0 }); this.spawnQueue.add(id); }
-        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round: 1, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, awards: [], vote: null });
+        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0, crystals: 0 }); this.spawnQueue.add(id); }
+        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round: 1, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, crystals: { red: 0, blue: 0 }, awards: [], vote: null });
         this.updateScores(true);
     }
 
@@ -127,13 +128,8 @@ export class Game {
             case 'build':   await this.build(id, p, data, now); return true;
             case 'respawn': if(p.dead && now >= p.respawnAt) this.respawn(id); return true;
             case 'jointeam': this.switchTeam(id, p, String(data.team || ''), now); return true;
-            case 'spawnprop': { // menu props are limited in a match
-                let propId = String(data.propId || '');
-                if(!GAME_PROPS.includes(propId) || p.dead) return true;
-                let live = 0; for(let [, prop] of w.each('Prop')) if(GAME_PROPS.includes(prop.propId)) live++;
-                if(live >= MAX_PLAYER_PROPS) { this.server.send(id, { type: 'event', text: 'Too many props in the world already' }); return true; }
-                return false; // the server spawns it as usual
-            }
+            case 'spawnprop': case 'spawnphyscube': return true; // no props from the menu in a match
+            case 'physgun_move': return p.dead; // a dead player's hold was released (kill); a late move must not grab again
             case 'physgun_grab': { // no stealing with the physgun, and only within reach
                 let btf = w.get(data.bodyId, 'Transform'), tf = w.get(id, 'Transform');
                 if(!btf || !tf || p.dead) return true;
@@ -149,7 +145,12 @@ export class Game {
 
     /** The terrain changed (settleNow, with the replaced chunk content still around): the glow rocks a brush can have
      *  uncovered are measured, new ones appear, free ones become bodies. Returns the counts and cost, for the log. */
-    onTerrainChanged(boxes, carved, changed) { return this.active ? this.rocks.onTerrainChanged(boxes, carved, changed) : null; }
+    onTerrainChanged(boxes, carved, changed) {
+        if(!this.active) return null;
+        let out = this.rocks.onTerrainChanged(boxes, carved, changed);
+        if(out) for(let [id, n] of out.credits) this.creditCrystals(id, n);
+        return out;
+    }
 
     /** Where the player's eye is on the server (its Transform is the capsule centre minus half a metre). */
     eyeOf(id) { let tf = this.world.get(id, 'Transform'); return { x: tf.position.x, y: tf.position.y + 1.0, z: tf.position.z }; }
@@ -212,13 +213,16 @@ export class Game {
         if(p.dead || !this.ready(id, 'drill', now)) return;
         let { origin, dir } = this.aim(id, data);
         let d = WEAPONS.drill, r = d.radius;
-        let center = { x: origin.x + dir.x * d.reach, y: origin.y + dir.y * d.reach - d.drop, z: origin.z + dir.z * d.reach };
+        // the hull of a sphere around the player, resting at the feet, and the same sphere `reach` ahead along the view:
+        // separate spheres left a ridge between every two bites, a tunnel dug walking forward now has a smooth floor
+        let a = { x: origin.x, y: origin.y - d.drop, z: origin.z };
+        let b = { x: a.x + dir.x * d.reach, y: a.y + dir.y * d.reach, z: a.z + dir.z * d.reach };
         // stone comes from digging: a dig that actually removed material is worth a block (re-digging a hole is not)
         let T = this.server.terrain;
-        let keys = chunksInBox(T.world, { x: center.x - r, y: center.y - r, z: center.z - r }, { x: center.x + r, y: center.y + r, z: center.z + r });
+        let keys = chunksInBox(T.world, { x: Math.min(a.x, b.x) - r, y: Math.min(a.y, b.y) - r, z: Math.min(a.z, b.z) - r }, { x: Math.max(a.x, b.x) + r, y: Math.max(a.y, b.y) + r, z: Math.max(a.z, b.z) + r });
         let volume = () => keys.reduce((sum, k) => sum + (T.chunks[k] && T.hasSolid(k) ? T.manifoldOf(k).volume() : 0), 0);
         let before = volume();
-        await this.server.carveSphere(center, r, 1, true);
+        await this.server.carveCapsule(a, b, r, 1, id);
         if(before - volume() > 0.05 && p.build < WEAPONS.mason.budget) this.world.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + WEAPONS.mason.stonePerDig) });
     }
 
@@ -270,9 +274,11 @@ export class Game {
         let w = this.world, p = w.get(id, 'Player');
         if(!p || p.dead) return;
         if(p.carrying) this.dropSupply(p.carrying, id, now);
+        // let go of whatever the physgun held: the hold would otherwise follow the dead player's camera and outlive them
+        for(let [bid, g] of w.each('Grabbed')) if(g.by === id) w.remove(bid, 'Grabbed');
         w.set(id, 'Player', { dead: true, health: 0, deaths: p.deaths + 1, respawnAt: now + RESPAWN_MS, carrying: null });
         let killer = by && by !== id ? w.get(by, 'Player') : null;
-        if(killer) w.set(by, 'Player', { kills: killer.kills + 1, score: killer.score + 1 });
+        if(killer) w.set(by, 'Player', { kills: killer.kills + 1 });
         let text = killer ? `${killer.name} ${cause || 'blew up'} ${p.name}` : by === id ? `${p.name} ${cause || 'blew up'} themselves` : `${p.name} ${cause || 'died'}`;
         this.server.broadcast(JSON.stringify({ type: 'event', kind: 'kill', text, victim: id, killer: killer ? by : null }));
     }
@@ -289,7 +295,7 @@ export class Game {
     explode(center, kind, by, now) {
         let def = WEAPONS[kind];
         let R = def.radius, reach = R * 1.6;
-        this.server.carveSphere(center, R).catch(e => console.error('carve failed: ' + e.message));
+        this.server.carveSphere(center, R, 1, by).catch(e => console.error('carve failed: ' + e.message));
         let w = this.world;
         for(let [bid, pb, tf, rb] of w.each('$PxBody', 'Transform', 'RigidBody')) {
             if(rb.frozen) continue;
@@ -377,10 +383,10 @@ export class Game {
         let slot = this.freeSlot(team);
         this.place(sid, slot);
         w.set(sid, 'Supply', { team, state: 'home', carriedBy: null, home: slot, droppedAt: 0 });
-        w.set(pid, 'Player', { carrying: null, score: p.score + 2, carries: p.carries + 1 });
+        w.set(pid, 'Player', { carrying: null, score: p.score + UNITS.supply, carries: p.carries + 1 });
         this.carried.delete(sid);
         let tname = this.config.teams[team].name;
-        this.server.broadcast(JSON.stringify({ type: 'event', kind: 'deposit', text: `${p.name} brought a supply home to ${tname}`, team }));
+        this.server.broadcast(JSON.stringify({ type: 'event', kind: 'deposit', text: `${p.name} brought a supply home to ${tname} (+${UNITS.supply})`, team }));
         if(run.underground >= SUPPLY.undergroundBonusS) {
             // Tunnel rat: smuggling it home underground earns the team a bonus crate
             let bonus = this.freeSlot(team);
@@ -390,7 +396,8 @@ export class Game {
                 Prop: Prop({ propId: 'supply', url: null }),
                 Supply: Supply({ team, state: 'home', home: bonus }),
             });
-            w.set(pid, 'Player', { score: p.score + 3, smuggles: p.smuggles + 1 });
+            let q = w.get(pid, 'Player');
+            w.set(pid, 'Player', { score: q.score + UNITS.supply, smuggles: q.smuggles + 1 });
             this.server.broadcast(JSON.stringify({ type: 'event', kind: 'bonus', text: `Tunnel rat! ${p.name} smuggled it underground: bonus crate for ${tname}`, team }));
         }
         this.updateScores(true);
@@ -441,12 +448,28 @@ export class Game {
         }
     }
 
+    /** Supplies each team holds (its own, not being carried: in the vault, or dropped and waiting to go back). */
+    held() {
+        let held = { red: 0, blue: 0 };
+        for(let [, s] of this.world.each('Supply')) if(s.team && s.state !== 'carried') held[s.team]++;
+        return held;
+    }
+    /** Each team's units: its supplies and the crystals it has banked. */
     updateScores(force = false) {
         let w = this.world, m = w.get(MATCH_ID, 'Match');
         if(!m) return;
-        let scores = { red: 0, blue: 0 };
-        for(let [, s] of w.each('Supply')) if(s.team && s.state !== 'carried') scores[s.team]++;
+        let held = this.held(), crystals = m.crystals || { red: 0, blue: 0 };
+        let scores = { red: held.red * UNITS.supply + crystals.red * UNITS.crystal, blue: held.blue * UNITS.supply + crystals.blue * UNITS.crystal };
         if(force || scores.red !== m.scores.red || scores.blue !== m.scores.blue) w.set(MATCH_ID, 'Match', { scores });
+    }
+    /** Crystals a player's carve freed (GlowRocks): units for them and their team, banked at once. */
+    creditCrystals(id, n) {
+        let w = this.world, p = w.get(id, 'Player'), m = w.get(MATCH_ID, 'Match');
+        if(!p || !p.team || !m || m.phase !== 'live' || n <= 0) return;
+        w.set(id, 'Player', { crystals: (p.crystals || 0) + n, score: p.score + n * UNITS.crystal });
+        let crystals = { red: 0, blue: 0, ...m.crystals }; crystals[p.team] += n;
+        w.set(MATCH_ID, 'Match', { crystals });
+        this.updateScores(true);
     }
 
     // ---- systems --------------------------------------------------------------------
@@ -625,8 +648,8 @@ export class Game {
         if(!m) return;
         if(m.phase === 'live') {
             if(players > 0) m.remainingMs = Math.max(0, m.remainingMs - dt * 1000);
-            let total = w.query('Supply').size;
-            let sweep = total > 0 && (m.scores.red === total || m.scores.blue === total);
+            let total = w.query('Supply').size, held = this.held();
+            let sweep = total > 0 && (held.red === total || held.blue === total); // one side holds every supply: nothing left to fight over
             if(m.remainingMs <= 0 || sweep) {
                 let winner = m.scores.red > m.scores.blue ? 'red' : m.scores.blue > m.scores.red ? 'blue' : null;
                 w.set(MATCH_ID, 'Match', { phase: 'over', winner, overAt: now, remainingMs: 0, awards: this.awards() });
@@ -658,9 +681,9 @@ export class Game {
         await this.server.restorePristine();
         this.rocks.reset(); // back in the ground with the terrain; the scan and the digging bring them out again
         this.resetSupplies();
-        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0 }); this.spawnQueue.add(id); }
+        for(let [id, p] of w.each('Player')) if(p.team) { w.set(id, 'Player', { carrying: null, dead: false, health: MAX_HEALTH, respawnAt: 0, buster: WEAPONS.buster.perLife, build: WEAPONS.mason.budget, kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0, crystals: 0 }); this.spawnQueue.add(id); }
         let round = m.round + 1;
-        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, awards: [] });
+        w.set(MATCH_ID, 'Match', { phase: 'live', winner: null, overAt: 0, round, remainingMs: this.config.matchMinutes * 60000, scores: { red: 0, blue: 0 }, crystals: { red: 0, blue: 0 }, awards: [] });
         this.updateScores(true);
         this.server.broadcast(JSON.stringify({ type: 'event', kind: 'match', text: `Round ${round}: the forts stand again` }));
     }

@@ -43,8 +43,9 @@ export const Joint = ({ type, bodyA, bodyB, localOffsetA = { x: 0, y: 0, z: 0 },
 
 export const Grabbed = ({ by }) => ({ by });
 
-export const Player = ({ name = 'Player', color = '#ffffff', team = null, health = 100, dead = false, carrying = null, kills = 0, deaths = 0, score = 0, respawnAt = 0, build = 0, buster = 0, carries = 0, smuggles = 0, blasts = 0 } = {}) =>
-    ({ name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster, carries, smuggles, blasts });
+// Fort War: `score` is the units this player brought in this round (UNITS), `crystals` the crystals among them
+export const Player = ({ name = 'Player', color = '#ffffff', team = null, health = 100, dead = false, carrying = null, kills = 0, deaths = 0, score = 0, respawnAt = 0, build = 0, buster = 0, carries = 0, smuggles = 0, blasts = 0, crystals = 0 } = {}) =>
+    ({ name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster, carries, smuggles, blasts, crystals });
 
 export const Projectile = ({ kind, team = null, owner = null, vel = { x: 0, y: 0, z: 0 }, bornAt = 0 }) => ({ kind, team, owner, vel: { ...vel }, bornAt });
 
@@ -53,8 +54,9 @@ export const Fuse = ({ kind, team = null, owner = null, at }) => ({ kind, team, 
 export const Supply = ({ team = null, state = 'home', carriedBy = null, home = { x: 0, y: 0, z: 0 }, droppedAt = 0, buried = false }) =>
     ({ team, state, carriedBy, home: { ...home }, droppedAt, buried });
 
-export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [], vote = null } = {}) =>
-    ({ phase, remainingMs, scores: { ...scores }, winner, round, overAt, awards: [...awards], vote });
+// scores: each team's units (UNITS); crystals: the crystal units each team has banked this round
+export const Match = ({ phase = 'live', remainingMs = 0, scores = { red: 0, blue: 0 }, crystals = { red: 0, blue: 0 }, winner = null, round = 1, overAt = 0, awards = [], vote = null } = {}) =>
+    ({ phase, remainingMs, scores: { ...scores }, crystals: { ...crystals }, winner, round, overAt, awards: [...awards], vote });
 
 export const GlowRock = ({ cell, exposure = 0, free = false }) => ({ cell, exposure, free });
 

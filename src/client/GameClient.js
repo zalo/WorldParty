@@ -2,7 +2,7 @@
  *  weapon tools, adds the game render systems, owns the HUD and sound, and handles the game messages (spawns,
  *  hits, explosions, events). The server owns every rule; this only shows and asks. */
 import * as THREE from 'three/webgpu';
-import { RocketTool, GrenadeTool, DrillTool, MasonTool, GrappleTool } from '../tools/weapons.js';
+import { RocketTool, DrillTool, MasonTool, Grapple } from '../tools/weapons.js';
 import { PhysGunTool } from '../tools/PhysGunTool.js';
 import { GameHud } from './GameHud.js';
 import { Sfx } from './Sfx.js';
@@ -10,8 +10,7 @@ import { Music } from './Music.js';
 import { MusicTrack } from './MusicTrack.js';
 import { ProjectileRenderSystem, SupplyRenderSystem, FuseFxSystem, GlowRockRenderSystem, GlowSparkFx, ExplosionFx, teamColorOf } from './gameSystems.js';
 import { GlowLighting } from './GlowLighting.js';
-import { PROPS } from '../props/PropRegistry.js';
-import { GAME_PROPS, RESPAWN_MS, VOTE, WEAPONS } from '../game/rules.js';
+import { RESPAWN_MS, SUPPLY, UNITS, VOTE, WEAPONS } from '../game/rules.js';
 
 const _ray = new THREE.Ray(), _inv = new THREE.Matrix4(), _min = new THREE.Vector3(), _max = new THREE.Vector3();
 const PREDICTED_BOOM_MS = 2000; // how long a predicted explosion waits for the server's to be matched (and not shown again)
@@ -34,11 +33,15 @@ export class GameClient {
         this.heard = new Set(); this.fuseBlink = new Map(); this.fusePose = new Map(); this.rubbleBatch = []; this.rubbleAt = 0; this.lastRubble = 0;
         this.recentBooms = 0; this.stepTimer = 0; this.wasOnGround = true; this.lastVy = 0;
 
-        this.tools = [new RocketTool(), new GrenadeTool(), new DrillTool(), new MasonTool(), new GrappleTool(), new PhysGunTool()];
+        // a short tool list (keys 1-4, WEAPONS[].key); no grenade and no props from the menu. The grapple is the right
+        // button with any of them, and a Hook button on a phone
+        this.tools = [new RocketTool(), new DrillTool(), new MasonTool(), new PhysGunTool()];
+        this.grapple = new Grapple();
         main.spawnMenu.setTools(this.tools);
         main.spawnMenu.toolLabel.style.top = '62px'; // the score bar takes the top centre
-        main.spawnMenu.setProps(PROPS.filter(p => GAME_PROPS.includes(p.id)));
-        this.hud.setWeapons(this.tools.slice(0, 5));
+        main.spawnMenu.setProps([]);
+        main.spawnMenu.setExtraMobileActions([{ label: 'Hook', icon: '🪝', run: () => this.grapple.toggle(main) }]);
+        this.hud.setWeapons(this.tools.slice(0, 3));
 
         let ecs = main.ecs;
         // our own rockets fly from the click (predicted); see ProjectileRenderSystem
@@ -64,8 +67,6 @@ export class GameClient {
         ecs.addSystem(new GlowRockRenderSystem(main.world.scene, () => this.config.glowRocks, this.glowSink));
         this.sparks = new GlowSparkFx(main.world.scene);
         ecs.on('set', (id, name, s) => {
-            if(name === 'Supply' && s.state === 'carried' && s.carriedBy === main.conn.id && !this.carryingNoted) { this.carryingNoted = true; this.sfx.pickup(); this.hud.flashText('Supply grabbed! Get it to your vault', 2000); }
-            if(name === 'Supply' && s.state !== 'carried' && s.carriedBy !== main.conn.id) this.carryingNoted = false;
             // world sounds from replicated state: another player's rocket leaving, a grenade landing, rubble shedding
             if(name === 'Projectile' && s.owner !== main.conn.id && !this.heard.has(id)) { this.heard.add(id); let tf = ecs.get(id, 'Transform'); if(tf) this.sfx.rocketFar(tf.position); }
             else if(name === 'Transform' && ecs.has(id, 'Fuse')) this.trackFuse(id, s.position);
@@ -115,6 +116,7 @@ export class GameClient {
         else if(e.code === 'Escape' && this.hud.voteOpen) this.hud.toggleVote(false);
         else if(e.code === 'KeyJ') { let t = this.team === 'red' ? 'blue' : 'red'; this.main.conn.send(JSON.stringify({ type: 'jointeam', team: t })); }
         else if(e.code === 'KeyM') { let muted = this.sfx.toggleMute(); this.hud.flashText(muted ? 'Sound off' : 'Sound on', 700); if(!muted) this.sfx.click(); }
+        else if(e.code === 'Space') this.grapple.release(this.main); // jumping lets go
     }
 
     /** A grenade or buster moved: estimate its vertical speed from the replicated poses and tick when it lands or bounces. */
@@ -275,15 +277,39 @@ export class GameClient {
         if(!this.glowBound && main.giDecided) this.bindGlow();
         this.glow?.update(main.world.camera);
         if(me) {
-            if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; this.carryingNoted = false; for(let t of this.tools) if(t.release) t.release(main); this.sfx.drillLoop(false); this.sfx.reel(false); }
+            if(me.dead && !this.wasDead) { main.player.frozen = true; this.respawnAt = performance.now() + RESPAWN_MS; for(let t of this.tools) if(t.release) t.release(main); this.grapple.release(main); this.sfx.drillLoop(false); this.sfx.reel(false); }
             if(!me.dead && this.wasDead) { main.player.frozen = false; main.player.spectate = null; this.hud.spectating = ''; this.hud.killedBy = ''; }
             if(me.dead) this.spectateTeammate();
             this.wasDead = me.dead;
             if(me.dead && performance.now() > this.respawnAt + 500 && !this.askedRespawn) { this.askedRespawn = true; main.conn.send(JSON.stringify({ type: 'respawn' })); setTimeout(() => this.askedRespawn = false, 1000); }
             if(me.team !== this.lastTeam) { this.lastTeam = me.team; main.player.playerMesh.material.color.set(this.teamColor(me.team)); }
+            this.noteSupplies(me);
+            // crystals our digging and blasting freed (the server credits them as they shatter)
+            let crystals = me.crystals || 0;
+            if(crystals > (this.lastCrystals ?? crystals)) { let n = crystals - this.lastCrystals; this.hud.flashText(`+${n * UNITS.crystal} 💎 ${n === 1 ? 'crystal' : 'crystals'}`, 900); }
+            this.lastCrystals = crystals;
         }
+        this.grapple.update(main, dt);
         this.updateAudio(dt, me);
         this.hud.update();
+    }
+
+    /** Pickup feedback from what we carry (the server allows one crate at a time); walking into another crate while
+     *  carrying says so, once per crate. Keying this off crate updates replayed the pickup on every full update and
+     *  on any other crate's change, which read as a second crate picked up that never left the ground. */
+    noteSupplies(me) {
+        let main = this.main, now = performance.now();
+        if(me.carrying && me.carrying !== this.lastCarrying) { this.sfx.pickup(); this.hud.flashText(`Supply grabbed! Get it to your vault (+${UNITS.supply})`, 2000); }
+        this.lastCarrying = me.carrying || null;
+        if(!me.carrying || me.dead) return;
+        let p = main.player.position;
+        for(let [id, s, tf] of main.ecs.each('Supply', 'Transform')) {
+            if(id === me.carrying || s.state === 'carried') continue;
+            let dx = p.x - tf.position.x, dz = p.z - tf.position.z, dy = p.y + 0.5 - tf.position.y;
+            if(dx * dx + dz * dz > SUPPLY.pickupRadius ** 2 || Math.abs(dy) > 2.2) continue;
+            if(this.toldFull !== id || now - this.toldFullAt > 5000) { this.toldFull = id; this.toldFullAt = now; this.hud.flashText('One crate at a time: take this one home first', 1800); }
+            break;
+        }
     }
 
     /** Per-frame sound: the listener, fuse ticks in step with the blinking, weapon switch clicks, landings and

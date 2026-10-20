@@ -147,10 +147,20 @@ export class SpawnMenu {
         if(!v && this.isOpen) this.toggle();
     }
 
-    /** Rebuild the props tab (a match allows only a few). */
+    /** Rebuild the props tab; with none (a Fort War match) the Props button and tab go. */
     setProps(props) {
         this.propsContent.innerHTML = '';
         for(let prop of props) this.propsContent.appendChild(this.createPropButton(prop.id, prop.name, prop.icon || '📦'));
+        let any = props.length > 0;
+        this.propsBtn.style.display = any ? '' : 'none';
+        if(this.propsTabBtn) this.propsTabBtn.style.display = any ? '' : 'none';
+        if(!any) this.activeTab = 'tools';
+    }
+
+    /** Phone buttons shown with every tool, after its own ([{ label, icon, run }]; Fort War's grapple). */
+    setExtraMobileActions(actions) {
+        this.extraMobileActions = actions;
+        this.updateMobileActions(this.tools[this.currentToolIndex]);
     }
 
     /** Swap the tool set (a match arms the player differently from the sandbox). */
@@ -241,7 +251,7 @@ export class SpawnMenu {
     updateMobileActions(tool) {
         if(!this.isMobile) return;
         this.mobileActionArea.innerHTML = '';
-        for(let action of tool.mobileActions) {
+        for(let action of [...tool.mobileActions, ...(this.extraMobileActions || [])]) {
             let btn = document.createElement('button');
             btn.innerHTML = `${action.icon}<br><span style="font-size:10px">${action.label}</span>`;
             btn.style.cssText = `
@@ -252,7 +262,9 @@ export class SpawnMenu {
             btn.addEventListener('touchstart', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if(action.action === 'primary') {
+                if(action.run) {
+                    action.run();
+                } else if(action.action === 'primary') {
                     if(tool.onMobilePrimary) tool.onMobilePrimary(this.main); else tool.onPrimaryFire(this.main);
                 } else if(action.action === 'secondary') {
                     tool.onSecondaryFire(this.main);

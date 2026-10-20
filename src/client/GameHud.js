@@ -69,8 +69,8 @@ export class GameHud {
         // help card (H)
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
-            <div>Walk into a crate to carry it. Bring it to your vault. The light beeps when treasure is near.</div>
-            <div style="margin-top:8px;opacity:0.8"><b>1-6</b> or <b>scroll</b> weapons &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
+            <div>Walk into a crate to carry it and bring it to your vault: every crate there is worth 100 to your team. Every crystal you dig or blast out of the ground is worth 1. Most at the end wins. The light beeps when treasure is near.</div>
+            <div style="margin-top:8px;opacity:0.8"><b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason shape / physgun freeze &nbsp; <b>R</b> turn block &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
         this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
         let title = el('div', 'font-weight:bold;font-size:16px;', this.votePanel); title.textContent = 'Call a vote';
@@ -124,7 +124,7 @@ export class GameHud {
             this.stats.textContent = `stone ${me.build}/${WEAPONS.mason.budget}`;
             let sound = g.sfx.muted ? '🔇 M' : '🔊 M';
             if(this.sound.textContent !== sound) this.sound.textContent = sound;
-            this.carry.textContent = me.carrying ? '💰 Carrying treasure: take it to your vault!' : '';
+            this.carry.textContent = me.carrying ? '💰 Carrying treasure: take it to your vault! (100)' : '';
         }
         // scores and clock
         let m = ecs.get('match', 'Match');
@@ -145,7 +145,10 @@ export class GameHud {
                 this.overTitle.textContent = w ? `${w.name} wins the round!` : 'Draw!';
                 this.overTitle.style.color = w ? w.color : '#fff';
                 this.overSub.textContent = `${m.scores.red} to ${m.scores.blue}. The forts are rebuilt in ${Math.max(0, Math.ceil((MATCH_OVER_MS - (now - (this.overSince ||= now))) / 1000))} s`;
-                let awards = (m.awards || []).map(a => `🏅 ${a.title}: ${a.name} (${a.value})`).join('\n');
+                // what each player brought in (Player.score: units), best first, then the awards
+                let earners = [...ecs.each('Player')].filter(([, p]) => p.team && p.score > 0).sort((a, b) => b[1].score - a[1].score).slice(0, 6)
+                    .map(([, p]) => `${p.name}: ${p.score}${p.crystals ? ` (${p.crystals} 💎)` : ''}`);
+                let awards = [...(earners.length ? [earners.join(' · ')] : []), ...(m.awards || []).map(a => `🏅 ${a.title}: ${a.name} (${a.value})`)].join('\n');
                 if(this.overAwards.textContent !== awards) { this.overAwards.textContent = awards; this.overAwards.style.whiteSpace = 'pre'; }
             } else this.overSince = 0;
         }

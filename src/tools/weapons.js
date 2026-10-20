@@ -1,6 +1,7 @@
 /** Fort War weapons as tools (see src/game/rules.js). Each sends a message; the server does the carving, the
  *  projectiles and the damage. The grapple is the exception: player movement is client-authoritative, so it pulls
- *  the local PlayerController directly. */
+ *  the local PlayerController directly; it is not a tool but the right mouse button with any of them (Grapple). The
+ *  grenade is not handed out in a match (GameClient's tool list), but still works. */
 import * as THREE from 'three/webgpu';
 import { BaseTool } from './BaseTool.js';
 import { WEAPONS } from '../game/rules.js';
@@ -80,22 +81,13 @@ export class GrenadeTool extends Weapon {
     onUnequip(main) { this.charging = null; }
 }
 
-/** Drill: hold to carve ahead of you. Point it down to burrow. */
+/** Drill: hold to carve from where you stand to ahead of you (Game.dig). Point it down to burrow. */
 export class DrillTool extends Weapon {
     constructor() {
         super('drill');
-        this.preview = null;
         this.mobileActions = [{ label: 'Dig', icon: '⛏️', action: 'primary' }];
     }
-    onEquip(main) {
-        if(!this.preview) {
-            let d = this.def;
-            this.preview = new THREE.Mesh(new THREE.SphereGeometry(d.radius, 14, 10), new THREE.MeshBasicMaterial({ color: 0xffcc66, wireframe: true, transparent: true, opacity: 0.35 }));
-            main.world.scene.add(this.preview);
-        }
-        this.preview.visible = true;
-    }
-    onUnequip(main) { if(this.preview) this.preview.visible = false; main.game?.sfx.drillLoop(false); }
+    onUnequip(main) { main.game?.sfx.drillLoop(false); }
     onPrimaryFire(main) { this.dig(main); }
     dig(main) {
         if(!this.canFire(main)) return;
@@ -109,14 +101,11 @@ export class DrillTool extends Weapon {
         let held = main.primaryHeld && !main.simulationParams.mobile;
         if(held) this.dig(main);
         main.game?.sfx.drillLoop(held && !main.game.dead); // the motor runs while the button is held; dig() adds a bite per carve
-        if(!this.preview) return;
-        let c = main.world.camera, d = this.def;
-        c.getWorldDirection(_dir);
-        this.preview.position.copy(c.position).addScaledVector(_dir, d.reach); this.preview.position.y -= d.drop;
     }
 }
 
-/** Mason: place blocks of your team's stone. Right click cycles the shape, scroll moves it, R turns it. */
+/** Mason: place blocks of your team's stone. F cycles the shape (the right button is the grapple), Shift+scroll moves
+ *  it, R turns it. */
 export class MasonTool extends Weapon {
     constructor() {
         super('mason');
@@ -145,7 +134,7 @@ export class MasonTool extends Weapon {
         this.distance = Math.max(2, Math.min(this.def.maxDistance, this.distance - delta * 0.004));
         return true;
     }
-    onKey(main, code) { if(code === 'KeyR') this.turned = !this.turned; }
+    onKey(main, code) { if(code === 'KeyR') this.turned = !this.turned; else if(code === 'KeyF') this.onSecondaryFire(main); }
     onAction(main, action) { if(action === 'turn') this.turned = !this.turned; }
     onPrimaryFire(main) {
         if(!this.canFire(main) || !this.preview || !this.preview.visible) return;
@@ -179,26 +168,17 @@ export class MasonTool extends Weapon {
     }
 }
 
-/** Grapple: hook terrain within range and get pulled there. Jump or fire again to let go. */
-export class GrappleTool extends Weapon {
+/** Grapple: hook terrain within range and get pulled there; press again, jump, or stall against something to let go.
+ *  Not a tool slot: the right mouse button with any weapon, or the Hook button on a phone (GameClient owns it, passes
+ *  the presses and updates it every frame). */
+export class Grapple {
     constructor() {
-        super('grapple');
+        this.def = WEAPONS.grapple;
         this.rope = null;
         this.anchor = null;
-        this.mobileActions = [{ label: 'Hook', icon: '🪝', action: 'primary' }, { label: 'Release', icon: '✋', action: 'secondary' }];
     }
-    onEquip(main) {
-        if(!this.rope) {
-            let geom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-            this.rope = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0xdddddd }));
-            this.rope.frustumCulled = false;
-            main.world.scene.add(this.rope);
-        }
-        this.rope.visible = false;
-    }
-    onUnequip(main) { this.release(main); }
-    onPrimaryFire(main) {
-        if(this.anchor) { this.release(main); return; }
+    toggle(main) { if(this.anchor) this.release(main); else this.hook(main); }
+    hook(main) {
         if(main.game?.dead) return;
         if(main.game?.me?.carrying) { main.game.hud.flashText('Too heavy to grapple with a crate'); return; }
         main.raycaster.setFromCamera(new THREE.Vector2(0, 0), main.world.camera);
@@ -206,17 +186,21 @@ export class GrappleTool extends Weapon {
         let hits = main.raycaster.intersectObjects([main.terrainBatch], true);
         main.raycaster.far = Infinity;
         if(!hits.length) { main.game?.hud.flashText('Nothing to hook within range'); return; }
+        if(!this.rope) {
+            let geom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+            this.rope = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0xdddddd }));
+            this.rope.frustumCulled = false;
+            main.world.scene.add(this.rope);
+        }
         this.anchor = hits[0].point.clone();
         // pull the capsule to a spot above and just off the surface, so hooking a ledge lands you on it
         let n = hits[0].face ? hits[0].face.normal.clone().transformDirection(hits[0].object.matrixWorld) : new THREE.Vector3(0, 1, 0);
         let target = this.anchor.clone().addScaledVector(n, 0.7); target.y += 1.6;
         main.player.grappleTarget = { x: target.x, y: target.y, z: target.z, pull: this.def.pull, maxSpeed: this.def.maxSpeed };
-        this.rope.visible = true;
+        this.rope.visible = false; // drawn from the first update, once it has both ends
         this.lastDistance = Infinity; this.stalledSince = 0;
         main.game.sfx.hook();
     }
-    onSecondaryFire(main) { this.release(main); }
-    onKey(main, code) { if(code === 'Space') this.release(main); }
     release(main) { if(this.anchor) main.game?.sfx.unhook(); main.game?.sfx.reel(false); this.anchor = null; main.player.grappleTarget = null; if(this.rope) this.rope.visible = false; }
     update(main, dt) {
         if(!this.anchor) return;
@@ -230,5 +214,6 @@ export class GrappleTool extends Weapon {
         let pos = this.rope.geometry.attributes.position.array, c = main.world.camera.position;
         pos[0] = c.x + 0.2; pos[1] = c.y - 0.3; pos[2] = c.z; pos[3] = this.anchor.x; pos[4] = this.anchor.y; pos[5] = this.anchor.z;
         this.rope.geometry.attributes.position.needsUpdate = true;
+        this.rope.visible = true;
     }
 }

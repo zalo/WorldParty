@@ -5,6 +5,7 @@
 
 import { Server, routePartykitRequest } from 'partyserver';
 import * as THREE from 'three';
+import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import { ADDITION, SUBTRACTION } from 'three-bvh-csg';
 import { World } from './ecs/World.js';
 import { Game } from './server/Game.js';
@@ -27,7 +28,18 @@ const COOKS_PER_TICK = 2;           // ... and per tick for the rest
 
 // Brushes the server carves with itself (explosions, the drill, the mason): unit shapes, scaled per use
 const SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 1).attributes.position.array); // 80 faces: explosions
-const ROUND_SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 2).attributes.position.array); // 320 faces: the drill's tunnels read as round
+/** The drill's brush: the convex hull of two unit spheres (320-face icospheres, so its tunnels read as round) whose
+ *  centres lie `length` apart on z, centred on the origin. Cached per length (in radii). */
+const CAPSULE_SOUPS = new Map();
+function capsuleSoup(length) {
+  let k = length.toFixed(3);
+  if(!CAPSULE_SOUPS.has(k)) {
+    let ball = new THREE.IcosahedronGeometry(1, 2).attributes.position, points = [];
+    for(let z of [-length / 2, length / 2]) for(let i = 0; i < ball.count; i++) points.push(new THREE.Vector3(ball.getX(i), ball.getY(i), ball.getZ(i) + z));
+    CAPSULE_SOUPS.set(k, encodeSoup(new ConvexGeometry(points).attributes.position.array));
+  }
+  return CAPSULE_SOUPS.get(k);
+}
 const CUBE_SOUP = encodeSoup(new THREE.BoxGeometry(1, 1, 1).toNonIndexed().attributes.position.array);
 
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
@@ -473,11 +485,20 @@ export class WorldParty extends Server {
   /** Send a JSON message to one connection. */
   send(id, msg) { let c = this.conns.get(id); if(c) try { c.send(JSON.stringify(msg)); } catch(e) { console.warn(`send to ${id} failed: ${e.message}`); } }
 
-  /** Server-side carves and additions reuse the client's csg path with the server's own unit brushes. */
-  /** `round` uses the finer sphere with a tighter simplification (the drill); explosions take the coarse one. */
-  carveSphere(center, radius, material = 1, round = false) {
+  /** Server-side carves and additions reuse the client's csg path with the server's own unit brushes. `by` is the
+   *  player responsible (Fort War credits them with the crystals it frees). Explosions carve the coarse sphere. */
+  carveSphere(center, radius, material = 1, by = null) {
     let min = { x: center.x - radius, y: center.y - radius, z: center.z - radius }, max = { x: center.x + radius, y: center.y + radius, z: center.z + radius };
-    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: round ? ROUND_SPHERE_SOUP : SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius }, tolerance: round ? 0.02 : 0.1 });
+    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius }, tolerance: 0.1, by });
+  }
+  /** The convex hull of two spheres of `radius` centred at `a` and `b` (the drill), simplified only to 2 cm. */
+  carveCapsule(a, b, radius, material = 1, by = null) {
+    let d = new THREE.Vector3(b.x - a.x, b.y - a.y, b.z - a.z), length = d.length();
+    let q = length > 1e-6 ? new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), d.divideScalar(length)) : new THREE.Quaternion();
+    let center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+    let min = { x: Math.min(a.x, b.x) - radius, y: Math.min(a.y, b.y) - radius, z: Math.min(a.z, b.z) - radius };
+    let max = { x: Math.max(a.x, b.x) + radius, y: Math.max(a.y, b.y) + radius, z: Math.max(a.z, b.z) + radius };
+    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: capsuleSoup(length / radius), operation: SUBTRACTION, material, position: center, quaternion: { x: q.x, y: q.y, z: q.z, w: q.w }, scale: { x: radius, y: radius, z: radius }, tolerance: 0.02, by });
   }
   carveBox(center, quaternion, size, material = 1) { return this.boxCsg(center, quaternion, size, material, SUBTRACTION); }
   addBox(center, quaternion, size, material = 0) { return this.boxCsg(center, quaternion, size, material, ADDITION); }
@@ -540,9 +561,9 @@ export class WorldParty extends Server {
     this.terrain.applyCsg(data);
     this.csgStats.booleanMs += Date.now() - t0;
     if(this.terrain.dirty.size === 0) return;
-    if(data.position && data.scale) { // the brush's bounds, generously: the unit brushes fit a unit sphere or cube
+    if(data.position && data.scale) { // the brush's bounds, generously: the unit brushes fit a unit sphere or cube (the drill's in 1.41)
       let p = vec3(data.position), s = vec3(data.scale, { x: 1, y: 1, z: 1 }), R = Math.hypot(s.x, s.y, s.z);
-      this.carveBoxes.push({ min: { x: p.x - R, y: p.y - R, z: p.z - R }, max: { x: p.x + R, y: p.y + R, z: p.z + R } });
+      this.carveBoxes.push({ min: { x: p.x - R, y: p.y - R, z: p.z - R }, max: { x: p.x + R, y: p.y + R, z: p.z + R }, by: data.by ?? null });
     }
     this.csgStats.ops++;
     for(let key of this.terrain.dirty) this.pushChunk(key);
@@ -751,6 +772,7 @@ export class WorldParty extends Server {
         break;
 
       case "csg":
+        data.by = me; // what a carve frees is credited to whoever sent it, never to a name in the message
         await this.applyCsg(data);
         break;
 

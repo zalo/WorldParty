@@ -207,14 +207,17 @@ export class GlowRocks {
 
     // ---- events ---------------------------------------------------------------
 
-    /** The terrain changed: `boxes` bound the brushes that ran (world units), `carved` are the chunks they changed and
-     *  `changed` every chunk that differs now (settle may have shed fragments elsewhere). Rocks overlapping a brush are
-     *  measured: embedded ones update or free, new ones appear where air now meets them. Called from settleNow while the
-     *  replaced chunk content is still around, which tells a rock freed in one bite from one that was never there. */
+    /** The terrain changed: `boxes` bound the brushes that ran (world units, with `by`, the player responsible, or
+     *  null), `carved` are the chunks they changed and `changed` every chunk that differs now (settle may have shed
+     *  fragments elsewhere). Rocks overlapping a brush are measured: embedded ones update or free, new ones appear where
+     *  air now meets them. Called from settleNow while the replaced chunk content is still around, which tells a rock
+     *  freed in one bite from one that was never there. `out.credits` counts the rocks each player's brush shattered
+     *  (the first box that reaches a rock takes it; Game turns them into units). */
     onTerrainChanged(boxes, carved, changed) {
         if(!this.active) return null;
         let t0 = Date.now(), w = this.world, R = GLOW_ROCK.maxRadius, seen = new Set();
-        let out = { made: 0, freed: 0, updated: 0, sky: 0, ms: 0 }, pops = [];
+        let out = { made: 0, freed: 0, updated: 0, sky: 0, ms: 0, credits: new Map() }, pops = [];
+        let credit = (b) => { if(b.by) out.credits.set(b.by, (out.credits.get(b.by) || 0) + 1); };
         let before = { measured: this.stats.measured, rays: this.stats.rays, bvhBuilds: this.stats.bvhBuilds };
         for(let b of boxes) {
             let min = { x: b.min.x - R, y: b.min.y - R, z: b.min.z - R }, max = { x: b.max.x + R, y: b.max.y + R, z: b.max.z + R };
@@ -226,7 +229,7 @@ export class GlowRocks {
                     let g = id === SHATTERED ? null : w.get(id, 'GlowRock');
                     if(!g || g.free) continue;
                     let e = this.measure(rock);
-                    if(e >= GLOW_ROCK.freeAt) { this.shatter(rock, id); pops.push(rock); out.freed++; }
+                    if(e >= GLOW_ROCK.freeAt) { this.shatter(rock, id); pops.push(rock); out.freed++; credit(b); }
                     else if(Math.abs(e - g.exposure) > 0.01) { w.set(id, 'GlowRock', { exposure: e }); out.updated++; }
                     continue;
                 }
@@ -235,7 +238,7 @@ export class GlowRocks {
                 let free = e >= GLOW_ROCK.freeAt;
                 if(free && !this.inside(rock, true)) continue; // open air before the carve too: no rock ever lay here
                 if(!this.underCeiling(rock)) { out.sky++; continue; }  // a crater, a cliff, a shaft: the rocks stay underground
-                if(free) { this.shatter(rock); pops.push(rock); out.freed++; continue; } // dug out in one bite
+                if(free) { this.shatter(rock); pops.push(rock); out.freed++; credit(b); continue; } // dug out in one bite
                 this.materialize(rock, e);
                 out.made++;
             }

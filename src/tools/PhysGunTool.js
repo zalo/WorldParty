@@ -1,7 +1,9 @@
 import * as THREE from 'three/webgpu';
 import { BaseTool } from './BaseTool.js';
 
-/** PhysGun: grab, move, rotate, freeze physics bodies using a D6 joint drive */
+/** PhysGun: grab, move, rotate, freeze physics bodies using a D6 joint drive. Right click or F freezes (in a Fort War
+ *  match the right button is the grapple, so F). Dying lets go (`release`, called by GameClient; the server also
+ *  drops a dead player's holds). */
 export class PhysGunTool extends BaseTool {
     constructor() {
         super('PhysGun', '🔫');
@@ -29,13 +31,18 @@ export class PhysGunTool extends BaseTool {
         this.beam.visible = false;
     }
 
-    onUnequip(main) {
+    onUnequip(main) { this.release(main); }
+
+    /** Let go of the held body, if any. */
+    release(main) {
         if(this.grabbedBodyId) {
             main.conn.send(JSON.stringify({ type: "physgun_release", bodyId: this.grabbedBodyId }));
             this.grabbedBodyId = null;
         }
         if(this.beam) this.beam.visible = false;
     }
+
+    onKey(main, code) { if(code === 'KeyF') this.onSecondaryFire(main); }
 
     onPrimaryFire(main) {
         if(this.grabbedBodyId) {
@@ -82,6 +89,7 @@ export class PhysGunTool extends BaseTool {
 
     update(main, delta) {
         if(!this.grabbedBodyId) return;
+        if(main.game?.dead) { this.release(main); return; }
 
         // Compute target position in front of camera
         let targetPos = new THREE.Vector3();

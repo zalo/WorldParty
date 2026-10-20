@@ -148,7 +148,7 @@ export default class Main {
                 e.preventDefault();
                 let tool = this.spawnMenu.getCurrentTool();
                 if(e.button === 0) { this.primaryHeld = true; tool.onPrimaryFire(this); }
-                else if(e.button === 2) tool.onSecondaryFire(this);
+                else if(e.button === 2) { if(this.game) this.game.grapple.toggle(this); else tool.onSecondaryFire(this); } // Fort War: the right button is always the grapple
             }
         });
         window.addEventListener('pointerup', (e) => {

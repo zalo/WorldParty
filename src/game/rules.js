@@ -2,7 +2,8 @@
  *  `world.game` config a level manifest carries (tools/gen-fortwar.mjs writes one).
  *
  *  Two teams storm each other's fort for its supplies. A supply is a physics crate; carry an enemy (or neutral)
- *  one into your vault and it is yours. Most supplies in your vault when time runs out wins. Everything is
+ *  one into your vault and it is yours. A team scores units (`UNITS`): 100 for every supply in its vault and 1 for
+ *  every crystal (glow rock) its players break out of the ground; most units when time runs out wins. Everything is
  *  terrain: weapons carve it, the mason adds it, and whatever loses its support falls (see Connectivity). */
 
 export const TEAMS = ['red', 'blue'];
@@ -13,18 +14,25 @@ export const REGEN_PER_S = 15;        // ... then health comes back at this rate
 export const MATCH_OVER_MS = 15000;   // results screen before the next round
 export const PLAYER_KILL_Y = -70;     // fell out of the world
 
-/** Weapons. Radii and speeds in metres; damage at the centre of a blast falls off linearly to zero at 1.6 radii. */
+/** Weapons. Radii and speeds in metres; damage at the centre of a blast falls off linearly to zero at 1.6 radii.
+ *  `key` is the tool's number in a match (GameClient's tool list); the grenade, the buster and the grapple's slot
+ *  are not handed out (the grapple is the right mouse button). */
 export const WEAPONS = {
     rocket:  { name: 'Rocket Launcher', icon: '🚀', key: '1', cooldownMs: 1100, speed: 46, gravity: 10, radius: 2.4, damage: 70, direct: 40, knock: 18, lifeMs: 6000 },
-    grenade: { name: 'Grenade',         icon: '💣', key: '2', cooldownMs: 900,  minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
-    buster:  { name: 'Bunker Buster',   icon: '☢️', key: '2', cooldownMs: 2000, speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
-    drill:   { name: 'Drill',           icon: '⛏️', key: '3', cooldownMs: 420,  radius: 1.6, reach: 1.3, drop: 0.4 }, // a sphere ahead of the eye, big enough to walk through
-    mason:   { name: 'Mason',           icon: '🧱', key: '4', cooldownMs: 300,  budget: 12, regenMs: 20000, stonePerDig: 1, maxDistance: 9, // stone comes from digging; the trickle only prevents a dead end
+    grenade: { name: 'Grenade',         icon: '💣', key: null, cooldownMs: 900,  minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
+    buster:  { name: 'Bunker Buster',   icon: '☢️', key: null, cooldownMs: 2000, speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
+    // the hull of two spheres: one around the player resting at the feet (`drop` below the eye), one `reach` ahead of it
+    // along the view; big enough to walk through, and a tunnel dug walking forward has a smooth floor
+    drill:   { name: 'Drill',           icon: '⛏️', key: '2', cooldownMs: 420,  radius: 1.6, reach: 1.3, drop: 0.4 },
+    mason:   { name: 'Mason',           icon: '🧱', key: '3', cooldownMs: 300,  budget: 12, regenMs: 20000, stonePerDig: 1, maxDistance: 9, // stone comes from digging; the trickle only prevents a dead end
                shapes: { wall: [4, 2.6, 0.6], block: [2, 2, 2], plank: [4, 0.4, 1.4], pillar: [1, 4, 1] } },
-    grapple: { name: 'Grapple',         icon: '🪝', key: '5', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
-    physgun: { name: 'PhysGun',         icon: '🔫', key: '6', range: 20 },
+    grapple: { name: 'Grapple',         icon: '🪝', key: 'right click', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
+    physgun: { name: 'PhysGun',         icon: '🔫', key: '4', range: 20 },
 };
 export const SELF_DAMAGE_SCALE = 0.45;    // rocket jumping hurts, but not much
+
+/** What a team scores: each supply in its vault, each crystal its players broke out (kept even if they switch teams). */
+export const UNITS = { supply: 100, crystal: 1 };
 
 export const SUPPLY = {
     halfExtent: 0.45,
@@ -48,8 +56,6 @@ export const VOTE = {
 export const RUBBLE = { minSpeed: 9, damagePerMps: 4, maxDamage: 70, pairCooldownMs: 600 };
 export const FRAGMENT_FADE_MS = 40000;    // sleeping rubble fades after this ...
 export const MAX_FRAGMENTS = 110;         // ... or sooner when there is this much of it
-export const MAX_PLAYER_PROPS = 40;       // crates and barrels spawned from the menu, room-wide
-export const GAME_PROPS = ['crate', 'barrel'];
 
 /** Glow rocks: luminous pebbles sown through the ground below the surface. They are a virtual field, not a list: a
  *  jittered grid whose cells decide from a hash of their coordinates and the level's seed whether they hold a rock,
@@ -92,7 +98,7 @@ export function* virtualRocksIn(field, surfaceY, min, max) {
 
 /** End-of-round awards: [title, Player field, higher is better, minimum to qualify] */
 export const AWARDS = [
-    ['Warlord', 'kills', 2], ['Mule', 'carries', 1], ['Tunnel Rat', 'smuggles', 1], ['Demolition', 'blasts', 10], ['Lemming', 'deaths', 3],
+    ['Warlord', 'kills', 2], ['Mule', 'carries', 1], ['Tunnel Rat', 'smuggles', 1], ['Prospector', 'crystals', 10], ['Demolition', 'blasts', 10], ['Lemming', 'deaths', 3],
 ];
 
 export const TEAM_DEFAULTS = {
