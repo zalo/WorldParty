@@ -16,7 +16,7 @@
  *  render mesh), bvh (the packed BVH's buffers; the chunks in it may be sampled from then on), work (jobs, glow jobs,
  *  crystal buffer writes, whether a readback is wanted, stats). Every message out carries the record uploads (positions/normals of new
  *  records, init and knock ops) the main thread must apply before anything that references them. */
-import { BufferGeometry, BufferAttribute, Ray, Vector3, Box3, DoubleSide, Mesh } from 'three';
+import { BufferGeometry, BufferAttribute, Vector3, Box3, Mesh } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
 import { BVHComputeData } from 'three-mesh-bvh/webgpu';
 import { GICore, NO_RECORD } from './giCore.js';
@@ -40,7 +40,7 @@ export class GIHost {
         this.packer = new BVHComputeData([], { attributes: { position: 'vec4f', surface: 'vec4f' } });
         this.packDirty = false; this.packAt = 0;
         this.unpacked = new Set();   // chunks whose current geometry the packed BVH does not have yet
-        this.ray = new Ray(); this.box = new Box3(); this.p = new Vector3(); this.hit = {};
+        this.box = new Box3(); this.p = new Vector3(); this.hit = {};
     }
 
     handle(m) {
@@ -67,7 +67,6 @@ export class GIHost {
         this.glowQueue = new Set();   // records whose baked crystal light needs (re)computing
         this.glowAwaitBvh = new Set();// slots to place and bake again once the packed BVH has the terrain around them
         this.crystalWrites = [];      // [slot, Float32Array(8)] for the GPU buffer
-        this.core.visible = (ax, ay, az, bx, by, bz) => this.visible(ax, ay, az, bx, by, bz);
         this.core.records.onDrop = (id) => this.forgetRecord(id);
     }
 
@@ -151,18 +150,6 @@ export class GIHost {
         this.glowAwaitBvh.clear();
     }
 
-    /** Can one point see another? (the coarse chunk BVHs here) */
-    visible(ax, ay, az, bx, by, bz) {
-        let dx = bx - ax, dy = by - ay, dz = bz - az, len = Math.hypot(dx, dy, dz);
-        if(len < 1e-4) return true;
-        let ray = this.ray;
-        ray.origin.set(ax, ay, az); ray.direction.set(dx / len, dy / len, dz / len);
-        for(let bvh of this.bvhsIn(Math.min(ax, bx), Math.min(ay, by), Math.min(az, bz), Math.max(ax, bx), Math.max(ay, by), Math.max(az, bz))) {
-            if(bvh.raycastFirst(ray, DoubleSide, 0, len)) return false;
-        }
-        return true;
-    }
-
     *bvhsIn(x0, y0, z0, x1, y1, z1) {
         for(let i = Math.floor(x0 / CHUNK); i <= Math.floor(x1 / CHUNK); i++)
             for(let j = Math.floor(y0 / CHUNK); j <= Math.floor(y1 / CHUNK); j++)
@@ -207,7 +194,7 @@ export class GIHost {
         for(let ch of c.chunks.values()) { n += ch.recs.length; if(ch.ready) ready++; if(ch.recs.length) minS = Math.min(minS, ch.minSamples); }
         return { chunks: c.chunks.size, ready, records: c.records.size, refs: n, full: c.records.full, minSamples: minS, splits: c.splitEdges.size,
             crystals: this.crystals.size, crystalRecords: this.recCrystals.size, glowQueue: this.glowQueue.size, adaptQueue: this.adaptQueue.length, redoQueue: this.redoQueue.size,
-            refineMs: Math.round(c.stats.refineMs), refines: c.stats.refines, seeded: c.stats.seeded, dark: c.stats.dark };
+            refineMs: Math.round(c.stats.refineMs), refines: c.stats.refines, seeded: c.stats.seeded, dark: c.stats.dark, seedMs: Math.round(c.stats.seedMs) };
     }
 
     // ---- crystals -----------------------------------------------------------------------

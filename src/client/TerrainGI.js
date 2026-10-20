@@ -26,7 +26,7 @@
 import * as THREE from 'three/webgpu';
 import { Fn, If, instanceIndex, storage, uniform, attribute, varying, vec3, vec4, float, uint, min, max, select } from 'three/tsl';
 import { BVHComputeData, rayStruct, rayIntersectionResultStruct, bvhNodeStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { GI_DEFAULTS, OP_INIT, NO_RECORD } from './giCore.js';
+import { GI_DEFAULTS, OP_INIT, OP_KNOCK, OP_WORDS, NO_RECORD, WEIGHT_ONE } from './giCore.js';
 import { GIHost } from './giHost.js';
 import { G } from '../sky/Globals.js';
 import { CHUNK_SIZE, isRockKey } from '../terrain/grid.js';
@@ -51,13 +51,13 @@ export class TerrainGI {
         this.stateAttr = new THREE.StorageBufferAttribute(new Float32Array(C * 8), 4);
         this.seqAttr = new THREE.StorageBufferAttribute(new Uint32Array(C), 1);
         this.jobsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxJobs), 1);
-        this.opsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxOps * 4), 4);
+        this.opsAttr = new THREE.StorageBufferAttribute(new Uint32Array(this.maxOps * OP_WORDS), 4);
         this.geo = storage(this.geoAttr, 'vec4', C * 2).toReadOnly();
         this.state = storage(this.stateAttr, 'vec4', C * 2);
         this.stateRead = storage(this.stateAttr, 'vec4', C * 2).toReadOnly(); // the vertex stage may only read
         this.seq = storage(this.seqAttr, 'uint', C);
         this.jobs = storage(this.jobsAttr, 'uint', this.maxJobs).toReadOnly();
-        this.ops = storage(this.opsAttr, 'uvec4', this.maxOps).toReadOnly();
+        this.ops = storage(this.opsAttr, 'uvec4', this.maxOps * OP_WORDS / 4).toReadOnly();
         // glow rocks ("crystals"): a light each, baked into the records within reach by the glow pass (see giHost)
         this.maxCrystals = 8192; this.maxGlowJobs = mobile ? 4096 : 16384;
         this.crystalsAttr = new THREE.StorageBufferAttribute(new Float32Array(this.maxCrystals * 8), 4); // [light position, reach], [colour * power, 0]
@@ -163,7 +163,10 @@ export class TerrainGI {
                 let phi = 6.283185307179586 * u2;
                 let d = normalize( t * ( r * cos( phi ) ) + bt * ( r * sin( phi ) ) + n * sqrt( max( 0.0, 1.0 - u1 ) ) );
                 var ray: ${ rayStruct };
-                ray.origin = P.xyz + n * 0.004;
+                // a step along the ray too: a vertex where the ground meets a wall lies on the wall's plane, and from
+                // there every ray leaving the wall hit the wall itself at distance 0 from behind (black) while every ray
+                // into it read the wall's corner, as black: wall bases converged to black teeth
+                ray.origin = P.xyz + n * 0.004 + d * 0.01;
                 ray.direction = d;
                 ray.maxDist = sun.w;
                 var hit: ${ rayIntersectionResultStruct };
@@ -244,9 +247,9 @@ export class TerrainGI {
                     let cs = dot( n, l );
                     if ( cs <= 0.0 ) { continue; }
                     var ray: ${ rayStruct };
-                    ray.origin = P + n * 0.004;
+                    ray.origin = P + n * 0.004 + l * 0.01; // (the step along the ray: see giSample)
                     ray.direction = l;
-                    ray.maxDist = max( d - 0.03, 0.001 );
+                    ray.maxDist = max( d - 0.04, 0.001 );
                     var hit: ${ rayIntersectionResultStruct };
                     ${ raycast }( ray, &hit );
                     if ( hit.didHit ) { continue; }
@@ -274,26 +277,30 @@ export class TerrainGI {
         let { state, seq, ops, opCount } = this;
         this.opsKernel = Fn(() => {
             If(instanceIndex.lessThan(opCount), () => {
-                const op = ops.element(instanceIndex).toVar();
-                const id = op.y;
-                // the first word: the type, the weight the record starts with, and a scale for copied light (giCore's seed)
-                const w = float(op.x.shiftRight(uint(8)).bitAnd(uint(255)));
-                const k = float(op.x.shiftRight(uint(16)).bitAnd(uint(255))).div(255.0);
-                If(op.x.bitAnd(uint(255)).equal(uint(OP_INIT)), () => {
-                    If(op.z.equal(uint(NO_RECORD)), () => {
-                        state.element(id.mul(uint(2))).assign(vec4(0.0, 0.0, 0.0, w)); // empty (unknown, w 0) or dark (a carve with nothing in sight)
-                    }).Else(() => {
-                        // copied from two gathered records: their mean at weight w
-                        const sa = state.element(op.z.mul(uint(2))).toVar(), sb = state.element(op.w.mul(uint(2))).toVar();
-                        const mean = sa.xyz.div(max(sa.w, 1.0)).add(sb.xyz.div(max(sb.w, 1.0))).mul(k.mul(0.5));
-                        state.element(id.mul(uint(2))).assign(vec4(mean.mul(w), w));
-                    });
-                    state.element(id.mul(uint(2)).add(uint(1))).assign(vec4(0.0)); // no crystal light until the glow pass says so
-                    seq.element(id).assign(uint(0));
-                }).Else(() => {
+                // two uvec4s per op (giCore's OP_* comment): [type | weight << 8, record, a, b], [c, d, wa | wb << 16, wc | wd << 16]
+                const op = ops.element(instanceIndex.mul(uint(2))).toVar(), more = ops.element(instanceIndex.mul(uint(2)).add(uint(1))).toVar();
+                const id = op.y, type = op.x.bitAnd(uint(255));
+                If(type.equal(uint(OP_KNOCK)), () => {
                     // keep at most n samples' worth: the mean stays, its weight drops
                     const s = state.element(id.mul(uint(2))).toVar(), n = float(op.z);
                     If(s.w.greaterThan(n), () => { state.element(id.mul(uint(2))).assign(s.mul(n.div(s.w))); });
+                }).Else(() => {
+                    // a weighted sum of up to four records' means at weight w (none: dark at w, or empty at 0)
+                    const w = float(op.x.shiftRight(uint(8)).bitAnd(uint(255)));
+                    const light = vec3(0.0).toVar();
+                    const add = (src, q) => {
+                        If(src.notEqual(uint(NO_RECORD)), () => {
+                            const s = state.element(src.mul(uint(2))).toVar();
+                            light.addAssign(s.xyz.div(max(s.w, 1.0)).mul(float(q).div(WEIGHT_ONE)));
+                        });
+                    };
+                    add(op.z, more.z.bitAnd(uint(65535))); add(op.w, more.z.shiftRight(uint(16)));
+                    add(more.x, more.w.bitAnd(uint(65535))); add(more.y, more.w.shiftRight(uint(16)));
+                    state.element(id.mul(uint(2))).assign(vec4(light.mul(w), w));
+                    If(type.equal(uint(OP_INIT)), () => {
+                        state.element(id.mul(uint(2)).add(uint(1))).assign(vec4(0.0)); // no crystal light until the glow pass says so
+                        seq.element(id).assign(uint(0));
+                    });
                 });
             });
         })().compute(this.maxOps).setName('TerrainGI ops');
@@ -397,8 +404,8 @@ export class TerrainGI {
     }
 
     runOps(ops) {
-        for(let at = 0; at < ops.length; at += this.maxOps * 4) {
-            let part = ops.subarray(at, at + this.maxOps * 4), n = part.length / 4;
+        for(let at = 0; at < ops.length; at += this.maxOps * OP_WORDS) {
+            let part = ops.subarray(at, at + this.maxOps * OP_WORDS), n = part.length / OP_WORDS;
             this.opsAttr.array.set(part);
             this.opsAttr.clearUpdateRanges(); this.opsAttr.addUpdateRange(0, part.length); this.opsAttr.needsUpdate = true;
             this.opCount.value = n;
