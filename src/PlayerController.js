@@ -18,22 +18,19 @@ export class PlayerController extends THREE.Group {
         this.camera = camera;
         if (this.simulationParams.mobile) {
             this.controls = null;
-            this.nipple = nipplejs.create({
-                zone: document.getElementById('appbody'),
-                multitouch: true,
-                maxNumberOfNipples: 2,
-                mode: 'dynamic',
-                size: 150,
-                color: 'gray',
-                catchDistance: 75,
-                fadeTime: 100
-            });
-            // Force cleanup stale joysticks periodically
-            this.nipple.on('removed', () => {
-                document.querySelectorAll('.back, .front').forEach(el => {
-                    if(!el.closest('[data-nipple]')) el.remove();
-                });
-            });
+            this.createJoysticks();
+            // A joystick could stay held after its finger lifted: with two fingers nipplejs can lose track of which touch
+            // is which, and its end handler then throws before ending the joystick (it reads nipple.identifier before
+            // checking there is a nipple), which keeps its last push and still counts against the two allowed, so a new
+            // touch got no joystick either. The browser's own list of fingers on the screen settles it: with none,
+            // joystick input is ignored at once (updatePlayer), and with more joysticks than fingers for a moment they
+            // are rebuilt.
+            this.touchCount = 0;
+            let onTouch = (e) => {
+                this.touchCount = e.touches ? e.touches.length : 0;
+                if(e.type !== 'touchstart') setTimeout(() => { if(this.nipple && this.nipple.ids.length > this.touchCount) this.resetJoysticks(); }, 200);
+            };
+            for(let type of ['touchstart', 'touchend', 'touchcancel']) document.addEventListener(type, onTouch, { capture: true, passive: true });
         } else {
             this.controls = new PointerLockControls(camera, document.body);
             this.filterPointerSpikes(this.controls);
@@ -95,6 +92,11 @@ export class PlayerController extends THREE.Group {
                 case 'KeyA': this.keysPressed['KeyA'] = false; break;
             }
         });
+        // a key or finger let go of while the page was not listening (another window, the app switcher, a Discord
+        // overlay) never sends its release: drop everything held when the page loses focus or is hidden
+        let release = () => { this.keysPressed = {}; this.touchCount = 0; if(this.nipple && this.nipple.ids.length) this.resetJoysticks(); };
+        window.addEventListener('blur', release);
+        document.addEventListener('visibilitychange', () => { if(document.hidden) release(); });
 
         // Character mesh: only its shadow is seen. The eye sits at the top of the rounded box, so any camera shake
         // (every rocket fired) lifted it out and flashed the box's top across the bottom of the screen; the view
@@ -111,6 +113,31 @@ export class PlayerController extends THREE.Group {
         this.playerMesh.castShadow = true;
         this.playerMesh.material.shadowSide = 2;
         this.add(this.playerMesh);
+    }
+
+    createJoysticks() {
+        this.nipple = nipplejs.create({
+            zone: document.getElementById('appbody'),
+            multitouch: true,
+            maxNumberOfNipples: 2,
+            mode: 'dynamic',
+            size: 150,
+            color: 'gray',
+            catchDistance: 75,
+            fadeTime: 100
+        });
+        // Force cleanup stale joysticks periodically
+        this.nipple.on('removed', () => {
+            document.querySelectorAll('.back, .front').forEach(el => {
+                if(!el.closest('[data-nipple]')) el.remove();
+            });
+        });
+    }
+    /** Throw the joysticks away and start over (one stayed held without a finger on it: see the constructor). */
+    resetJoysticks() {
+        try { this.nipple.destroy(); } catch(e) {}
+        document.querySelectorAll('.back, .front').forEach(el => { if(!el.closest('[data-nipple]')) el.remove(); });
+        this.createJoysticks();
     }
 
     /** Pointer lock with raw mouse input where the platform has it (`unadjustedMovement`). With the OS-adjusted input
@@ -177,7 +204,7 @@ export class PlayerController extends THREE.Group {
         this.lookedThisFrame = false;
 
         if (this.simulationParams.mobile) {
-            if (this.nipple) {
+            if (this.nipple && this.touchCount > 0) { // no finger on the screen: no joystick is really held
                 for(let i = 0; i < this.nipple.ids.length; i++) {
                     let nipple = this.nipple.get(this.nipple.ids[i]);
                     if (nipple && nipple.position && nipple.frontPosition) {
@@ -201,6 +228,10 @@ export class PlayerController extends THREE.Group {
             this.lookMovement.y  = this.keysPressed['ArrowUp'] ? 1 : 0;
             this.lookMovement.y -= this.keysPressed['ArrowDown'] ? 1 : 0;
         }
+
+        // Diagonals: W+D added two full-speed directions (1.41x as fast); a joystick's push is already within the circle
+        let walkLength = this.walkMovement.length();
+        if(walkLength > 1) this.walkMovement.divideScalar(walkLength);
 
         // Mobile: tap look joystick to jump
         if(!this.lookedThisFrame){
