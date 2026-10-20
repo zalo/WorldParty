@@ -19,8 +19,9 @@
  *  continuous, and when a carve replaces a chunk, the vertices of the surfaces it did not touch find their records with
  *  every sample they had. A record's sum and count live on the GPU; the CPU mirrors the count it scheduled (for
  *  priorities), and reads the sums back now and then to decide adaptive splits. A new record is initialised on the GPU
- *  (`ops`) with light carried along the surface from the lit records around it (`GICore.seed`), else dark (in a carve)
- *  or empty (the shader shows the probe grid's light until it has samples). */
+ *  (`ops`) with the light of the surface a carve destroyed where it was dug, or light carried along the surface from the
+ *  lit records around it (`GICore.seed`), else dark (in a carve) or empty (the shader shows the probe grid's light until
+ *  it has samples). */
 
 export const GI_DEFAULTS = {
     maxEdge: 2,            // metres: no render edge longer than this
@@ -35,13 +36,14 @@ export const GI_DEFAULTS = {
                            // probe grid's light comes back on the walls around every dig)
     knockReach: 5,         // metres around a carve's region
     seedReach: 3,          // metres of surface over which a new vertex takes light from lit ones (a chunk arriving) ...
-    seedReachCarved: 12,   // ... and around a carve (from a crater's rim to its floor is ~4 m of surface, and the lit
-                           // records nearest the rim can be a few metres off where the carve retriangulated the ground)
-    seedFalloff: 5,        // metres of surface over which light carried into a carve falls to 1/e (it is deeper in and sees
-                           // less: a tunnel out of the vault converged at 26/255 and took 39 from plain copies of its entrance)
+    seedReachCarved: 12,   // ... and around a carve (from a crater's rim to its floor is ~4 m of surface); also how far
+                           // a record a carve made looks for the surface it destroyed
+    seedFalloff: 5,        // metres over which light carried into a carve falls to 1/e, from the destroyed surface or over
+                           // cut surface (it is deeper in and sees less: a tunnel out of the vault converged at 26/255 and
+                           // took 39 from plain copies of its entrance)
     carveMargin: 3,        // metres around what a carve changed in a chunk that count as carved: the part of a crater in a
                            // chunk that was solid rock arrives with no old mesh to compare, so no box of its own ...
-    carveMs: 2000,         // ... for this long after it
+    carveMs: 2000,         // ... for this long after it; the surface it destroyed is kept as long
 };
 
 /** GPU ops, 8 words each: [type | weight << 8, record, a, b], [c, d, wa | wb << 16, wc | wd << 16]. OP_INIT (a new record)
@@ -95,6 +97,40 @@ class Heap {
         }
         K[i] = key; A[i] = a; B[i] = b;
     }
+}
+
+/** Whether the triangle of vertices i, j, k (in flat positions P) lies on a boundary plane of the chunk at `lo`. */
+function isCap(P, i, j, k, lo) {
+    for(let a = 0; a < 3; a++) for(let h = 0; h < 2; h++) {
+        let s = lo[a] + h * CHUNK;
+        if(Math.abs(P[i * 3 + a] - s) < 1e-4 && Math.abs(P[j * 3 + a] - s) < 1e-4 && Math.abs(P[k * 3 + a] - s) < 1e-4) return true;
+    }
+    return false;
+}
+
+const GHOST_CELL = 2, BAR = [0, 0, 0];
+/** The distance from p to the triangle at T[o .. o + 9], with the barycentric coordinates of its nearest point in BAR
+ *  (Ericson, Real-Time Collision Detection, 5.1.5). NaN for a degenerate triangle. */
+function closest(T, o, px, py, pz) {
+    let ax = T[o], ay = T[o + 1], az = T[o + 2];
+    let abx = T[o + 3] - ax, aby = T[o + 4] - ay, abz = T[o + 5] - az, acx = T[o + 6] - ax, acy = T[o + 7] - ay, acz = T[o + 8] - az;
+    let apx = px - ax, apy = py - ay, apz = pz - az, u, v, w;
+    let d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
+    if(d1 <= 0 && d2 <= 0) { u = 1; v = 0; w = 0; }
+    else {
+        let bpx = apx - abx, bpy = apy - aby, bpz = apz - abz, cpx = apx - acx, cpy = apy - acy, cpz = apz - acz;
+        let d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
+        let d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
+        let vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
+        if(d3 >= 0 && d4 <= d3) { u = 0; v = 1; w = 0; }
+        else if(vc <= 0 && d1 >= 0 && d3 <= 0) { v = d1 / (d1 - d3); u = 1 - v; w = 0; }
+        else if(d6 >= 0 && d5 <= d6) { u = 0; v = 0; w = 1; }
+        else if(vb <= 0 && d2 >= 0 && d6 <= 0) { w = d2 / (d2 - d6); u = 1 - w; v = 0; }
+        else if(va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); u = 0; v = 1 - w; }
+        else { let den = 1 / (va + vb + vc); v = vb * den; w = vc * den; u = 1 - v - w; }
+    }
+    BAR[0] = u; BAR[1] = v; BAR[2] = w;
+    return Math.hypot(apx - abx * v - acx * w, apy - aby * v - acy * w, apz - abz * v - acz * w);
 }
 
 function hash32(x) { x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b); return (x ^ (x >>> 16)) >>> 0; }
@@ -180,41 +216,53 @@ export class GICore {
         this.frame = 0;
         this.stats = { refines: 0, refineMs: 0, adapts: 0, splits: 0, seeded: 0, dark: 0, seedMs: 0 };
         this.carves = [];              // recent carves: { t, box: [x0, y0, z0, x1, y1, z1] } (see `carveMargin`)
+        this.ghosts = [];              // the surface recent carves destroyed, its records kept: { t, tris, recs, box } (see `keepGhost`)
+        this.ghostGrid = null;
     }
 
     /** How new records start (the ones created since the last call; after every refinement). A fresh vertex used to
      *  start empty, and the shader showed the probe grid's light until rays came in: underground, a new tunnel lit up
      *  like the plaza for a second. It then copied the two nearest lit records in sight, which could pick a sunlit rim
      *  for one corner and a shaded wall for the next, and a crater crossing a chunk plane copied the copies on the other
-     *  side, darker each time. Now light is carried along the surface: a midpoint of an edge between lit records takes
-     *  their mean (an adaptive split then shows what was drawn before it); any other new record takes a blend of the
-     *  `SOURCES` lit records nearest to it over the surface graph (render edges, plus records at the same point across a
-     *  hard edge or a chunk seam; `neighbours`), weighted by distance so the blend changes smoothly from vertex to vertex
-     *  (Franke and Little's weights, which reach 0 at the next source out), and by how its facing compares with each
-     *  source's (`skyward`). Light never crosses solid: two faces of a wall are connected only around its edge,
-     *  and the caps on chunk planes, which lie inside the rock, are not part of the graph. A record on surface a carve
-     *  just cut takes exp(-d / `seedFalloff`) of that light, d being how far it lies over cut surface from surface that
-     *  was there before (or is lit), so a crater's floor and the end of a tunnel start darker than their rims, and a
-     *  copy of a copy is only as dark as its depth says; the ground a carve merely retriangulated around its hole
-     *  (`oldSurface`: on the chunk's previous triangles) is not cut surface (it carries the light of the lit records
-     *  around it, which can be metres off). A cut record with nothing lit within `seedReachCarved` starts dark (it was
-     *  solid rock a moment ago). Elsewhere (a chunk arriving) light comes from within `seedReach`, else the record
-     *  starts empty. Records from earlier calls that are still unlit (never sampled, nothing reached
-     *  them) are seeded again when a later one reaches them: the parts of one carve arrive chunk by chunk in any order,
-     *  and the bowl of a crater in the chunk below the ground can come before the rim that connects it to the light.
-     *  Only sampled or carried light is passed on (`Records.lit`), never a dark start. `old` is the chunk's previous
-     *  coarse geometry when a carve changed it. */
-    seed(old = null) {
+     *  side, darker each time. Now a midpoint of an edge between lit records takes their mean (an adaptive split then
+     *  shows what was drawn before it). A record a carve made takes the light of the surface the carve destroyed
+     *  (`keepGhost`) at the point of it nearest to the record, as it was drawn there (the triangle's corners
+     *  interpolated), times exp(-d / `seedFalloff`) for the distance d to that point, and scaled by how its facing
+     *  compares with the corners' (`skyward`): the ground a carve merely retriangulated around its hole lies on the
+     *  destroyed triangles and keeps its light exactly, a crater's floor starts darker than its rim, and a tunnel's new
+     *  end takes the light of the end it replaced. Only surface the carve destroyed counts, so the other side of a thin
+     *  wall, which it did not touch, lends nothing. Any other new record (a chunk arriving, or nothing destroyed within
+     *  `seedReachCarved`) takes a blend of the `SOURCES` lit records nearest to it over the surface graph (render edges,
+     *  plus records at the same point across a hard edge or a chunk seam; `neighbours`), weighted by distance so the
+     *  blend changes smoothly from vertex to vertex (Franke and Little's weights, which reach 0 at the next source out)
+     *  and by facing as above. Light never crosses solid that way either: two faces of a wall are connected only around
+     *  its edge, and the caps on chunk planes, which lie inside the rock, are not part of the graph. On surface a carve
+     *  cut, that light falls off the same way with the distance over cut surface to surface that is lit or was there
+     *  before; with nothing lit within reach the record starts dark (it was solid rock a moment ago). Elsewhere light
+     *  comes from within `seedReach`, else the record starts empty. Records from earlier calls that are still unlit
+     *  (never sampled, nothing reached them) are seeded again when a later call reaches them or brings destroyed surface
+     *  near them (`ghost`, this call's): the parts of one carve arrive chunk by chunk in any order, and the bowl of a
+     *  crater in the chunk below the ground can come before the ground it was dug out of. Only sampled or carried light
+     *  is passed on (`Records.lit`), never a dark start. */
+    seed(ghost = null) {
         let R = this.records, P = R.pending;
         R.pending = [];
-        if(!P.length) return;
         let now = performance.now();
+        this.expire(now);
+        if(!P.length && !ghost) return;
         this.carves = this.carves.filter(c => now - c.t < this.p.carveMs);
-        this.spread(P, old);
+        this.spread(P, ghost);
         this.stats.seedMs += performance.now() - now;
     }
 
-    spread(P, old) {
+    /** Let go of the destroyed surface older than `carveMs`. */
+    expire(now) {
+        let G = this.ghosts, n = 0;
+        while(n < G.length && now - G[n].t >= this.p.carveMs) { for(let r of G[n].recs) this.records.release(r); n++; }
+        if(n) { G.splice(0, n); this.ghostGrid = null; }
+    }
+
+    spread(P, ghost) {
         let R = this.records, p = this.p, W = p.weightAt, g = R.geo;
         let carved = new Map(), isCarved = (r) => {
             let v = carved.get(r);
@@ -234,12 +282,18 @@ export class GICore {
             fresh.add(id);
             if(alive(a) && alive(b) && R.lit[a] && R.lit[b]) { R.set(id, W, [a, b], [0.5, 0.5], true); done.add(id); this.stats.seeded++; }
         }
-        let kept = old ? this.oldSurface(old, [...fresh].filter(isCarved)) : null;
-        let cut = (r) => isCarved(r) && !(kept && kept.has(r)); // on surface a carve cut (not merely retriangulated)
-        // the records to seed: the new ones and the unlit ones on the surface within reach of them; the lit ones next
-        // to those are the sources
+        let cut = isCarved;
+        // the records to seed: the new ones and the unlit ones on the surface within reach of them (and around surface a
+        // carve just destroyed); the lit ones next to those are the sources
         let cache = new Map(), heap = new Heap(), targets = new Map(), sources = new Set();
         for(let id of fresh) { targets.set(id, 0); heap.push(0, id); }
+        if(ghost) {
+            let b = ghost.box, e = p.seedReachCarved;
+            for(let ch of this.chunks.values()) {
+                if(ch.min[0] > b[3] + e || ch.min[0] + CHUNK < b[0] - e || ch.min[1] > b[4] + e || ch.min[1] + CHUNK < b[1] - e || ch.min[2] > b[5] + e || ch.min[2] + CHUNK < b[2] - e) continue;
+                for(let r of ch.recs) if(!R.lit[r] && !targets.has(r) && isCarved(r)) { targets.set(r, 0); heap.push(0, r); }
+            }
+        }
         while(heap.size) {
             let d = heap.top(), r = heap.a(); heap.pop();
             if(d > targets.get(r)) continue;
@@ -291,11 +345,18 @@ export class GICore {
                 for(let n = 0; n < nb.length; n += 2) { let u = nb[n]; if(targets.has(u) && cut(u) && !depth.has(u)) heap.push(d + nb[n + 1], u); }
             }
         }
-        let lit = [];
+        let lit = [], hit = [0, 0, 0, 0, 0, 0, 0];
         for(let t of targets.keys()) {
             if(done.has(t)) continue;
             let b = best.get(t), isNew = fresh.has(t);
-            if(b && b.length) {
+            if(isCarved(t) && this.nearestGhost(t, p.seedReachCarved, hit)) {
+                // the light of the destroyed surface nearest to it, as it was drawn there
+                let fade = Math.exp(-hit[0] / p.seedFalloff), vt = skyward(g, t), src = [hit[1], hit[2], hit[3]], wts = [];
+                for(let k = 0; k < 3; k++) wts.push(hit[4 + k] * fade * vt / skyward(g, src[k]));
+                R.set(t, W, src, wts, isNew);
+                lit.push(t);
+                this.stats.seeded++;
+            } else if(b && b.length) {
                 let n = Math.min(b.length / 2, SOURCES), far = b.length / 2 > SOURCES ? b[SOURCES * 2 + 1] : reachOf(t);
                 let src = [], wts = [], sum = 0;
                 for(let k = 0; k < n; k++) {
@@ -317,40 +378,80 @@ export class GICore {
         for(let t of done) R.lit[t] = 1;
     }
 
-    /** Which of the records `ids` lie on a triangle of the chunk's previous coarse geometry `old`, facing its way: the
-     *  surface a carve retriangulated around what it cut, not new surface. */
-    oldSurface(old, ids) {
-        let out = new Set();
-        if(!ids.length) return out;
-        let g = this.records.geo, lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-        for(let r of ids) for(let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], g[r * 8 + a]); hi[a] = Math.max(hi[a], g[r * 8 + a]); }
-        let { pos, cls } = old, tris = [], E = 2e-3;
-        for(let t = 0; t < cls.length; t++) {
-            let o = t * 9, skip = false;
-            for(let a = 0; a < 3 && !skip; a++) {
-                let m = Math.min(pos[o + a], pos[o + 3 + a], pos[o + 6 + a]), M = Math.max(pos[o + a], pos[o + 3 + a], pos[o + 6 + a]);
-                if(m > hi[a] + E || M < lo[a] - E) skip = true;
+    /** Keep the part of a chunk's previous render mesh `old` that a carve destroyed (its triangles with a corner the new
+     *  mesh `ch` lacks, all of whose corners are lit; no caps) with its records, for `carveMs`: new surface starts with
+     *  the light of the destroyed surface nearest to it (see `seed`). */
+    keepGhost(old, ch) {
+        let R = this.records, kept = new Set(ch.recs), I = old.index, P = old.positions, rec = old.recOf;
+        let tris = [], recs = [], box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+        for(let t = 0; t < I.length; t += 3) {
+            let i = I[t], j = I[t + 1], k = I[t + 2], a = rec[i], b = rec[j], c = rec[k];
+            if(a < 0 || b < 0 || c < 0 || (kept.has(a) && kept.has(b) && kept.has(c))) continue;
+            if(!R.lit[a] || !R.lit[b] || !R.lit[c] || isCap(P, i, j, k, old.min)) continue;
+            for(let v of [i, j, k]) for(let x = 0; x < 3; x++) {
+                let q = P[v * 3 + x]; tris.push(q);
+                if(q < box[x]) box[x] = q;
+                if(q > box[3 + x]) box[3 + x] = q;
             }
-            if(skip) continue;
-            let ax = pos[o], ay = pos[o + 1], az = pos[o + 2];
-            let ux = pos[o + 3] - ax, uy = pos[o + 4] - ay, uz = pos[o + 5] - az, vx = pos[o + 6] - ax, vy = pos[o + 7] - ay, vz = pos[o + 8] - az;
-            let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, l = Math.hypot(nx, ny, nz);
-            if(l < 1e-10) continue;
-            tris.push([ax, ay, az, ux, uy, uz, vx, vy, vz, nx / l, ny / l, nz / l]);
+            recs.push(a, b, c);
+            R.retain(a); R.retain(b); R.retain(c);
         }
-        for(let r of ids) {
-            let o = r * 8, x = g[o], y = g[o + 1], z = g[o + 2];
-            for(let [ax, ay, az, ux, uy, uz, vx, vy, vz, nx, ny, nz] of tris) {
-                let px = x - ax, py = y - ay, pz = z - az;
-                if(Math.abs(px * nx + py * ny + pz * nz) > E || g[o + 4] * nx + g[o + 5] * ny + g[o + 6] * nz < 0.5) continue;
-                // barycentric coordinates in the plane
-                let uu = ux * ux + uy * uy + uz * uz, uv = ux * vx + uy * vy + uz * vz, vv = vx * vx + vy * vy + vz * vz;
-                let pu = px * ux + py * uy + pz * uz, pv = px * vx + py * vy + pz * vz, den = uu * vv - uv * uv;
-                let s = (vv * pu - uv * pv) / den, t = (uu * pv - uv * pu) / den, e = 1e-4;
-                if(s >= -e && t >= -e && s + t <= 1 + e) { out.add(r); break; }
+        if(!recs.length) return null;
+        let ghost = { t: performance.now(), tris: new Float32Array(tris), recs: Int32Array.from(recs), box };
+        this.ghosts.push(ghost); this.ghostGrid = null;
+        return ghost;
+    }
+
+    /** The destroyed surface's triangles in cells of GHOST_CELL metres. */
+    ghostCells() {
+        if(this.ghostGrid) return this.ghostGrid;
+        let n = 0;
+        for(let G of this.ghosts) n += G.recs.length / 3;
+        let tris = new Float32Array(n * 9), recs = new Int32Array(n * 3), cells = new Map(), t = 0;
+        let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity], a = [0, 0, 0], b = [0, 0, 0];
+        for(let G of this.ghosts) { tris.set(G.tris, t * 9); recs.set(G.recs, t * 3); t += G.recs.length / 3; }
+        for(t = 0; t < n; t++) {
+            let o = t * 9;
+            for(let x = 0; x < 3; x++) {
+                a[x] = Math.floor(Math.min(tris[o + x], tris[o + 3 + x], tris[o + 6 + x]) / GHOST_CELL);
+                b[x] = Math.floor(Math.max(tris[o + x], tris[o + 3 + x], tris[o + 6 + x]) / GHOST_CELL);
+                lo[x] = Math.min(lo[x], a[x]); hi[x] = Math.max(hi[x], b[x]);
+            }
+            for(let i = a[0]; i <= b[0]; i++) for(let j = a[1]; j <= b[1]; j++) for(let k = a[2]; k <= b[2]; k++) {
+                let key = Records.cellKey(i, j, k), list = cells.get(key);
+                if(list) list.push(t); else cells.set(key, [t]);
             }
         }
-        return out;
+        return this.ghostGrid = { tris, recs, cells, lo, hi, stamp: new Uint32Array(n), q: 0 };
+    }
+
+    /** The point nearest to record r on the destroyed surface, within `reach`: `out` = [distance, its triangle's records
+     *  a, b, c, and its barycentric coordinates]. False if there is none. */
+    nearestGhost(r, reach, out) {
+        if(!this.ghosts.length) return false;
+        let G = this.ghostCells(), g = this.records.geo, o = r * 8, px = g[o], py = g[o + 1], pz = g[o + 2];
+        let c = [Math.floor(px / GHOST_CELL), Math.floor(py / GHOST_CELL), Math.floor(pz / GHOST_CELL)], lo = G.lo, hi = G.hi;
+        let best = reach, found = -1, q = ++G.q, u = 0, v = 0, w = 0;
+        let visit = (i, j, k) => {
+            let list = G.cells.get(Records.cellKey(i, j, k));
+            if(list) for(let t of list) {
+                if(G.stamp[t] === q) continue;
+                G.stamp[t] = q;
+                let d = closest(G.tris, t * 9, px, py, pz);
+                if(d < best) { best = d; found = t; u = BAR[0]; v = BAR[1]; w = BAR[2]; }
+            }
+        };
+        // shells of cells around its own, nearest first, until no cell further out can be nearer
+        let last = Math.max(c[0] - lo[0], hi[0] - c[0], c[1] - lo[1], hi[1] - c[1], c[2] - lo[2], hi[2] - c[2]);
+        for(let s = 0; s <= last && (s - 1) * GHOST_CELL < best; s++) {
+            for(let i = Math.max(c[0] - s, lo[0]); i <= Math.min(c[0] + s, hi[0]); i++) for(let j = Math.max(c[1] - s, lo[1]); j <= Math.min(c[1] + s, hi[1]); j++) {
+                if(Math.abs(i - c[0]) === s || Math.abs(j - c[1]) === s) { for(let k = Math.max(c[2] - s, lo[2]); k <= Math.min(c[2] + s, hi[2]); k++) visit(i, j, k); }
+                else { if(c[2] - s >= lo[2]) visit(i, j, c[2] - s); if(s > 0 && c[2] + s <= hi[2]) visit(i, j, c[2] + s); }
+            }
+        }
+        if(found < 0) return false;
+        out[0] = best; out[1] = G.recs[found * 3]; out[2] = G.recs[found * 3 + 1]; out[3] = G.recs[found * 3 + 2]; out[4] = u; out[5] = v; out[6] = w;
+        return true;
     }
 
     /** A chunk's surface graph: record -> [neighbour, edge length, ...] over its render triangles, without caps (triangles
@@ -358,12 +459,7 @@ export class GICore {
      *  it would pass through the solid). Built when seeding first needs it, kept until the chunk is refined again. */
     adjacency(ch) {
         if(ch.adj) return ch.adj;
-        let adj = new Map(), I = ch.index, P = ch.positions, rec = ch.recOf, lo = ch.min;
-        let on = (i, a, s) => Math.abs(P[i * 3 + a] - s) < 1e-4;
-        let cap = (i, j, k) => {
-            for(let a = 0; a < 3; a++) for(let s of [lo[a], lo[a] + CHUNK]) if(on(i, a, s) && on(j, a, s) && on(k, a, s)) return true;
-            return false;
-        };
+        let adj = new Map(), I = ch.index, P = ch.positions, rec = ch.recOf;
         let link = (i, j) => {
             let a = rec[i], b = rec[j];
             if(a < 0 || b < 0 || a === b) return;
@@ -378,7 +474,7 @@ export class GICore {
         };
         for(let t = 0; t < I.length; t += 3) {
             let i = I[t], j = I[t + 1], k = I[t + 2];
-            if(cap(i, j, k)) continue;
+            if(isCap(P, i, j, k, ch.min)) continue;
             link(i, j); link(j, k); link(k, i);
         }
         return ch.adj = adj;
@@ -432,7 +528,7 @@ export class GICore {
         ch.minSamples = ch.recs.length ? m : Infinity;
     }
 
-    reset() { for(let key of [...this.chunks.keys()]) this.removeChunk(key); this.splitEdges.clear(); }
+    reset() { for(let key of [...this.chunks.keys()]) this.removeChunk(key); this.expire(Infinity); this.splitEdges.clear(); }
 
     /** A chunk's coarse geometry: flat corner arrays (positions and normals, 9 per triangle; uvs 6 per triangle or null),
      *  a material class per triangle and optionally `skip` (1: a hidden triangle on a chunk plane, left as it is). Returns the chunk with its refined mesh (positions, normals, uvs, cls, recOf,
@@ -445,10 +541,11 @@ export class GICore {
         if(carved && old) this.noteCarve(carved);
         this.refine(ch);
         this.chunks.set(key, ch);
+        let ghost = carved && old ? this.keepGhost(old, ch) : null;
         if(old) for(let r of old.recOf) if(r >= 0) this.records.release(r);
         this.records.sweep();
-        // (after the old records are gone: light comes only from the surface as it is now)
-        this.seed(carved && old ? old.coarse : null);
+        // (after the old records are gone: light comes from the surface as it is now, and from what the carve destroyed)
+        this.seed(ghost);
         this.updateMin(ch);
         return ch;
     }
@@ -616,6 +713,7 @@ export class GICore {
      *  chunks the GPU BVH already has (`ready`). Returns the number of jobs and the chunks that reached an adaptive stage. */
     schedule(jobs, cam) {
         let R = this.records, cap = this.p.maxSamples, stamp = ++this.frame, n = 0, staged = [];
+        if(this.ghosts.length) this.expire(performance.now());
         let order = [];
         for(let ch of this.chunks.values()) {
             if(!ch.ready || !ch.recs.length) continue;
