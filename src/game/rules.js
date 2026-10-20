@@ -24,12 +24,35 @@ export const WEAPONS = {
     // the hull of two spheres: one around the player resting at the feet (`drop` below the eye), one `reach` ahead of it
     // along the view; big enough to walk through, and a tunnel dug walking forward has a smooth floor
     drill:   { name: 'Drill',           icon: '⛏️', key: '2', cooldownMs: 420,  radius: 1.6, reach: 1.3, drop: 0.4 },
-    mason:   { name: 'Mason',           icon: '🧱', key: '3', cooldownMs: 300,  budget: 12, regenMs: 20000, stonePerDig: 1, maxDistance: 9, // stone comes from digging; the trickle only prevents a dead end
-               shapes: { wall: [4, 2.6, 0.6], block: [2, 2, 2], plank: [4, 0.4, 1.4], pillar: [1, 4, 1] } },
+    // the mason draws a box between two corners (masonBox below) and pays its volume in stone, m³: a dig yields
+    // `digYield` of what it removed, and a trickle (1 every `regenMs` while below the budget) prevents a dead end
+    mason:   { name: 'Mason',           icon: '🧱', key: '3', cooldownMs: 300,  budget: 40, regenMs: 4000, digYield: 0.25, maxDistance: 9, maxSize: 12 },
     grapple: { name: 'Grapple',         icon: '🪝', key: 'right click', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
     physgun: { name: 'PhysGun',         icon: '🔫', key: '4', range: 20 },
 };
 export const SELF_DAMAGE_SCALE = 0.45;    // rocket jumping hurts, but not much
+
+/** The mason's grid: 0.5 m cells whose faces lie at 0.1 + 0.5k, the level's own offset (tools/gen-fortwar.mjs nudges
+ *  everything 0.1 m), so a box lines up with the walls and floors and none of its faces lands on a chunk plane (a
+ *  multiple of 10, see CLAUDE.md "Chunk planes"). */
+export const MASON_GRID = 0.5, MASON_ORIGIN = 0.1;
+export const masonCell = (v) => Math.floor((v - MASON_ORIGIN) / MASON_GRID);
+export const masonLine = (i) => MASON_ORIGIN + i * MASON_GRID;
+/** A mason box from the wire, snapped to the grid: { min: [x, y, z], max: [x, y, z], size, volume } with every side
+ *  between one cell and `maxSize`, or null. */
+export function masonBox(b, maxSize = WEAPONS.mason.maxSize) {
+    if(!b || !Array.isArray(b.min) || !Array.isArray(b.max)) return null;
+    let min = [], max = [], size = [];
+    for(let a = 0; a < 3; a++) {
+        let lo = +b.min[a], hi = +b.max[a];
+        if(!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+        let i0 = Math.round((Math.min(lo, hi) - MASON_ORIGIN) / MASON_GRID), i1 = Math.round((Math.max(lo, hi) - MASON_ORIGIN) / MASON_GRID);
+        if(i1 <= i0) i1 = i0 + 1;
+        if((i1 - i0) * MASON_GRID > maxSize + 1e-6) return null;
+        min.push(masonLine(i0)); max.push(masonLine(i1)); size.push((i1 - i0) * MASON_GRID);
+    }
+    return { min, max, size, volume: size[0] * size[1] * size[2] };
+}
 
 /** What a team scores: each supply in its vault, each crystal its players broke out (kept even if they switch teams). */
 export const UNITS = { supply: 100, crystal: 1 };

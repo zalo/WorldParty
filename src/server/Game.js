@@ -10,7 +10,7 @@
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
 import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y, VOTE,
-         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, AWARDS, UNITS, inBox, otherTeam } from '../game/rules.js';
+         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, AWARDS, UNITS, inBox, otherTeam, masonBox } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
 import { chunksInBox } from '../terrain/grid.js';
 import { GlowRocks } from './GlowRocks.js';
@@ -22,6 +22,8 @@ const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
 const vec3 = (v, d = { x: 0, y: 0, z: 0 }) => v ? { x: num(v.x, d.x), y: num(v.y, d.y), z: num(v.z, d.z) } : { ...d };
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const unit = (v) => { let l = Math.hypot(v.x, v.y, v.z) || 1; return { x: v.x / l, y: v.y / l, z: v.z / l }; };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fmtStone = (v) => `${Math.floor(v * 10 + 1e-6) / 10} m³ of stone`;
 
 export class Game {
     constructor(server) {
@@ -236,26 +238,41 @@ export class Game {
         // separate spheres left a ridge between every two bites, a tunnel dug walking forward now has a smooth floor
         let a = { x: origin.x, y: origin.y - d.drop, z: origin.z };
         let b = { x: a.x + dir.x * d.reach, y: a.y + dir.y * d.reach, z: a.z + dir.z * d.reach };
-        // stone comes from digging: a dig that actually removed material is worth a block (re-digging a hole is not)
+        // stone comes from digging: a share of what the dig actually removed (re-digging a hole yields nothing, and a
+        // bite into a castle wall, a third the size of one into dirt, a third the stone)
         let T = this.server.terrain;
         let keys = chunksInBox(T.world, { x: Math.min(a.x, b.x) - r, y: Math.min(a.y, b.y) - r, z: Math.min(a.z, b.z) - r }, { x: Math.max(a.x, b.x) + r, y: Math.max(a.y, b.y) + r, z: Math.max(a.z, b.z) + r });
         let volume = () => keys.reduce((sum, k) => sum + (T.chunks[k] && T.hasSolid(k) ? T.manifoldOf(k).volume() : 0), 0);
         let before = volume();
         await this.server.carveCapsule(a, b, r, 1, id);
-        if(before - volume() > 0.05 && p.build < WEAPONS.mason.budget) this.world.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + WEAPONS.mason.stonePerDig) });
+        let removed = before - volume(), m = WEAPONS.mason;
+        let q = this.world.get(id, 'Player');
+        if(q && removed > 0.05 && q.build < m.budget) this.world.set(id, 'Player', { build: Math.min(m.budget, Math.round((q.build + removed * m.digYield) * 10) / 10) });
     }
 
-    /** Mason: add a block of the team's stone where the player asked (close by, budget permitting). */
+    /** Mason: a box of the team's stone between two corners on the grid (rules.js masonBox), paid for by its volume in
+     *  stone. It has to start within reach and may not swallow a player (they would be stuck inside). The solid is
+     *  3 cm bigger on every side than the grid box, so it overlaps the floor or wall it is built against instead of
+     *  touching it face to face: touching faces could leave it a separate piece, which is shed as a falling fragment. */
     async build(id, p, data, now) {
-        if(p.dead || p.build <= 0 || !this.ready(id, 'mason', now)) return;
-        let dims = WEAPONS.mason.shapes[String(data.shape || '')];
-        if(!dims) return;
-        let eye = this.eyeOf(id), pos = vec3(data.position, eye);
-        if(dist(pos, eye) > WEAPONS.mason.maxDistance + Math.max(...dims)) return;
-        let q = data.quaternion ? { x: num(data.quaternion.x), y: num(data.quaternion.y), z: num(data.quaternion.z), w: num(data.quaternion.w, 1) } : { x: 0, y: 0, z: 0, w: 1 };
-        this.world.set(id, 'Player', { build: p.build - 1 });
+        let m = WEAPONS.mason, box = masonBox(data);
+        if(p.dead || !box || !this.ready(id, 'mason', now)) return;
+        if(box.volume > p.build + 1e-6) { this.server.send(id, { type: 'event', text: `Not enough stone: that takes ${fmtStone(box.volume)}, you have ${fmtStone(p.build)}` }); return; }
+        let eye = this.eyeOf(id);
+        let near = { x: clamp(eye.x, box.min[0], box.max[0]), y: clamp(eye.y, box.min[1], box.max[1]), z: clamp(eye.z, box.min[2], box.max[2]) };
+        if(dist(near, eye) > m.maxDistance + 1) return;
+        for(let [pid, pl, tf] of this.world.each('Player', 'Transform')) {
+            if(!pl.team || pl.dead) continue;
+            let f = tf.position, R = 0.45; // the capsule, feet at the position, two metres tall
+            if(f.x + R > box.min[0] && f.x - R < box.max[0] && f.z + R > box.min[2] && f.z - R < box.max[2] && f.y + 2 > box.min[1] && f.y < box.max[1]) {
+                this.server.send(id, { type: 'event', text: pid === id ? 'You are in the way of that box' : `${pl.name} is in the way` });
+                return;
+            }
+        }
+        this.world.set(id, 'Player', { build: Math.round((p.build - box.volume) * 10) / 10 });
         this.buildRegen.set(id, this.buildRegen.get(id) || now);
-        await this.server.addBox(pos, q, { x: dims[0], y: dims[1], z: dims[2] }, this.config.teams[p.team].material);
+        let pad = 0.03, center = { x: (box.min[0] + box.max[0]) / 2, y: (box.min[1] + box.max[1]) / 2, z: (box.min[2] + box.max[2]) / 2 };
+        await this.server.addBox(center, { x: 0, y: 0, z: 0, w: 1 }, { x: box.size[0] + 2 * pad, y: box.size[1] + 2 * pad, z: box.size[2] + 2 * pad }, this.config.teams[p.team].material);
     }
 
     /** Quaternion rotating +z onto `dir` (yaw and pitch only). */
@@ -314,7 +331,7 @@ export class Game {
     explode(center, kind, by, now) {
         let def = WEAPONS[kind];
         let R = def.radius, reach = R * 1.6;
-        this.server.carveSphere(center, R, 1, by).catch(e => console.error('carve failed: ' + e.message));
+        this.server.carveBlast(center, R, 1, by).catch(e => console.error('carve failed: ' + e.message));
         let w = this.world;
         for(let [bid, pb, tf, rb] of w.each('$PxBody', 'Transform', 'RigidBody')) {
             if(rb.frozen) continue;
@@ -618,7 +635,7 @@ export class Game {
             }
             if(p.build < WEAPONS.mason.budget) {
                 let last = this.buildRegen.get(id) || now;
-                if(now - last >= WEAPONS.mason.regenMs) { w.set(id, 'Player', { build: p.build + 1 }); this.buildRegen.set(id, now); }
+                if(now - last >= WEAPONS.mason.regenMs) { w.set(id, 'Player', { build: Math.min(WEAPONS.mason.budget, p.build + 1) }); this.buildRegen.set(id, now); }
                 else if(!this.buildRegen.has(id)) this.buildRegen.set(id, now);
             } else this.buildRegen.delete(id);
         }

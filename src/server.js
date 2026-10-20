@@ -26,8 +26,7 @@ const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across c
 const COOKS_NOW = 3;                // mesh colliders cooked immediately when activity changes (nearest first) ...
 const COOKS_PER_TICK = 2;           // ... and per tick for the rest
 
-// Brushes the server carves with itself (explosions, the drill, the mason): unit shapes, scaled per use
-const SPHERE_SOUP = encodeSoup(new THREE.IcosahedronGeometry(1, 1).attributes.position.array); // 80 faces: explosions
+// Brushes the server carves with itself (the drill, the mason; explosions build their own, carveBlast): unit shapes, scaled per use
 /** The drill's brush: the convex hull of two unit spheres (320-face icospheres, so its tunnels read as round) whose
  *  centres lie `length` apart on z, centred on the origin. Cached per length (in radii). */
 const CAPSULE_SOUPS = new Map();
@@ -510,20 +509,44 @@ export class WorldParty extends Server {
   /** Send a JSON message to one connection. */
   send(id, msg) { let c = this.conns.get(id); if(c) try { c.send(JSON.stringify(msg)); } catch(e) { console.warn(`send to ${id} failed: ${e.message}`); } }
 
-  /** Server-side carves and additions reuse the client's csg path with the server's own unit brushes. `by` is the
-   *  player responsible (Fort War credits them with the crystals it frees). Explosions carve the coarse sphere. */
-  carveSphere(center, radius, material = 1, by = null) {
-    let min = { x: center.x - radius, y: center.y - radius, z: center.z - radius }, max = { x: center.x + radius, y: center.y + radius, z: center.z + radius };
-    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: SPHERE_SOUP, operation: SUBTRACTION, material, position: center, quaternion: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: radius, y: radius, z: radius }, tolerance: 0.1, by });
+  /** Server-side carves: `by` is the player responsible (Fort War credits them with the crystals it frees).
+   *  A blast of radius `radius`: a crater of flat broken facets (Shatter.js) rather than a sphere, reaching less far
+   *  into hard material, its faces taking the material of what they cut (`fallback` where nothing says). The crater
+   *  stays within 1.3 radii of the centre (the cells' bounding cube). */
+  carveBlast(center, radius, fallback = 1, by = null) {
+    let R = radius * 1.3, min = { x: center.x - R, y: center.y - R, z: center.z - R }, max = { x: center.x + R, y: center.y + R, z: center.z + R };
+    let keys = chunksInBox(this.terrain.world, min, max);
+    return this.carveWith(keys, () => {
+      let probe = this.terrain.solidProbe(keys, min, max);
+      return this.terrain.blastBrush(center, radius, probe, fallback);
+    }, { min, max }, by);
   }
-  /** The convex hull of two spheres of `radius` centred at `a` and `b` (the drill), simplified only to 2 cm. */
-  carveCapsule(a, b, radius, material = 1, by = null) {
+  /** The convex hull of two spheres of `radius` centred at `a` and `b` (the drill), simplified only to 2 cm, pulled
+   *  in where it reaches into hard material (seen from `a`, the sphere around the player) and tagged with what it
+   *  cuts, like a blast. */
+  carveCapsule(a, b, radius, fallback = 1, by = null) {
     let d = new THREE.Vector3(b.x - a.x, b.y - a.y, b.z - a.z), length = d.length();
     let q = length > 1e-6 ? new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), d.divideScalar(length)) : new THREE.Quaternion();
-    let center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+    let center = new THREE.Vector3((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
     let min = { x: Math.min(a.x, b.x) - radius, y: Math.min(a.y, b.y) - radius, z: Math.min(a.z, b.z) - radius };
     let max = { x: Math.max(a.x, b.x) + radius, y: Math.max(a.y, b.y) + radius, z: Math.max(a.z, b.z) + radius };
-    return this.applyCsg({ keys: chunksInBox(this.terrain.world, min, max), brush: capsuleSoup(length / radius), operation: SUBTRACTION, material, position: center, quaternion: { x: q.x, y: q.y, z: q.z, w: q.w }, scale: { x: radius, y: radius, z: radius }, tolerance: 0.02, by });
+    let keys = chunksInBox(this.terrain.world, min, max);
+    return this.carveWith(keys, () => {
+      let T = this.terrain, probe = T.solidProbe(keys, min, max);
+      let brush = T.soupToManifold(capsuleSoup(length / radius), center, q, new THREE.Vector3(radius, radius, radius), 0.02);
+      return T.tagBrush(T.harden(brush, a, probe), a, probe, fallback);
+    }, { min, max }, by);
+  }
+  /** Subtract a brush the server builds itself: `make()` runs once the chunks are decoded and returns a world-space
+   *  manifold (or null), which is freed afterwards. `box` bounds it (the crystals it can free). */
+  async carveWith(keys, make, box, by = null) {
+    await this.terrain.prepare(keys);
+    let t0 = Date.now(), brush = null;
+    try { brush = make(); } catch(e) { console.warn('brush failed: ' + e.message); }
+    if(!brush) return;
+    try { this.terrain.applyBrush(keys, brush, SUBTRACTION); } finally { brush.delete(); }
+    this.csgStats.booleanMs += Date.now() - t0;
+    this.afterCsg(box, by);
   }
   carveBox(center, quaternion, size, material = 1) { return this.boxCsg(center, quaternion, size, material, SUBTRACTION); }
   addBox(center, quaternion, size, material = 0) { return this.boxCsg(center, quaternion, size, material, ADDITION); }
@@ -585,11 +608,18 @@ export class WorldParty extends Server {
     let t0 = Date.now();
     this.terrain.applyCsg(data);
     this.csgStats.booleanMs += Date.now() - t0;
-    if(this.terrain.dirty.size === 0) return;
+    let box = null;
     if(data.position && data.scale) { // the brush's bounds, generously: the unit brushes fit a unit sphere or cube (the drill's in 1.41)
       let p = vec3(data.position), s = vec3(data.scale, { x: 1, y: 1, z: 1 }), R = Math.hypot(s.x, s.y, s.z);
-      this.carveBoxes.push({ min: { x: p.x - R, y: p.y - R, z: p.z - R }, max: { x: p.x + R, y: p.y + R, z: p.z + R }, by: data.by ?? null });
+      box = { min: { x: p.x - R, y: p.y - R, z: p.z - R }, max: { x: p.x + R, y: p.y + R, z: p.z + R } };
     }
+    this.afterCsg(box, data.by ?? null);
+  }
+
+  /** After a boolean: remember where it was (the glow rocks it can uncover), push the changed chunks, settle soon. */
+  afterCsg(box, by) {
+    if(this.terrain.dirty.size === 0) return;
+    if(box) this.carveBoxes.push({ min: box.min, max: box.max, by });
     this.csgStats.ops++;
     for(let key of this.terrain.dirty) this.pushChunk(key);
     if(!this.settleTimer) this.settleTimer = setTimeout(() => { this.settleTimer = null; this.settleNow(); }, 0);

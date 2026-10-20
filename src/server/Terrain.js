@@ -25,9 +25,11 @@ import { decodeSoup, packChunkMesh, unpackChunkMesh, decodeChunkMesh, decodeChun
 import { gzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { Transform, RigidBody, FragmentMesh } from '../ecs/components.js';
 import { encodeSoup, encodeHulls } from '../net/codec.js';
-import { DEFAULT_MATERIAL, MAX_MATERIALS, clampMaterial, materialTable } from '../terrain/materials.js';
+import { DEFAULT_MATERIAL, MAX_MATERIALS, MAX_HARDNESS, clampMaterial, materialTable } from '../terrain/materials.js';
+import { MeshBVH } from 'three-mesh-bvh';
+import { shatterMesh } from './Shatter.js';
 
-import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
+import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, chunkMin, chunkAt, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
 export { CHUNK_SIZE, chunkCenter };
 const MAX_BRUSH_SCALE = 20;
 /** Properties per Manifold vertex: position xyz + uv. Every manifold the server touches uses this layout. */
@@ -316,6 +318,122 @@ export class Terrain {
         let keys = [...new Set((msg.keys || []).filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))];
         for(let key of keys) this.applyToChunk(key, brush, op);
         brush.delete();
+    }
+
+    /** Apply a brush the server built itself (world space, materials already on its faces). Takes no ownership. */
+    applyBrush(keys, brush, op) {
+        keys = [...new Set(keys.filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))];
+        for(let key of keys) this.applyToChunk(key, brush, op);
+    }
+
+    // ---- server carves that know what they cut ------------------------------------------------------------------
+
+    /** What solid lies where around a carve, before it runs: the terrain's faces within a box, in a BVH (faces on a
+     *  chunk plane are left out: those are the caps a clipped chunk closes itself with, not a surface). `ray` answers
+     *  the first face along a ray within `far`: its distance, the material a cut behind it exposes (the face's `core`:
+     *  grass is a skin over dirt, paving is laid on it) and the face's hardness (so a cobble floor resists a blast and
+     *  the dirt under it does not). Built per carve; a crater's box holds a few hundred faces. */
+    solidProbe(keys, min, max) {
+        let table = materialTable(this.world), pos = [], mats = [], cores = [];
+        for(let key of keys) {
+            let mesh = this.currentMesh(key);
+            if(!mesh) continue;
+            let P = mesh.positions, I = mesh.indices, M = mesh.materials, cm = chunkMin(key);
+            let lo = [cm.x + 1e-4, cm.y + 1e-4, cm.z + 1e-4], hi = [cm.x + CHUNK_SIZE - 1e-4, cm.y + CHUNK_SIZE - 1e-4, cm.z + CHUNK_SIZE - 1e-4];
+            let bmin = [min.x, min.y, min.z], bmax = [max.x, max.y, max.z];
+            for(let t = 0; t < I.length; t += 3) {
+                let a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3, skip = false;
+                for(let ax = 0; ax < 3 && !skip; ax++) {
+                    let va = P[a + ax], vb = P[b + ax], vc = P[c + ax];
+                    if(Math.max(va, vb, vc) < bmin[ax] || Math.min(va, vb, vc) > bmax[ax]) skip = true;
+                    else if((va < lo[ax] && vb < lo[ax] && vc < lo[ax]) || (va > hi[ax] && vb > hi[ax] && vc > hi[ax])) skip = true;
+                }
+                if(skip) continue;
+                pos.push(P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2], P[c], P[c + 1], P[c + 2]);
+                let m = M ? M[t / 3] : DEFAULT_MATERIAL, core = table[m]?.core;
+                mats.push(m); cores.push(Number.isInteger(core) && table[core] ? core : m);
+            }
+        }
+        let hardness = (m) => Math.max(0.25, Math.min(MAX_HARDNESS, table[m]?.hardness ?? 1));
+        let probe = { faces: mats.length, hardness, ray: () => null };
+        if(!mats.length) return probe;
+        let geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+        let bvh = new MeshBVH(geometry, { targetLeafSize: 8 }); // indexes the soup itself, so face.a / 3 is the face
+        let ray = new THREE.Ray();
+        probe.ray = (o, d, far) => {
+            ray.origin.set(o[0], o[1], o[2]); ray.direction.set(d[0], d[1], d[2]);
+            let hit = bvh.raycastFirst(ray, THREE.DoubleSide, 0, far);
+            if(!hit) return null;
+            let f = Math.floor(hit.face.a / 3);
+            return { t: hit.distance, material: cores[f], hardness: hardness(mats[f]) };
+        };
+        return probe;
+    }
+
+    /** Pull a brush's vertices toward `origin` where they reach into hard material: along each vertex's ray from the
+     *  origin, a brush that enters solid at t and would reach L keeps t + (L - t) / hardness. The brush must be
+     *  star-shaped around the origin (a convex brush with the origin inside is), so moving vertices along their rays
+     *  keeps it a valid solid. Takes ownership of `brush`. */
+    harden(brush, origin, probe) {
+        if(!probe.faces) return brush;
+        let m = brush.getMesh(), n = m.numProp, v = m.vertProperties, o = [origin.x, origin.y, origin.z];
+        let moved = false;
+        for(let i = 0; i < v.length; i += n) {
+            let d = [v[i] - o[0], v[i + 1] - o[1], v[i + 2] - o[2]], L = Math.hypot(d[0], d[1], d[2]);
+            if(L < 1e-6) continue;
+            d = [d[0] / L, d[1] / L, d[2] / L];
+            let hit = probe.ray(o, d, L);
+            if(!hit || hit.hardness <= 1) continue;
+            let L2 = hit.t + (L - hit.t) / hit.hardness;
+            v[i] = o[0] + d[0] * L2; v[i + 1] = o[1] + d[1] * L2; v[i + 2] = o[2] + d[2] * L2;
+            moved = true;
+        }
+        if(!moved) return brush;
+        brush.delete();
+        return new this.manifold.Manifold(m);
+    }
+
+    /** Give a brush's faces the material each one cuts into, so a crater in a castle wall is stone and the same crater
+     *  in a field is dirt: the core of the first terrain face on the way from `origin` (in air, inside the brush) to
+     *  the face, which is where that ray entered the solid. A face with nothing on the way only cuts air (its material
+     *  never shows) or rock that has no faces here (an untouched implicit rock chunk: the default material); `fallback`
+     *  otherwise. Takes ownership of `brush`. */
+    tagBrush(brush, origin, probe, fallback) {
+        let m = brush.getMesh(), { positions } = splitProps(m), tri = m.triVerts, o = [origin.x, origin.y, origin.z];
+        let materials = new Uint8Array(tri.length / 3);
+        let toward = (p) => {
+            let d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]], L = Math.hypot(d[0], d[1], d[2]);
+            if(L < 1e-6) return null;
+            return probe.ray(o, [d[0] / L, d[1] / L, d[2] / L], L);
+        };
+        for(let t = 0; t < materials.length; t++) {
+            let a = tri[t * 3] * 3, b = tri[t * 3 + 1] * 3, c = tri[t * 3 + 2] * 3;
+            let g = [(positions[a] + positions[b] + positions[c]) / 3, (positions[a + 1] + positions[b + 1] + positions[c + 1]) / 3, (positions[a + 2] + positions[b + 2] + positions[c + 2]) / 3];
+            let hit = toward(g);
+            // a big face may cut solid at a corner while its middle is in air
+            for(let k = 0; k < 3 && !hit; k++) {
+                let i = tri[t * 3 + k] * 3;
+                hit = toward([positions[i] * 0.9 + g[0] * 0.1, positions[i + 1] * 0.9 + g[1] * 0.1, positions[i + 2] * 0.9 + g[2] * 0.1]);
+            }
+            if(hit) materials[t] = hit.material;
+            else { let k = chunkAt(this.world, { x: g[0], y: g[1], z: g[2] }); materials[t] = k && !this.chunks[k] && isRockKey(this.world, k) ? DEFAULT_MATERIAL : fallback; }
+        }
+        brush.delete();
+        return this.meshToManifold(positions, new Uint32Array(tri), materials);
+    }
+
+    /** A blast's brush (world space, tagged): the crater of Shatter.js, its reach along each direction shortened by
+     *  the hardness of what it hits (a blast that meets solid at t after reaching R gets t + (R - t) / hardness
+     *  along that line). Null if the diagram came out empty or not closed (never seen in 2000 tries). */
+    blastBrush(center, R, probe, fallback) {
+        let o = [center.x, center.y, center.z];
+        let reachAt = (d) => { let hit = probe.ray(o, d, R); return hit ? hit.t + (R - hit.t) / hit.hardness : R; };
+        let mesh = shatterMesh(center, reachAt);
+        if(!mesh) return null;
+        let brush = new this.manifold.Manifold(new this.manifold.Mesh({ numProp: 3, vertProperties: mesh.positions, triVerts: mesh.indices }));
+        if(brush.isEmpty()) { brush.delete(); return null; }
+        return this.tagBrush(brush, center, probe, fallback);
     }
 
     applyToChunk(key, brush, op) {

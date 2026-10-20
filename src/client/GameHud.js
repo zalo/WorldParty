@@ -56,6 +56,8 @@ export class GameHud {
         this.feed = el('div', 'position:absolute;right:10px;top:70px;width:300px;font-size:13px;text-shadow:0 1px 2px #000;display:flex;flex-direction:column;gap:3px;', root);
         // centre flashes
         this.flash = el('div', 'position:absolute;top:36%;left:50%;transform:translateX(-50%);font-size:18px;font-weight:bold;text-shadow:0 1px 3px #000;opacity:0;transition:opacity 0.3s;white-space:nowrap;', root);
+        // under the crosshair: what the mason's box measures and costs while one is being drawn
+        this.hint = el('div', 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);font-size:13px;font-weight:bold;text-shadow:0 1px 3px #000;white-space:nowrap;', root);
         this.chargeBar = el('div', 'position:absolute;top:54%;left:50%;transform:translateX(-50%);width:120px;height:6px;background:rgba(0,0,0,0.5);border-radius:3px;display:none;', root);
         this.chargeFill = el('div', 'height:100%;width:0;background:#fc3;border-radius:3px;', this.chargeBar);
         this.vignette = el('div', 'position:absolute;inset:0;box-shadow:inset 0 0 120px 40px rgba(255,0,0,0.6);opacity:0;transition:opacity 0.2s;', root);
@@ -75,7 +77,7 @@ export class GameHud {
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
             <div>Walk into a crate to carry it and bring it to your vault: every crate there is worth 100 to your team. Every crystal you dig or blast out of the ground is worth 1. Most at the end wins. Bottom right says how far the nearest treasure is, and how far above or below you.</div>
-            <div style="margin-top:8px;opacity:0.8"><b>Tab</b> scores &nbsp; <b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason shape / physgun freeze &nbsp; <b>R</b> turn block &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
+            <div style="margin-top:8px;opacity:0.8"><b>Tab</b> scores &nbsp; <b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason wall/floor, physgun freeze &nbsp; <b>R</b> drop the mason's corner &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
         this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
         let title = el('div', 'font-weight:bold;font-size:16px;', this.votePanel); title.textContent = 'Call a vote';
@@ -106,6 +108,7 @@ export class GameHud {
         });
     }
 
+    setHint(text) { setText(this.hint, text); }
     flashText(text, ms = 1500) { if(!text) return; this.flash.textContent = text; this.flash.style.opacity = '1'; this.flashUntil = performance.now() + ms; }
     damageFlash() { this.vignette.style.opacity = '1'; this.damageUntil = performance.now() + 250; }
     whiteFlash(strength) { this.white.style.opacity = String(Math.min(0.8, strength)); this.whiteUntil = performance.now() + 90; }
@@ -153,7 +156,7 @@ export class GameHud {
             this.health.style.width = (h * 100).toFixed(0) + '%';
             this.health.style.background = h > 0.5 ? '#6c4' : h > 0.25 ? '#dc3' : '#d33';
             setText(this.carry, me.carrying ? '💰 Carrying treasure: take it to your vault! (100)' : '');
-            for(let { count } of this.slotEls) if(count) setText(count, me.build);
+            for(let { count } of this.slotEls) if(count) setText(count, Math.floor(me.build + 1e-6));
         }
         // scores and clock
         let m = ecs.get('match', 'Match');

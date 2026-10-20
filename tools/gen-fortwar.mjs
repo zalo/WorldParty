@@ -37,13 +37,22 @@ const STONE = 0, DIRT = 1, GRASS = 2, SAND = 3;
 const EXTRA = [ // textured triplanar (see src/terrain/materials.js); the team stones are one light block texture tinted.
     // The tint multiplies the texture in linear light, so a saturated colour makes the walls read as unlit whatever the
     // sun does (0x4d78c4 is 0.07/0.19/0.55 linear): keep the tints pale.
-    { name: 'Red Stone',  color: 0xe3a094, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
-    { name: 'Blue Stone', color: 0xa3bdea, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true },
-    { name: 'Wood',       color: 0x8a5a2b, texture: 'assets/textures/weathered_brown_planks.jpg', scale: 3 },
-    { name: 'Cobble',     color: 0x6f6f78, texture: 'assets/textures/cobblestone_floor_08.jpg', scale: 4 },
-    { name: 'Dark Rock',  color: 0xd8d0c8, texture: 'assets/textures/dark_rock.jpg', scale: 7, tint: true }, // the texture is lightened in the asset (README); it averaged 0.015 linear, and a tint only darkens, so the slabs at the level's edge were black in full sun
+    // `hardness` (src/terrain/materials.js): a rocket gets 1/hardness as far into it as into dirt; the walls and the
+    // vault's lining take several rockets, the wooden gate is the soft spot, the level's rock barely moves
+    // `core`: what a blast or a dig into it exposes (Terrain.tagBrush). Cut blocks show broken rock in the same tint:
+    // the block texture is mapped in world space, so a crater lined with it continued the wall's courses across the
+    // hole and read as glass. The cobbles are paving on dirt (the courtyard, the bridge): a hole through them is dirt,
+    // not a shaft of cobble all the way down. The broken kinds come last so the earlier ids (stored in the chunks) stay put.
+    { name: 'Red Stone',  color: 0xe3a094, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true, hardness: 3, core: 13 },
+    { name: 'Blue Stone', color: 0xa3bdea, texture: 'assets/textures/large_sandstone_blocks.jpg', scale: 5, tint: true, hardness: 3, core: 14 },
+    { name: 'Wood',       color: 0x8a5a2b, texture: 'assets/textures/weathered_brown_planks.jpg', scale: 3, hardness: 1.5 },
+    { name: 'Cobble',     color: 0x6f6f78, texture: 'assets/textures/cobblestone_floor_08.jpg', scale: 4, hardness: 3, core: DIRT },
+    { name: 'Dark Rock',  color: 0xd8d0c8, texture: 'assets/textures/dark_rock.jpg', scale: 7, tint: true, hardness: 5 },
+    { name: 'Red Stone (broken)',  color: 0xe8a898, texture: 'assets/textures/dark_rock.jpg', scale: 2.5, tint: true, hardness: 3 },
+    { name: 'Blue Stone (broken)', color: 0xa8c0ec, texture: 'assets/textures/dark_rock.jpg', scale: 2.5, tint: true, hardness: 3 }, // the texture is lightened in the asset (README); it averaged 0.015 linear, and a tint only darkens, so the slabs at the level's edge were black in full sun
 ];
 const RED_STONE = MATERIALS.length, BLUE_STONE = RED_STONE + 1, WOOD = RED_STONE + 2, COBBLE = RED_STONE + 3, DARK = RED_STONE + 4;
+if(EXTRA[0].core !== RED_STONE + 5 || EXTRA[1].core !== RED_STONE + 6) throw new Error('core ids out of step with the material list');
 
 // ---- manifold -----------------------------------------------------------------
 const wasm = readFileSync(resolve(dirname(new URL(import.meta.url).pathname), '../assets/manifold-3d/manifold.wasm'));
