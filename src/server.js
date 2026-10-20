@@ -42,6 +42,10 @@ function capsuleSoup(length) {
 }
 const CUBE_SOUP = encodeSoup(new THREE.BoxGeometry(1, 1, 1).toNonIndexed().attributes.position.array);
 
+const RESUME_MS = 60000;            // a dropped connection that comes back within this long carries on as the same player
+const PERF_KEEP = 300;              // client perf reports kept for GET .../perf (see recordPerf)
+/** What a client perf report may carry (src/client/PerfReport.js): n = number, s = short string, b = boolean. */
+const PERF_FIELDS = { fps: 'n', frameMax: 'n', hitches: 'n', ping: 'n', pingMax: 'n', reconnects: 'n', spikes: 'n', spikeMax: 'n', holds: 'n', holdMs: 'n', deltaMiss: 'n', teleports: 'n', locks: 'n', raw: 'b', backend: 's', gpu: 's', client: 's', size: 's', dpr: 'n', mobile: 'b', discord: 'b' };
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
 const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
@@ -78,7 +82,9 @@ export class WorldParty extends Server {
     this.readyPromise = new Promise(res => { this.resolveReady = res; });
     this.globalPlayerCount = 0;
     this.tickCount = 0;
-    this.serverTickMs = 0;
+    this.serverTickMs = 0;          // how long the last tick took (only meaningful in Node: on Cloudflare the clock stands still during a tick)
+    this.serverGapMs = 0;           // the longest gap between two tick starts over the last second, sent to clients: how late the server runs
+    this.gapWindow = 0; this.gapTicks = 0;
     this.anyAwake = false;
 
     // Persistence queue: entity ids whose persisted components changed
@@ -91,6 +97,9 @@ export class WorldParty extends Server {
 
     this.physics.attach(this.world);
     this.conns = new Map();         // connection id -> Connection (for messages to one player)
+    this.lingering = new Map();     // connection id -> { Player, Transform, round, at }: a dropped player, resumed if the id reconnects within RESUME_MS
+    this.perfLog = null;            // recent client perf reports (loaded from storage on first use)
+    this.tickGapMax = 0;            // longest wall-clock gap between two ticks since the last perf report (the event loop was busy)
     this.game = new Game(this);     // Fort War rules; active when the world config carries `game`
     this.interval = setInterval(() => this.tick(), TICK_MS);
   }
@@ -367,26 +376,36 @@ export class WorldParty extends Server {
 
   /** @param {Connection} conn @param {ConnectionContext} ctx */
   onConnect(conn, ctx) {
-    this.globalPlayerCount += 1;
     // A client reconnecting with the same id before its old socket closed must not fail with "entity exists"
-    if(this.world.has(conn.id)) this.onDisconnect(conn);
+    if(this.world.has(conn.id)) this.onDisconnect(this.conns.get(conn.id) || conn);
     this.conns.set(conn.id, conn);
-    this.world.create(conn.id, {
+    // A dropped socket comes back with the same id (PartySocket keeps it): the player carries on where they were, same
+    // team and score, no spawn teleport (that snapped a player back to their spawn on every network blip and deploy)
+    let resume = this.lingering.get(conn.id);
+    this.lingering.delete(conn.id);
+    if(resume && Date.now() - resume.at > RESUME_MS) resume = null;
+    if(!resume) this.globalPlayerCount += 1;
+    this.world.create(conn.id, resume ? { Player: resume.Player, Transform: resume.Transform } : {
       Player: Player({ name: "Player " + this.globalPlayerCount, color: PLAYER_COLORS[this.globalPlayerCount % PLAYER_COLORS.length] }),
       Transform: Transform(),
     });
     conn.send(JSON.stringify(this.fullUpdate()));
-    this.game.onConnect(conn.id); // team and spawn point follow in the next partial update
-    console.log(`Connected: ${conn.id} room: ${this.name} url: ${new URL(ctx.request.url).pathname}`);
+    if(resume) this.game.onResume(conn.id, resume.round);
+    else this.game.onConnect(conn.id); // team and spawn point follow in the next partial update
+    console.log(`${resume ? `Resumed after ${((Date.now() - resume.at) / 1000).toFixed(1)} s` : 'Connected'}: ${conn.id} room: ${this.name} url: ${new URL(ctx.request.url).pathname}`);
   }
 
   /** @param {Connection} conn */
   onDisconnect(conn) {
+    if(this.conns.has(conn.id) && this.conns.get(conn.id) !== conn) return; // a replaced socket closing late: its player is back on the new one
     this.conns.delete(conn.id);
     if(!this.world.has(conn.id)) return;
-    // Drop anything this player was holding, then the player itself
+    // Drop anything this player was holding, then the player itself (kept aside a while in case the socket comes back)
     this.game.onDisconnect(conn.id);
     for(let [id, g] of this.world.each('Grabbed')) if(g.by === conn.id) this.world.remove(id, 'Grabbed');
+    let now = Date.now();
+    for(let [id, l] of this.lingering) if(now - l.at > RESUME_MS) this.lingering.delete(id);
+    this.lingering.set(conn.id, { Player: structuredClone(this.world.get(conn.id, 'Player')), Transform: structuredClone(this.world.get(conn.id, 'Transform')), round: this.game.round(), at: now });
     this.world.destroy(conn.id);
     this.persist().catch(e => console.error('persist failed: ' + e.message));
   }
@@ -398,6 +417,12 @@ export class WorldParty extends Server {
   tick() {
     if(!this.ready) return;
     let start = Date.now();
+    // the clock does advance between events, so the spacing of ticks shows a busy event loop (a carve, a settle)
+    let gap = this.lastTickAt ? start - this.lastTickAt : 0;
+    this.lastTickAt = start;
+    this.tickGapMax = Math.max(this.tickGapMax, gap);
+    this.gapWindow = Math.max(this.gapWindow, gap);
+    if(++this.gapTicks >= 30) { this.serverGapMs = this.gapWindow; this.gapWindow = 0; this.gapTicks = 0; }
     let players = this.world.query('Player').size;
 
     // Nothing to simulate: no players and everything asleep
@@ -420,7 +445,7 @@ export class WorldParty extends Server {
         let { entities, removed } = this.world.takeDirty();
         let d = this.chunkDelta || {};
         this.chunkDelta = null;
-        this.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: d.chunks, rock: d.rock, cull: d.cull, serverTickMs: this.serverTickMs }));
+        this.broadcast(JSON.stringify({ type: "partialupdate", entities, removed, chunks: d.chunks, rock: d.rock, cull: d.cull, serverTickMs: this.serverTickMs, serverGapMs: this.serverGapMs }));
       }
     }
 
@@ -435,7 +460,7 @@ export class WorldParty extends Server {
   fullUpdate(withMeshes = true) {
     let entities = withMeshes ? this.world.serialize()
       : this.world.serialize((id, name) => name !== 'FragmentMesh' && !(name === 'Transform' && this.world.has(id, 'GlowRock') && !this.world.has(id, 'RigidBody'))); // nor where an embedded glow rock lies: it does not move
-    return { type: "fullupdate", entities, removed: [], world: this.terrain.world, ...this.chunkMaps(), serverTickMs: this.serverTickMs };
+    return { type: "fullupdate", entities, removed: [], world: this.terrain.world, ...this.chunkMaps(), serverTickMs: this.serverTickMs, serverGapMs: this.serverGapMs };
   }
 
   // ---- persistence (per-entity / per-chunk keys) --------------------------
@@ -610,10 +635,34 @@ export class WorldParty extends Server {
     console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms${rocks ? `; glow rocks: ${rocks.made} new, ${rocks.freed} freed, ${rocks.updated} updated, ${rocks.sky} under the sky (${rocks.measured} measured, ${rocks.rays} rays, ${rocks.bvhBuilds} BVHs) ${rocks.ms}ms` : ''}`);
   }
 
-  /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty). */
+  /** A client's perf report (src/client/PerfReport.js, every 20 s): logged, and the last PERF_KEEP kept in storage for
+   *  GET .../perf, so a player's lag can be looked at after the fact. Only the whitelisted numbers and short strings;
+   *  no name, a connection id prefix ties one player's reports together. The server adds its longest tick gap. */
+  async recordPerf(id, data) {
+    let r = { t: Date.now(), room: this.name, id: String(id).slice(0, 6), tickGapMax: this.tickGapMax, players: this.conns.size };
+    this.tickGapMax = 0;
+    for(let [k, type] of Object.entries(PERF_FIELDS)) {
+      let v = data[k];
+      if(type === 'n' && typeof v === 'number' && Number.isFinite(v)) r[k] = Math.round(v * 10) / 10;
+      else if(type === 's' && typeof v === 'string') r[k] = v.slice(0, 80);
+      else if(type === 'b' && typeof v === 'boolean') r[k] = v;
+    }
+    console.log('perf ' + JSON.stringify(r));
+    if(!this.perfLog) this.perfLog = (await this.ctx.storage.get('perf')) || [];
+    this.perfLog.push(r);
+    if(this.perfLog.length > PERF_KEEP) this.perfLog.splice(0, this.perfLog.length - PERF_KEEP);
+    await this.ctx.storage.put('perf', this.perfLog);
+  }
+
+  /** HTTP: GET /parties/main/<room>/chunk/<x,y,z>?v=<version> -> chunk bytes (204 if empty); GET .../perf -> the
+   *  recent perf reports (recordPerf). */
   async onRequest(req) {
     await this.readyPromise;
     let url = new URL(req.url);
+    if(req.method === "GET" && url.pathname.endsWith('/perf')) {
+      if(!this.perfLog) this.perfLog = (await this.ctx.storage.get('perf')) || [];
+      return new Response(JSON.stringify(this.perfLog), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+    }
     let m = /\/chunk\/(-?\d+,-?\d+,-?\d+)$/.exec(decodeURIComponent(url.pathname));
     if((req.method !== "GET" && req.method !== "HEAD") || !m) return new Response("Not found", { status: 404 });
     let key = m[1];
@@ -757,6 +806,8 @@ export class WorldParty extends Server {
     let data; try { data = JSON.parse(message); } catch { return; }
     let w = this.world;
     let me = sender.id;
+    if(data.type === 'ping') { sender.send(JSON.stringify({ type: 'pong', t: data.t })); return; } // the client's ping readout
+    if(data.type === 'perf') { await this.recordPerf(me, data); return; }
     if(await this.game.onMessage(me, data)) return; // Fort War messages, and sandbox ones a match forbids
 
     switch(data.type) {

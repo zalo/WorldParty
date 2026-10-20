@@ -7,6 +7,7 @@ import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockCont
 import nipplejs from '../assets/nipplejs/src/index.js';
 
 const OFF_GROUND_GRACE = 0.05; // Coyote time: seconds after leaving ground where jump still works
+const SPIKE_PX = 600; // a mouse movement this large in one event (69 degrees of turn) is no hand's: dropped (filterPointerSpikes)
 
 export class PlayerController extends THREE.Group {
     constructor(camera, simulationParams) {
@@ -35,7 +36,8 @@ export class PlayerController extends THREE.Group {
             });
         } else {
             this.controls = new PointerLockControls(camera, document.body);
-            document.getElementById('appbody').addEventListener( 'click', () => { this.controls.lock(); });
+            this.filterPointerSpikes(this.controls);
+            document.getElementById('appbody').addEventListener( 'click', () => this.lockPointer());
 
             const crosshairs = document.getElementById('crosshairs');
             this.controls.addEventListener('lock', () => {
@@ -45,6 +47,10 @@ export class PlayerController extends THREE.Group {
                 crosshairs.style.display = 'none';
             });
         }
+
+        // for the perf report (src/client/PerfReport.js): mouse jumps dropped, pointer locks, time held still for terrain
+        this.stats = { spikes: 0, spikeMax: 0, locks: 0, holds: 0, holdMs: 0 };
+        this.rawInput = null; // raw mouse input: null untried, then whether the platform granted it
 
         this.name = 'PlayerController';
         this.playerIsOnGround = false;
@@ -105,6 +111,35 @@ export class PlayerController extends THREE.Group {
         this.playerMesh.castShadow = true;
         this.playerMesh.material.shadowSide = 2;
         this.add(this.playerMesh);
+    }
+
+    /** Pointer lock with raw mouse input where the platform has it (`unadjustedMovement`). With the OS-adjusted input
+     *  Chrome on Windows, Discord's desktop app included, now and then reports a huge bogus movement just after it warps
+     *  the hidden cursor back to the centre, and the view snaps sideways (walking briefly goes the wrong way with it).
+     *  A platform without raw input refuses the request: then the plain lock, and that is remembered. Raw input also
+     *  skips the OS's mouse acceleration. */
+    lockPointer() {
+        let el = this.controls.domElement;
+        this.stats.locks++;
+        if(this.rawInput === false) { el.requestPointerLock(); return; }
+        let p = null;
+        try { p = el.requestPointerLock({ unadjustedMovement: true }); } catch(e) { this.rawInput = false; el.requestPointerLock(); return; }
+        if(p && typeof p.then === 'function') p.then(() => { this.rawInput = true; }, (e) => { if(e?.name === 'NotSupportedError') { this.rawInput = false; el.requestPointerLock(); } });
+    }
+
+    /** Drop mouse events that move further than any hand does in one (SPIKE_PX), the bogus jumps above if any get
+     *  through, and the first event after a lock, which can carry the cursor's trip to the centre. */
+    filterPointerSpikes(controls) {
+        let doc = controls.domElement.ownerDocument, inner = controls._onMouseMove, fresh = true;
+        doc.removeEventListener('mousemove', inner);
+        controls._onMouseMove = (e) => {
+            if(!controls.isLocked) { fresh = true; return; }
+            let size = Math.max(Math.abs(e.movementX || 0), Math.abs(e.movementY || 0));
+            if(size > SPIKE_PX) { this.stats.spikes++; this.stats.spikeMax = Math.max(this.stats.spikeMax, size); return; }
+            if(fresh) { fresh = false; if(size > 50) return; }
+            inner(e);
+        };
+        doc.addEventListener('mousemove', controls._onMouseMove);
     }
 
     reset() {
@@ -205,9 +240,10 @@ export class PlayerController extends THREE.Group {
         if (this.terrain && this.terrain.pending.size > 0) {
             let near = new THREE.Box3().setFromCenterAndSize(this.position, new THREE.Vector3(4, 8, 4));
             for (let key of this.terrain.pending.keys()) {
-                if (near.intersectsBox(this.terrain.bbox(key))) { this.playerVelocity.set(0, 0, 0); this.camera.position.copy(this.position); return; }
+                if (near.intersectsBox(this.terrain.bbox(key))) { this.playerVelocity.set(0, 0, 0); this.camera.position.copy(this.position); if(!this.holding) this.stats.holds++; this.holding = true; this.stats.holdMs += delta * 1000; return; }
             }
         }
+        this.holding = false;
 
         if(this.frozen) { this.walkMovement.set(0, 0); this.jumpRequested = false; }
 

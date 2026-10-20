@@ -2,17 +2,17 @@
 <html lang="en"><head><meta charset="utf-8"><title>Undermine: Privacy Policy</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.55;color:#222}h1{font-size:28px}h2{font-size:20px;margin-top:28px}a{color:#2a62b8}</style></head>
 <body>
 <h1>Undermine: Privacy Policy</h1>
-<p>Last updated: 18 October 2026</p>
+<p>Last updated: 19 October 2026</p>
 <p>This policy describes what Undermine ("the game", "we") collects when you play at <a href="https://worldparty.makeshifted.workers.dev">worldparty.makeshifted.workers.dev</a> or as a Discord Activity, and what happens to it. The short version: the game keeps the shared world of each room, shows your name to the other players while you are connected, and stores nothing else about you.</p>
 <h2>What we collect</h2>
 <ul>
 <li><b>Discord account details.</b> When you launch the game as a Discord Activity and allow it to identify you (Discord's <code>identify</code> permission), Discord tells the game your user id, username, display name and avatar. The game uses your display name (or username) as your player name so other players can see who they are playing with. The name is held in the room's memory only while you are connected and is not written to storage. The Discord access token is exchanged on our server and returned to your own client; the server does not keep it. No other Discord data is requested, and nothing is posted to Discord on your behalf.</li>
 <li><b>Gameplay data.</b> While you play, your client sends the room your position, your actions (firing, digging, building, votes) and chat messages. Positions and actions are relayed to the other players in the room and used to run the match. Chat messages are relayed to the players present and are not stored. The shared world itself (terrain, built structures, props, supplies and the match state) is stored per room so the room survives restarts; it is not linked to any account.</li>
-<li><b>Technical data.</b> Our hosting provider, Cloudflare, processes the connection (IP address, browser type, request logs) to deliver the service and protect it from abuse, and keeps short-lived operational logs. We use these logs only to debug the service.</li>
+<li><b>Technical data.</b> Our hosting provider, Cloudflare, processes the connection (IP address, browser type, request logs) to deliver the service and protect it from abuse, and keeps short-lived operational logs. The game client also reports performance figures to the room every 20 seconds (frame rate, ping, reconnections, graphics hardware, browser and app version, screen size; no name or account), which keeps the most recent few hundred. We use these logs and figures only to debug the service.</li>
 </ul>
 <p>The game does not use cookies, advertising or analytics trackers, and does not sell or share personal data with anyone.</p>
 <h2>Where it is kept</h2>
-<p>Room data is stored in Cloudflare Durable Objects. Rooms may be reset or deleted at any time, by the players (a vote) or by us. Player names and connection details are discarded when you disconnect.</p>
+<p>Room data is stored in Cloudflare Durable Objects. Rooms may be reset or deleted at any time, by the players (a vote) or by us. Player names and connection details are discarded within a minute of disconnecting (a player whose connection drops and comes back within that minute carries on where they were).</p>
 <h2>Your choices</h2>
 <ul>
 <li>You can decline the Discord sign-in: the game still works and you appear under a generic name such as "Player 3".</li>

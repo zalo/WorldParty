@@ -77,6 +77,25 @@ export class Game {
 
     onConnect(id) { if(this.active) this.join(id); }
 
+    /** The current round, for a dropped player kept aside by the server (onResume). */
+    round() { return this.world.get(MATCH_ID, 'Match')?.round ?? null; }
+
+    /** A dropped connection came back in time and its player was restored as it was: no spawn, same team. If a round
+     *  began meanwhile it starts that round like everyone else did (fresh stats, a spawn). Its carried supply was
+     *  dropped when it left (onDisconnect). */
+    onResume(id, round) {
+        if(!this.active) return;
+        let w = this.world, p = w.get(id, 'Player');
+        if(!p || !p.team) { this.join(id); return; }
+        if(round !== this.round()) {
+            w.set(id, 'Player', { kills: 0, deaths: 0, score: 0, carries: 0, smuggles: 0, blasts: 0, crystals: 0 });
+            this.join(id, p.team);
+            return;
+        }
+        this.cooldowns.set(id, {});
+        this.lastActive.set(id, Date.now());
+    }
+
     onDisconnect(id) {
         let p = this.world.get(id, 'Player');
         if(p && p.carrying) this.dropSupply(p.carrying, id, Date.now());

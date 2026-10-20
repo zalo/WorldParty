@@ -29,6 +29,7 @@ import { WeldTool } from './tools/WeldTool.js';
 import { HingeTool } from './tools/HingeTool.js';
 import { SpawnMenu } from './ui/SpawnMenu.js';
 import { GameClient } from './client/GameClient.js';
+import { PerfReport } from './client/PerfReport.js';
 
 
 /** Client entry: rendering world, local player, terrain mirror, ECS mirror of server entities, tools. */
@@ -69,6 +70,8 @@ export default class Main {
         this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
+        let opens = 0;
+        this.conn.addEventListener("open", () => { if(opens++) this.perf?.count('reconnects'); });
         // every (re)connection is a new server-side player: name it after the Discord user each time
         if(this.discord?.name) this.conn.addEventListener("open", () => this.conn.send(JSON.stringify({ type: "name", name: this.discord.name })));
         // ?gravity=<m/s²> sets the room's body gravity (persisted with the world config; see src/gravity.js)
@@ -184,6 +187,7 @@ export default class Main {
 
         this.frameNum = 0;
         this.lastUpdate = 0;
+        this.perf = new PerfReport(this); // frame times, ping and reconnects for the room's perf log, and the ping readout
         this.constructorFinished = true;
     }
 
@@ -338,7 +342,7 @@ export default class Main {
                 let t0 = performance.now();
                 let applied = frame.delta ? this.terrain.applyDelta(frame.key, frame.version, frame.baseVersion, frame.bytes) : (this.terrain.setChunk(frame.key, frame.bytes, frame.version), true);
                 let ms = performance.now() - t0;
-                if(!applied) console.log(`chunk ${frame.key}: delta against ${frame.baseVersion} not applicable (holding ${this.terrain.versions.get(frame.key)}), waiting for a full version`);
+                if(!applied) { console.log(`chunk ${frame.key}: delta against ${frame.baseVersion} not applicable (holding ${this.terrain.versions.get(frame.key)}), waiting for a full version`); this.perf?.count('deltaMiss'); }
                 else if(ms > 30 || frame.delta) console.log(`chunk ${frame.key}: ${(frame.bytes ? frame.bytes.length / 1024 : 0).toFixed(0)} KB ${frame.delta ? 'delta' : 'full'} applied in ${ms.toFixed(0)} ms`);
             }
             return;
@@ -346,11 +350,13 @@ export default class Main {
         if(typeof event.data !== 'string' || !event.data.startsWith("{")) return;
         let data = JSON.parse(event.data);
         if(data.type !== "fullupdate" && data.type !== "partialupdate") {
-            if(this.game) this.game.onMessage(data);
+            if(data.type === 'pong') this.perf?.pong(data);
+            else if(this.game) this.game.onMessage(data);
             else if(data.type === 'chat') console.log(`chat ${data.sender}: ${data.message}`);
             return;
         }
         if(data.serverTickMs !== undefined) this.serverTickMs = data.serverTickMs;
+        if(data.serverGapMs !== undefined) this.serverGapMs = data.serverGapMs;
 
         let full = data.type === "fullupdate";
         if(data.chunks || data.rock || data.cull || full) this.terrain.applyUpdate(data, full); // world config first: the game client wants to exist before its entities arrive
@@ -418,7 +424,12 @@ export default class Main {
             this.serverTickDisplay.style.cssText = 'position:fixed;top:0;right:0;padding:4px 8px;background:rgba(0,0,0,0.7);color:#0f0;font:12px monospace;z-index:10000;';
             document.body.appendChild(this.serverTickDisplay);
         }
-        this.serverTickDisplay.textContent = 'Server: ' + this.serverTickMs + 'ms';
+        this.perf.frame(this.deltaTime);
+        // the round trip to the room (PerfReport's ping), and the server's lateness when its ticks run over (the 'Server:
+        // 0ms' this replaced was the tick's own duration, which on Cloudflare always reads 0)
+        let ping = this.perf.ping !== null ? `ping ${Math.round(this.perf.ping)} ms` : 'ping …';
+        let late = (this.serverGapMs || 0) > 60 ? ` · server lag ${Math.round(this.serverGapMs)} ms` : '';
+        if(this.serverTickDisplay.textContent !== ping + late) this.serverTickDisplay.textContent = ping + late;
         this.frameNum++;
     }
 

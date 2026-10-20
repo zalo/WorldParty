@@ -74,6 +74,10 @@ export class GameClient {
         });
         ecs.on('destroy', (id) => { this.heard.delete(id); this.fuseBlink.delete(id); this.fusePose.delete(id); });
 
+        // A reconnect the server could not resume (the room restarted, as on a deploy: its memory of dropped players is
+        // gone) makes us a new player with a spawn; we are still where we stand, so keep that (movement is ours) and ask
+        // for our old team back. GameClient exists from the first full update on, so every `open` it sees is a reconnect.
+        main.conn.addEventListener('open', () => { this.reopened = { at: performance.now(), team: this.team, alive: !this.dead }; });
         window.addEventListener('keydown', (e) => this.onKey(e));
         this.hud.chat.addEventListener('keydown', (e) => {
             e.stopPropagation();
@@ -138,12 +142,19 @@ export class GameClient {
         let main = this.main;
         switch(data.type) {
             case 'spawn':
-            case 'respawn':
+            case 'respawn': {
+                let r = this.reopened;
+                if(data.type === 'spawn' && r && r.alive && r.team && performance.now() - r.at < 5000) {
+                    if(data.team !== r.team) main.conn.send(JSON.stringify({ type: 'jointeam', team: r.team }));
+                    return true;
+                }
+                main.perf?.count('teleports');
                 main.player.teleport(data.position);
                 main.player.frozen = false;
                 this.hud.flashText(data.type === 'spawn' ? `You are on ${this.config.teams[data.team]?.name || data.team}. Find the Treasure.` : '', 3000);
                 this.sfx.respawn();
                 return true;
+            }
             case 'hit':
                 if(data.impulse) main.player.knock(data.impulse);
                 main.player.shake = Math.max(main.player.shake, Math.min(0.6, data.damage / 60));
