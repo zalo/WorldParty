@@ -226,16 +226,20 @@ export class GICore {
         let V = { pos: [], nrm: [], uv: [], cls: [], rec: [] }, index = [], local = new Map();
         let coarseRec = new Int32Array(n * 3).fill(-1);
         let recKeyOf = (c) => posKey(c[0], c[1], c[2]) + '|' + nrmKey(c[3], c[4], c[5]);
+        // no record without a direction: a zero-area triangle's normal is zero, and so is the mean of two opposite ones
+        // (a sheet's edge). On the GPU its rays had a NaN direction, which no BVH box rejects: each walked the whole tree,
+        // 16 ms for one ray on an RTX 4090, and a pass waits for its slowest ray (gathers of 15 to 90 ms per frame)
+        let hasNormal = (c) => c[3] * c[3] + c[4] * c[4] + c[5] * c[5] > 1e-8;
         // corner: [x, y, z, nx, ny, nz, u, v, rec]
         let corner = (t, k, plane) => {
             let o = t * 9 + k * 3, c = [pos[o], pos[o + 1], pos[o + 2], nrm[o], nrm[o + 1], nrm[o + 2], uv ? uv[t * 6 + k * 2] : 0, uv ? uv[t * 6 + k * 2 + 1] : 0, -1];
-            if(!plane) c[8] = R.find(recKeyOf(c), c[0], c[1], c[2], c[3], c[4], c[5]);
+            if(!plane && hasNormal(c)) c[8] = R.find(recKeyOf(c), c[0], c[1], c[2], c[3], c[4], c[5]);
             return c;
         };
         let mid = (a, b) => {
             let nx = a[3] + b[3], ny = a[4] + b[4], nz = a[5] + b[5], l = Math.hypot(nx, ny, nz) || 1;
             let c = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5, nx / l, ny / l, nz / l, (a[6] + b[6]) * 0.5, (a[7] + b[7]) * 0.5, -1];
-            c[8] = R.find(recKeyOf(c), c[0], c[1], c[2], c[3], c[4], c[5], a[8], b[8]);
+            if(hasNormal(c)) c[8] = R.find(recKeyOf(c), c[0], c[1], c[2], c[3], c[4], c[5], a[8], b[8]);
             return c;
         };
         let split = (a, b) => {

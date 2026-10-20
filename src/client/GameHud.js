@@ -3,6 +3,9 @@
  *  and the vote panel (V). The only instruction is "Find the Treasure." */
 import { WEAPONS, SUPPLY, MATCH_OVER_MS, VOTE } from '../game/rules.js';
 
+// the HUD updates every frame: write only what changed (a same-text write still invalidates layout and paint)
+const setText = (el, text) => { text = String(text); if(el.textContent !== text) el.textContent = text; };
+
 const FONT = "font-family: 'Segoe UI', system-ui, sans-serif;";
 const el = (tag, css, parent = document.body) => { let e = document.createElement(tag); e.style.cssText = css; parent.appendChild(e); return e; };
 
@@ -45,7 +48,7 @@ export class GameHud {
         this.carry = el('div', 'font-size:16px;font-weight:bold;color:#ffc830;', right);
         let task = el('div', 'display:flex;align-items:center;justify-content:flex-end;gap:10px;font-size:18px;font-weight:bold;', right);
         task.appendChild(document.createTextNode('Find the Treasure.'));
-        this.light = el('div', 'width:16px;height:16px;border-radius:50%;background:#334;box-shadow:0 0 4px #000;transition:background 0.25s;', task);
+        this.light = el('div', 'width:16px;height:16px;border-radius:50%;background:#334;box-shadow:0 0 4px #000;', task);
         this.lightOn = 0; this.nextBeep = 0;
         // right: event feed
         this.feed = el('div', 'position:absolute;right:10px;top:70px;width:300px;font-size:13px;text-shadow:0 1px 2px #000;display:flex;flex-direction:column;gap:3px;', root);
@@ -96,6 +99,12 @@ export class GameHud {
         });
     }
 
+    setLight(background, shadow) {
+        if(this.lightKey === background + shadow) return;
+        this.lightKey = background + shadow;
+        this.light.style.background = background; this.light.style.boxShadow = shadow;
+    }
+
     flashText(text, ms = 1500) { if(!text) return; this.flash.textContent = text; this.flash.style.opacity = '1'; this.flashUntil = performance.now() + ms; }
     damageFlash() { this.vignette.style.opacity = '1'; this.damageUntil = performance.now() + 250; }
     whiteFlash(strength) { this.white.style.opacity = String(Math.min(0.8, strength)); this.whiteUntil = performance.now() + 90; }
@@ -116,15 +125,15 @@ export class GameHud {
         let g = this.game, me = g.me, now = performance.now(), ecs = this.main.ecs;
         if(me) {
             let t = g.config.teams[me.team];
-            this.team.textContent = t ? `${t.name} team · ${me.name}` : me.name;
+            setText(this.team, t ? `${t.name} team · ${me.name}` : me.name);
             this.team.style.color = t ? t.color : '#fff';
             let h = Math.max(0, me.health) / 100;
             this.health.style.width = (h * 100).toFixed(0) + '%';
             this.health.style.background = h > 0.5 ? '#6c4' : h > 0.25 ? '#dc3' : '#d33';
-            this.stats.textContent = `stone ${me.build}/${WEAPONS.mason.budget}`;
+            setText(this.stats, `stone ${me.build}/${WEAPONS.mason.budget}`);
             let sound = g.sfx.muted ? '🔇 M' : '🔊 M';
             if(this.sound.textContent !== sound) this.sound.textContent = sound;
-            this.carry.textContent = me.carrying ? '💰 Carrying treasure: take it to your vault! (100)' : '';
+            setText(this.carry, me.carrying ? '💰 Carrying treasure: take it to your vault! (100)' : '');
         }
         // scores and clock
         let m = ecs.get('match', 'Match');
@@ -132,12 +141,12 @@ export class GameHud {
             if(m !== this.lastMatch || m.remainingMs !== this.lastRemaining) { this.lastMatch = m; this.lastRemaining = m.remainingMs; this.matchAt = now; }
             let remaining = m.phase === 'live' ? Math.max(0, m.remainingMs - (now - this.matchAt)) : 0;
             let s = Math.ceil(remaining / 1000);
-            this.clock.textContent = m.phase === 'live' ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : m.phase === 'over' ? 'ROUND OVER' : 'resetting';
-            this.scoreRed.textContent = m.scores.red; this.scoreRed.style.color = g.teamColor('red');
-            this.scoreBlue.textContent = m.scores.blue; this.scoreBlue.style.color = g.teamColor('blue');
-            this.round.textContent = `round ${m.round}`;
+            setText(this.clock, m.phase === 'live' ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : m.phase === 'over' ? 'ROUND OVER' : 'resetting');
+            setText(this.scoreRed, m.scores.red); this.scoreRed.style.color = g.teamColor('red');
+            setText(this.scoreBlue, m.scores.blue); this.scoreBlue.style.color = g.teamColor('blue');
+            setText(this.round, `round ${m.round}`);
             let v = m.vote;
-            this.voteLine.textContent = v ? `Vote: ${VOTE.actions[v.action] || v.action} ${v.count}/${v.needed} · press V` : '';
+            setText(this.voteLine, v ? `Vote: ${VOTE.actions[v.action] || v.action} ${v.count}/${v.needed} · press V` : '');
             let over = m.phase === 'over' || m.phase === 'resetting';
             this.over.style.display = over ? 'flex' : 'none';
             if(over) {
@@ -182,10 +191,10 @@ export class GameHud {
             let period = 1800 - 1600 * near * near; // slow blue blink far away, a fast red flutter on top of it
             if(now >= this.nextBeep) { this.nextBeep = now + period; this.lightOn = now; this.game.sfx.beep(near); }
             let on = now - this.lightOn < Math.min(140, period * 0.5);
-            let hue = 215 - 215 * near, l = on ? 65 : 28;
-            this.light.style.background = `hsl(${hue.toFixed(0)},90%,${l}%)`;
-            this.light.style.boxShadow = on ? `0 0 ${(6 + near * 14).toFixed(0)}px hsl(${hue.toFixed(0)},90%,60%)` : '0 0 4px #000';
-        } else if(this.light.style.background !== 'rgb(51, 51, 68)') { this.light.style.background = '#334'; this.light.style.boxShadow = '0 0 4px #000'; this.nextBeep = 0; }
+            let hue = (215 - 215 * near).toFixed(0), l = on ? 65 : 28;
+            // only when it changes: the style was written every frame under a CSS transition, which restarted it each time
+            this.setLight(`hsl(${hue},90%,${l}%)`, on ? `0 0 ${(6 + near * 14).toFixed(0)}px hsl(${hue},90%,60%)` : '0 0 4px #000');
+        } else { this.setLight('#334', '0 0 4px #000'); this.nextBeep = 0; }
         // fades
         if(this.flashUntil && now > this.flashUntil) { this.flash.style.opacity = '0'; this.flashUntil = 0; }
         if(this.damageUntil && now > this.damageUntil) { this.vignette.style.opacity = '0'; this.damageUntil = 0; }

@@ -67,6 +67,11 @@ class ProbeGridNode extends LightProbeGridNode {
  *  48-view ArrayCamera, every queued run in one bake call) unless `?probebake=cube` asks for r186's (a CubeCamera per
  *  probe: six renders and a submit each, and a bake call per run). */
 const BATCHED = typeof location === 'undefined' || new URLSearchParams(location.search).get('probebake') !== 'cube';
+/** Probes baked in one frame at most. The budget above is CPU time, which the batched capture made small (64 probes
+ *  in 2.3 ms), so it let the GPU take 64 probes a frame (5 ms on an RTX 4090 against ~4 ms for the whole frame; a
+ *  slower GPU or a 240 Hz display drops frames on every rebake after a dig). Eight is one batched render: ~1 ms there,
+ *  the whole grid in ~380 frames. The CubeCamera capture is CPU bound, so its own budget decides. */
+const MAX_PER_FRAME = BATCHED ? 8 : 32;
 const LightProbeGrid = BATCHED ? BatchedGrid : CubeCameraGrid;
 
 const AXES = [ [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1] ].map(a => new THREE.Vector3(...a));
@@ -304,7 +309,7 @@ export class ProbeLighting {
         if(this.skipFrames > 0) { this.skipFrames--; return; }
         if(this.lastBakeMs !== undefined) {
             if(this.lastBakeMs > this.budgetMs * 1.5) this.perFrame = Math.max(1, Math.floor(this.perFrame / 2));
-            else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(BATCHED ? 64 : 32, this.perFrame + 1);
+            else if(this.lastBakeMs < this.budgetMs * 0.5) this.perFrame = Math.min(MAX_PER_FRAME, this.perFrame + 1);
         }
         let take = this.nearestDirty(camera, this.perFrame).sort((a, b) => a - b);
         for(let i of take) this.dirty.delete(i);

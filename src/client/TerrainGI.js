@@ -148,6 +148,8 @@ export class TerrainGI {
             fn giSample( id: u32, n0: u32, sun: vec4f, sunE: vec3f, skyZ: vec3f, skyH: vec3f, ground: vec3f, e0: vec3f ) -> vec3f {
                 let P = ${ geo }[ id * 2u ];
                 let N = ${ geo }[ id * 2u + 1u ];
+                // a record without a normal must not trace: a NaN ray visits every BVH node (giCore makes none any more)
+                if ( ! ( dot( N.xyz, N.xyz ) > 1e-8 ) ) { return e0; }
                 let n = normalize( N.xyz );
                 let k = f32( n0 );
                 let u1 = fract( P.w + k * 0.7548776662466927 );
@@ -225,7 +227,9 @@ export class TerrainGI {
                 let A = ${ glowJobs }[ j * 2u ];
                 let B = ${ glowJobs }[ j * 2u + 1u ];
                 let P = ${ geo }[ A.x * 2u ].xyz;
-                let n = normalize( ${ geo }[ A.x * 2u + 1u ].xyz );
+                let N = ${ geo }[ A.x * 2u + 1u ].xyz;
+                if ( ! ( dot( N, N ) > 1e-8 ) ) { return vec3f( 0.0 ); } // see giSample
+                let n = normalize( N );
                 var slots = array<u32, 7>( A.y, A.z, A.w, B.x, B.y, B.z, B.w );
                 var E = vec3f( 0.0 );
                 for ( var i = 0u; i < 7u; i = i + 1u ) {
