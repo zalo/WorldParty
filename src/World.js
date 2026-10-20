@@ -121,10 +121,11 @@ export default class World {
         this.raycaster = new THREE.Raycaster();
         this.raycaster.layers.set(0);
 
-        // Stats
+        // Stats: the FPS panel, only with ?stats=1 (the corner is the health bar's)
         this.stats = new Stats();
         this.stats.dom.style.transform = "scale(0.7);";
-        this.container.appendChild(this.stats.dom);
+        this.showStats = flagsIn.get('stats') === '1';
+        if(this.showStats) this.container.appendChild(this.stats.dom);
 
         // Temp variables to reduce allocations
         this.mat  = new THREE.Matrix4();

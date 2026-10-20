@@ -140,8 +140,9 @@ export class SpawnMenu {
 
     /** Show or hide the whole menu UI (hidden until the room says what kind of world it is). */
     setVisible(v) {
-        this.bottomBar.style.display = v ? 'flex' : 'none';
-        this.toolLabel.style.display = v ? 'block' : 'none';
+        this.visible = v;
+        this.bottomBar.style.display = v && !this.gameHud ? 'flex' : 'none';
+        this.toolLabel.style.display = v && !this.gameHud ? 'block' : 'none';
         this.mobileActionArea.style.display = v && this.isMobile ? 'flex' : 'none';
         if(this.jumpBtn) this.jumpBtn.style.display = v ? 'block' : 'none';
         if(!v && this.isOpen) this.toggle();
@@ -155,6 +156,13 @@ export class SpawnMenu {
         this.propsBtn.style.display = any ? '' : 'none';
         if(this.propsTabBtn) this.propsTabBtn.style.display = any ? '' : 'none';
         if(!any) this.activeTab = 'tools';
+    }
+
+    /** A game HUD shows the weapons itself (Fort War's slots): no tool name on top and no tool button at the bottom.
+     *  The menu still opens with Q. */
+    setGameHud(on) {
+        this.gameHud = on;
+        this.setVisible(this.visible ?? false);
     }
 
     /** Phone buttons shown with every tool, after its own ([{ label, icon, run }]; Fort War's grapple). */

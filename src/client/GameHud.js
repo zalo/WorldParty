@@ -1,7 +1,8 @@
-/** Fort War HUD: scores and clock, health, weapon cooldowns, the event feed, death and match-over overlays, the
- *  treasure light (blinks and beeps faster, and warms from blue to red, the closer the nearest neutral supply),
- *  and the vote panel (V). The only instruction is "Find the Treasure." */
-import { WEAPONS, SUPPLY, MATCH_OVER_MS, VOTE } from '../game/rules.js';
+/** Fort War HUD: scores and clock, the health bar alone in the top left, weapon slots (the selected one framed; they
+ *  are also how a phone switches weapons, and the mason's shows its stone), the event feed, death and match-over
+ *  overlays, the treasure finder (how far the nearest neutral supply is and how far above or below), and the vote
+ *  panel (V). The only instruction is "Find the Treasure." */
+import { SUPPLY, MATCH_OVER_MS, VOTE } from '../game/rules.js';
 
 // the HUD updates every frame: write only what changed (a same-text write still invalidates layout and paint)
 const setText = (el, text) => { text = String(text); if(el.textContent !== text) el.textContent = text; };
@@ -32,24 +33,19 @@ export class GameHud {
         this.clock = el('span', 'font-size:18px;font-weight:normal;opacity:0.9;min-width:60px;text-align:center;', this.score);
         this.scoreBlue = el('span', 'min-width:34px;text-align:left;', this.score);
         this.round = el('div', `position:absolute;top:50px;left:50%;transform:translateX(-50%);font-size:12px;opacity:0.7;`, root);
-        // top left: team and health (below the error/info box)
-        let left = el('div', 'position:absolute;top:44px;left:10px;', root);
-        this.team = el('div', 'font-size:14px;font-weight:bold;text-shadow:0 1px 2px #000;margin-bottom:4px;', left);
+        // top left: the health bar, nothing else
+        let left = el('div', 'position:absolute;top:10px;left:10px;', root);
         let bar = el('div', 'width:200px;height:14px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.4);border-radius:4px;overflow:hidden;', left);
         this.health = el('div', 'height:100%;width:100%;background:#6c4;transition:width 0.15s;', bar);
-        this.stats = el('div', 'font-size:12px;margin-top:4px;text-shadow:0 1px 2px #000;opacity:0.85;', left);
-        this.sound = el('div', 'font-size:11px;margin-top:2px;text-shadow:0 1px 2px #000;opacity:0.55;', left); // 🔊 / 🔇, M toggles
-        this.voteLine = el('div', 'font-size:13px;margin-top:8px;text-shadow:0 1px 2px #000;color:#fc3;', left);
-        // bottom centre, above the tool bar: weapon slots
-        this.slots = el('div', 'position:absolute;bottom:58px;left:50%;transform:translateX(-50%);display:flex;gap:6px;', root);
+        // a vote in progress: under the score bar
+        this.voteLine = el('div', 'position:absolute;top:68px;left:50%;transform:translateX(-50%);font-size:13px;text-shadow:0 1px 2px #000;color:#fc3;white-space:nowrap;', root);
+        // bottom centre: weapon slots (no tool bar under them in a match)
+        this.slots = el('div', 'position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:6px;', root);
         this.slotEls = [];
-        // bottom right: carrying, and the one instruction with the treasure light
-        let right = el('div', 'position:absolute;right:10px;bottom:60px;text-align:right;font-size:13px;text-shadow:0 1px 2px #000;', root);
+        // bottom right: carrying, and the treasure finder (the one instruction when nothing is in range)
+        let right = el('div', 'position:absolute;right:10px;bottom:16px;text-align:right;font-size:13px;text-shadow:0 1px 2px #000;', root);
         this.carry = el('div', 'font-size:16px;font-weight:bold;color:#ffc830;', right);
-        let task = el('div', 'display:flex;align-items:center;justify-content:flex-end;gap:10px;font-size:18px;font-weight:bold;', right);
-        task.appendChild(document.createTextNode('Find the Treasure.'));
-        this.light = el('div', 'width:16px;height:16px;border-radius:50%;background:#334;box-shadow:0 0 4px #000;', task);
-        this.lightOn = 0; this.nextBeep = 0;
+        this.finder = el('div', 'font-size:16px;font-weight:bold;', right);
         // right: event feed
         this.feed = el('div', 'position:absolute;right:10px;top:70px;width:300px;font-size:13px;text-shadow:0 1px 2px #000;display:flex;flex-direction:column;gap:3px;', root);
         // centre flashes
@@ -72,7 +68,7 @@ export class GameHud {
         // help card (H)
         this.help = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:92vw;background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:14px 18px;font-size:13px;line-height:1.5;display:none;pointer-events:auto;`, root);
         this.help.innerHTML = `<div style="font-size:22px;font-weight:bold;margin-bottom:2px">Undermine</div><div style="font-size:16px;font-weight:bold;margin-bottom:6px">Find the Treasure.</div>
-            <div>Walk into a crate to carry it and bring it to your vault: every crate there is worth 100 to your team. Every crystal you dig or blast out of the ground is worth 1. Most at the end wins. The light beeps when treasure is near.</div>
+            <div>Walk into a crate to carry it and bring it to your vault: every crate there is worth 100 to your team. Every crystal you dig or blast out of the ground is worth 1. Most at the end wins. Bottom right says how far the nearest treasure is, and how far above or below you.</div>
             <div style="margin-top:8px;opacity:0.8"><b>1-4</b> or <b>scroll</b> tools &nbsp; <b>right click</b> grapple &nbsp; <b>F</b> mason shape / physgun freeze &nbsp; <b>R</b> turn block &nbsp; <b>Shift+scroll</b> mason distance &nbsp; <b>V</b> vote &nbsp; <b>J</b> switch team &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> chat &nbsp; <b>H</b> this card</div>`;
         // vote panel (V)
         this.votePanel = el('div', `position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);border:1px solid #555;border-radius:10px;padding:12px 16px;font-size:14px;display:none;pointer-events:auto;flex-direction:column;gap:8px;`, root);
@@ -95,14 +91,13 @@ export class GameHud {
             let fill = el('div', 'position:absolute;left:0;bottom:0;width:100%;height:0;background:rgba(255,255,255,0.25);', s);
             let icon = el('span', 'position:relative;', s); icon.textContent = tool.icon;
             let key = el('span', 'position:absolute;top:1px;left:4px;font-size:9px;opacity:0.7;', s); key.textContent = String(i + 1);
-            this.slotEls.push({ s, fill, tool });
+            let count = tool.kind === 'mason' ? el('span', 'position:absolute;bottom:1px;right:4px;font-size:11px;font-weight:bold;text-shadow:0 1px 2px #000;', s) : null;
+            // the slots switch weapons when tapped or clicked (a phone has no number keys, and no tool button any more)
+            s.style.pointerEvents = 'auto'; s.style.cursor = 'pointer';
+            let pick = (e) => { e.preventDefault(); e.stopPropagation(); this.main.spawnMenu.selectTool(i); };
+            s.addEventListener('touchstart', pick, { passive: false }); s.addEventListener('mousedown', pick);
+            this.slotEls.push({ s, fill, tool, count });
         });
-    }
-
-    setLight(background, shadow) {
-        if(this.lightKey === background + shadow) return;
-        this.lightKey = background + shadow;
-        this.light.style.background = background; this.light.style.boxShadow = shadow;
     }
 
     flashText(text, ms = 1500) { if(!text) return; this.flash.textContent = text; this.flash.style.opacity = '1'; this.flashUntil = performance.now() + ms; }
@@ -124,16 +119,11 @@ export class GameHud {
     update() {
         let g = this.game, me = g.me, now = performance.now(), ecs = this.main.ecs;
         if(me) {
-            let t = g.config.teams[me.team];
-            setText(this.team, t ? `${t.name} team · ${me.name}` : me.name);
-            this.team.style.color = t ? t.color : '#fff';
             let h = Math.max(0, me.health) / 100;
             this.health.style.width = (h * 100).toFixed(0) + '%';
             this.health.style.background = h > 0.5 ? '#6c4' : h > 0.25 ? '#dc3' : '#d33';
-            setText(this.stats, `stone ${me.build}/${WEAPONS.mason.budget}`);
-            let sound = g.sfx.muted ? '🔇 M' : '🔊 M';
-            if(this.sound.textContent !== sound) this.sound.textContent = sound;
             setText(this.carry, me.carrying ? '💰 Carrying treasure: take it to your vault! (100)' : '');
+            for(let { count } of this.slotEls) if(count) setText(count, me.build);
         }
         // scores and clock
         let m = ecs.get('match', 'Match');
@@ -179,22 +169,20 @@ export class GameHud {
             this.deathSpec.textContent = this.spectating ? `Watching ${this.spectating}` : '';
             this.death.style.background = this.spectating ? 'rgba(40,0,0,0.15)' : 'rgba(40,0,0,0.5)';
         } else this.death.style.display = 'none';
-        // the treasure light: nearest neutral supply (buried ones included: that is what the drill is for)
-        let best = Infinity, mine = this.main.player.position;
+        // the treasure finder: the nearest neutral supply (buried ones included: that is what the drill is for), how far
+        // and how far above or below the eye, within senseRange; else the instruction (nothing while carrying or dead)
+        let best = Infinity, dy = 0, mine = this.main.world.camera.position;
         for(let [, s, tf] of ecs.each('Supply', 'Transform')) {
             if(s.team || s.state === 'carried') continue;
             let d = Math.hypot(tf.position.x - mine.x, tf.position.y - mine.y, tf.position.z - mine.z);
-            if(d < best) best = d;
+            if(d < best) { best = d; dy = tf.position.y - mine.y; }
         }
-        let near = best < SUPPLY.senseRange && me && !me.dead && !me.carrying ? Math.max(0, Math.min(1, 1 - best / SUPPLY.senseRange)) : 0;
-        if(near > 0) {
-            let period = 1800 - 1600 * near * near; // slow blue blink far away, a fast red flutter on top of it
-            if(now >= this.nextBeep) { this.nextBeep = now + period; this.lightOn = now; this.game.sfx.beep(near); }
-            let on = now - this.lightOn < Math.min(140, period * 0.5);
-            let hue = (215 - 215 * near).toFixed(0), l = on ? 65 : 28;
-            // only when it changes: the style was written every frame under a CSS transition, which restarted it each time
-            this.setLight(`hsl(${hue},90%,${l}%)`, on ? `0 0 ${(6 + near * 14).toFixed(0)}px hsl(${hue},90%,60%)` : '0 0 4px #000');
-        } else { this.setLight('#334', '0 0 4px #000'); this.nextBeep = 0; }
+        let finder = '';
+        if(me && !me.dead && !me.carrying) {
+            let level = Math.abs(dy) < 1 ? 'level with you' : `${Math.abs(dy).toFixed(0)} m ${dy < 0 ? 'below' : 'above'}`;
+            finder = best < SUPPLY.senseRange ? `💰 Treasure ${best.toFixed(0)} m away, ${level}` : 'Find the Treasure.';
+        }
+        setText(this.finder, finder);
         // fades
         if(this.flashUntil && now > this.flashUntil) { this.flash.style.opacity = '0'; this.flashUntil = 0; }
         if(this.damageUntil && now > this.damageUntil) { this.vignette.style.opacity = '0'; this.damageUntil = 0; }

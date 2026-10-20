@@ -417,7 +417,7 @@ export default class Main {
         this.gi?.tick(this.world);
 
         this.world.renderFrame();
-        this.world.stats.update();
+        if(this.world.showStats) this.world.stats.update();
 
         if(!this.serverTickDisplay) {
             this.serverTickDisplay = document.createElement('div');

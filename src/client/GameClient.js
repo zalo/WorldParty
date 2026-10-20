@@ -38,7 +38,7 @@ export class GameClient {
         this.tools = [new RocketTool(), new DrillTool(), new MasonTool(), new PhysGunTool()];
         this.grapple = new Grapple();
         main.spawnMenu.setTools(this.tools);
-        main.spawnMenu.toolLabel.style.top = '62px'; // the score bar takes the top centre
+        main.spawnMenu.setGameHud(true); // the HUD's weapon slots show (and on a phone switch) the weapon
         main.spawnMenu.setProps([]);
         main.spawnMenu.setExtraMobileActions([{ label: 'Hook', icon: '🪝', run: () => this.grapple.toggle(main) }]);
         this.hud.setWeapons(this.tools.slice(0, 3));

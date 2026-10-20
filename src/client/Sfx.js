@@ -6,8 +6,7 @@
  *  Palette, so new sounds fit the old ones (Music.js shares it):
  *  - Key: D Mixolydian (D E F# G A B C; `SCALE`, `degreeMidi`). Good news arpeggiates the D chord upward (pickup
  *    D F# A, kill A D, vote A D); the home cadence C -> D ends the deposit fanfare and the round start; bad news
- *    borrows F natural, the parallel minor (death A F D A, round lost). The treasure light's beep walks up the
- *    scale from D5 to D6 with nearness, so it stays in tune with the music while it rises.
+ *    borrows F natural, the parallel minor (death A F D A, round lost).
  *  - Impacts are three layers plus a tail: a sub (sine sweeping down to ~25 Hz), a body (lowpassed noise sweeping
  *    down) and a crack (a few ms of bandpassed noise), then sparse debris ticks. Size scales the durations and
  *    lowers the pitch; every hit gets +-8 % random pitch so two rockets never sound the same.
@@ -345,11 +344,6 @@ export const SOUNDS = {
     votePass(s, { at = s.now } = {}) { let out = s.bus({ send: 0.3 }); s.bell(at, midiHz(81), { dur: 0.3, gain: 0.18, out }); s.bell(at + 0.12, midiHz(86), { dur: 0.6, gain: 0.18, out }); },
     /** UI: weapon switch, vote cast, menu. */
     click(s, { at = s.now } = {}) { s.noise(at, { dur: 0.012, gain: 0.14, type: 'highpass', freq: 2500, attack: 0.001 }); s.tone(at, 1700, { dur: 0.03, gain: 0.07, type: 'triangle' }); },
-    /** The treasure light: a ping that walks up the scale (D5 .. D6) and gets louder as `near` goes 0..1. */
-    beep(s, { at = s.now, near = 0 } = {}) {
-        let f = midiHz(degreeMidi(Math.round(clamp(near, 0, 1) * 7), 1)), g = 0.06 + near * 0.12, out = s.bus({ send: 0.15 });
-        s.tone(at, f, { dur: 0.09, gain: g, attack: 0.002, out }); s.tone(at, f * 2, { dur: 0.05, gain: g * 0.3, attack: 0.002, out });
-    },
     /** Rubble: a collapse of `count` fragments, thuds scattered over half a second and a rumble. */
     rubble(s, { at = s.now, count = 1, distance = 0, pan = 0 } = {}) {
         let a = atten(distance), n = Math.min(9, 2 + count), k = clamp(count / 6, 0.3, 1), out = s.bus({ pan, lowpass: muffle(distance, 10, 7000), send: 0.3 });
@@ -489,7 +483,6 @@ export class Sfx {
     roundOver(result) { this.play('roundOver', { result }); }
     votePass() { this.play('votePass'); }
     click() { this.play('click'); }
-    beep(near) { this.play('beep', { near }); }
     crystal(count, pos) { let sp = this.spatial(pos); if(sp.distance < 30) this.play('crystal', { count, ...sp }); }
     rubble(count, pos) { this.play('rubble', { count, ...this.spatial(pos) }); }
     land(speed) { this.play('land', { speed }); }

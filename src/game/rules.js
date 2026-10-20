@@ -40,7 +40,7 @@ export const SUPPLY = {
     dropReturnMs: 30000,            // a dropped supply nobody touches goes back where it came from
     undergroundDepth: 1.5,          // below surface - this counts as underground ...
     undergroundBonusS: 4.0,         // ... for this long while carrying (outside both vaults): the delivery earns a bonus crate
-    senseRange: 40,                 // the treasure light starts blinking at neutral supplies this close
+    senseRange: 40,                 // the treasure finder (HUD) names the nearest neutral supply this close
 };
 
 /** Votes on admin actions: a majority of the active players (AFK ones, without a heartbeat for activeMs, do not
