@@ -17,7 +17,7 @@ export class LocalSocket extends EventTarget {
         this.worker = new Worker(url, { type: 'module' });
         this.worker.onmessage = (e) => this.receive(e.data);
         this.worker.onerror = (e) => console.error('solo server: ' + (e.message || 'the worker failed to start'));
-        this.worker.postMessage({ t: 'start', id: this.id, manifest, url: location.href });
+        this.manifest = manifest;
     }
 
     send(data) {
@@ -28,6 +28,8 @@ export class LocalSocket extends EventTarget {
     receive(m) {
         switch(m.t) {
             case 'msg': this.dispatchEvent(new MessageEvent('message', { data: m.data })); break;
+            // its WASM is in (fetched and compiled before its module runs, so a message posted any earlier is lost)
+            case 'loaded': this.worker.postMessage({ t: 'start', id: this.id, manifest: this.manifest, url: location.href }); break;
             case 'open':
                 console.log(`solo: room up in ${(m.ms / 1000).toFixed(1)} s`);
                 this.readyState = 1;

@@ -76,6 +76,8 @@ async function chunk({ req, key, version }) {
 }
 
 const fail = (e) => postMessage({ t: 'error', message: e?.stack || String(e) });
+// (a message that came while the imports above still awaited their WASM would have found no handler and been lost:
+// the page waits for `loaded` before it sends `start`)
 onmessage = (e) => {
     let m = e.data;
     if(m.t === 'start') start(m).catch(fail);
@@ -83,3 +85,4 @@ onmessage = (e) => {
     else if(m.t === 'msg') server.onMessage(conn, m.data).catch(fail);
     else if(m.t === 'chunk') chunk(m).catch(fail);
 };
+postMessage({ t: 'loaded' });

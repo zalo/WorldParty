@@ -443,7 +443,7 @@ export default class Main {
         if(this.solo) {
             let c = this.conn.carve;
             late = ` · tick ${this.serverTickMs} ms` + (c ? ` · carve ${c.boolean}+${c.settle}+${c.colliders}+${c.glow} ms` : '') + late;
-            ping = 'solo · ' + ping;
+            ping = 'solo · ' + (this.conn.readyState === 1 ? ping : 'starting the room …');
         }
         if(this.serverTickDisplay.textContent !== ping + late) this.serverTickDisplay.textContent = ping + late;
         this.frameNum++;
