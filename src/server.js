@@ -16,7 +16,7 @@ import { Connectivity, DUST_VOLUME, MAX_FRAGMENT_VOLUME, decomposeParts } from '
 import { chunkAt, chunksInBox, key as chunkKey, isValidKey, sanitizeWorld, DEFAULT_WORLD } from './terrain/grid.js';
 import { DEFAULT_BODY_GRAVITY, clampGravity } from './gravity.js';
 import { getPropDef } from './props/PropRegistry.js';
-import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeSoup, encodeHulls } from './net/codec.js';
+import { packChunkFrame, packChunkDeltaFrame, encodeChunkDelta, decodeSoup, encodeSoup, encodeHulls, gzipAsync, EMPTY_VERSION } from './net/codec.js';
 
 const TICK_MS = 1000 / 30;
 const FULL_UPDATE_EVERY = 300;      // ticks (10s)
@@ -25,6 +25,7 @@ const STORAGE_BATCH = 128;          // Durable Object storage batch limit
 const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across chunkpart:<key>:<i> values (128 KiB value limit)
 const COOKS_NOW = 3;                // mesh colliders cooked immediately when activity changes (nearest first) ...
 const COOKS_PER_TICK = 2;           // ... and per tick for the rest
+const SPECULATION_TRIS = 60_000;    // triangles of speculated craters (speculateBlast) held at once, outside the resident budget
 
 // Brushes the server carves with itself (the drill, the mason; explosions build their own, carveBlast): unit shapes, scaled per use
 /** The drill's brush: the convex hull of two unit spheres (320-face icospheres, so its tunnels read as round) whose
@@ -75,6 +76,7 @@ export class WorldParty extends Server {
     this.settleTimer = null;        // pending settleNow() after carves
     this.carveBoxes = [];           // bounds of the brushes run since the last settleNow (the glow rocks they can uncover)
     this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
+    this.speculatedTris = 0;        // held by speculations not yet made or dropped (SPECULATION_TRIS)
     this.persistChunkDeletes = new Set();
     this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
     this.ready = false;
@@ -520,6 +522,59 @@ export class WorldParty extends Server {
       let probe = this.terrain.solidProbe(keys, min, max);
       return this.terrain.blastBrush(center, radius, probe, fallback);
     }, { min, max }, by);
+  }
+  /** The blast carveBlast would make, worked out now but not made (a rocket's crater, when it is fired: Game.precarve).
+   *  Resolves to { results, frames, box, center } or null: `frames` are its chunks as `ahead` frames (a delta against the
+   *  version clients hold, else in full), for clients to hold until the explosion; `commitBlast` makes it when the
+   *  rocket lands, if nothing changed those chunks meanwhile, else `dropSpeculation` frees it. */
+  async speculateBlast(center, radius, fallback = 1) {
+    if(this.speculatedTris > SPECULATION_TRIS) return null;
+    let R = radius * 1.3, min = { x: center.x - R, y: center.y - R, z: center.z - R }, max = { x: center.x + R, y: center.y + R, z: center.z + R };
+    let keys = chunksInBox(this.terrain.world, min, max), T = this.terrain;
+    await T.prepare(keys);
+    let t0 = Date.now(), brush = null, results;
+    try { brush = T.blastBrush(center, radius, T.solidProbe(keys, min, max), fallback); } catch(e) { console.warn('brush failed: ' + e.message); }
+    if(!brush) return null;
+    try { results = T.speculate(keys, brush); } finally { brush.delete(); }
+    let frames = [], spec = { results, frames, box: { min, max }, center, tris: 0 };
+    for(let key in results) {
+      let r = results[key], frame = null;
+      spec.tris += r.tris;
+      if(r.base !== null && r.version !== EMPTY_VERSION && this.sentStates.get(key)?.version === r.base) { // (else clients do not hold its base)
+        let delta = encodeChunkDelta(T.currentMesh(key), r.mesh);
+        if(delta.length < r.raw.length * 0.45) frame = packChunkDeltaFrame(key, r.version, r.base, delta, true); // (pushChunk's rule: under 3/4 of the gzip, ~60% of raw)
+      }
+      frames.push(frame || packChunkFrame(key, r.version, r.raw ? await gzipAsync(r.raw) : null, true));
+    }
+    this.speculatedTris += spec.tris;
+    this.csgStats.booleanMs += Date.now() - t0;
+    return spec;
+  }
+  /** Make a speculated blast; false (and nothing done) if one of its chunks is no longer the version it read. Its
+   *  frames went out ahead, so the chunks are not pushed again. */
+  commitBlast(spec, by) {
+    let T = this.terrain;
+    for(let key in spec.results) if((T.chunks[key] ? T.chunks[key].version : null) !== spec.results[key].base) return false;
+    for(let key in spec.results) { let r = spec.results[key]; T.install(key, r); this.pushed.set(key, r.version); }
+    this.speculatedTris -= spec.tris;
+    spec.results = {}; spec.tris = 0; // the terrain owns the manifolds now
+    this.afterCsg(spec.box, by);
+    return true;
+  }
+  dropSpeculation(spec) {
+    for(let key in spec.results) spec.results[key].manifold?.delete();
+    this.speculatedTris -= spec.tris;
+    spec.results = {}; spec.tris = 0;
+  }
+  /** What clients should hold of these chunks (the wire states last sent), as update maps. */
+  sentMaps(keys) {
+    let chunks = {}, rock = {}, cull = {};
+    for(let key of keys) {
+      let st = this.sentStates.get(key);
+      if(st && st.version !== undefined) { chunks[key] = st.version; cull[key] = st.cull; rock[key] = 0; }
+      else { chunks[key] = null; rock[key] = st ? st.rock : 0; }
+    }
+    return { chunks, rock, cull };
   }
   /** The convex hull of two spheres of `radius` centred at `a` and `b` (the drill), simplified only to 2 cm, pulled
    *  in where it reaches into hard material (seen from `a`, the sphere around the player) and tagged with what it

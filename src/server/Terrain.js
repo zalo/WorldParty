@@ -462,20 +462,49 @@ export class Terrain {
     /** Re-encode a chunk's content and version from its manifold (compressed later by compress()). */
     _refresh(key) {
         let c = this.chunks[key];
-        if(!c.manifold || c.manifold.isEmpty()) {
-            if(c.manifold) { c.manifold.delete(); c.manifold = null; }
-            c.bytes = null; c.raw = null; c.mesh = null; c.tris = 0; c.version = EMPTY_VERSION;
-            return;
+        Object.assign(c, this.encode(c.manifold), { bytes: null });
+    }
+
+    /** A manifold as chunk content: the raw layout (no gzip here: the frame that follows is usually a delta, and the
+     *  version hashes the raw layout; compress() gzips it later), its version, the decoded mesh (collider cook and
+     *  delta base for the next carve) and its triangle count. An empty manifold is freed: null, EMPTY_VERSION. */
+    encode(manifold) {
+        if(!manifold || manifold.isEmpty()) {
+            if(manifold) manifold.delete();
+            return { manifold: null, raw: null, mesh: null, tris: 0, version: EMPTY_VERSION };
         }
-        let mesh = c.manifold.getMesh();
+        let mesh = manifold.getMesh();
         let { positions, uvs } = splitProps(mesh);
         let indices = new Uint32Array(mesh.triVerts), materials = this.triangleMaterials(mesh);
-        // No gzip here: the frame that follows is usually a delta, and the version hashes the raw layout.
-        c.raw = packChunkMesh(positions, indices, materials, uvs);
-        c.bytes = null;
-        c.version = hashBytes(c.raw);
-        c.mesh = { positions, uvs, indices, materials }; // collider cook and delta base for the next carve
-        c.tris = indices.length / 3;
+        let raw = packChunkMesh(positions, indices, materials, uvs);
+        return { manifold, raw, version: hashBytes(raw), mesh: { positions, uvs, indices, materials }, tris: indices.length / 3 };
+    }
+
+    /** What subtracting `brush` would make of these chunks, without making it (a rocket's crater, worked out when it is
+     *  fired): for each chunk it changes, the version it reads (`base`; null for implicit rock) and the result as
+     *  `encode` gives it. The result manifolds are the caller's until `install` takes one or the caller frees them. */
+    speculate(keys, brush) {
+        let out = {};
+        for(let key of new Set(keys.filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))) {
+            let current = this.currentManifold(key);
+            if(!current) continue; // carving empty space changes nothing
+            let base = this.chunks[key] ? this.chunks[key].version : null;
+            let result = this.encode(current.subtract(brush));
+            if(!this.chunks[key]) current.delete(); // implicit rock, materialized for this
+            if(result.version === base) { result.manifold?.delete(); continue; }
+            out[key] = { base, ...result };
+        }
+        return out;
+    }
+
+    /** Make a speculated result (`speculate`) the chunk's content, as setManifold would; takes its manifold. */
+    install(key, r) {
+        let old = this.chunks[key];
+        let prev = old && (old.bytes || old.raw) ? { version: old.version, mesh: old.mesh || null, bytes: old.bytes, raw: old.raw } : null;
+        this._evict(key);
+        this.chunks[key] = { ...this._empty(key), manifold: r.manifold, raw: r.raw, mesh: r.mesh, tris: r.tris, version: r.version, prev };
+        this.dirty.add(key);
+        if(r.manifold) this._touch(key);
     }
 
     /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */

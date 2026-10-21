@@ -123,6 +123,9 @@ export function hashBytes(bytes) {
 export const EMPTY_VERSION = '0';
 export const FRAME_CHUNK = 1;
 export const FRAME_CHUNK_DELTA = 2;
+/** Set on a frame's type byte when its content is sent ahead of time (a rocket's crater, worked out when it was fired):
+ *  the client holds it until the explosion says it happened, or an update names its version. */
+export const FRAME_AHEAD = 0x80;
 
 // ---- chunk deltas -------------------------------------------------------------------------------
 // A carve changes a small part of a chunk, but a boolean returns a whole new mesh. A delta rebuilds the
@@ -232,12 +235,13 @@ export function decodeChunkDelta(prev, bytes) {
     return { positions, uvs, indices, materials };
 }
 
-/** Binary WebSocket frame for a delta: [u8 type=2][i32 x][i32 y][i32 z][u8 vlen][version][u8 blen][baseVersion][payload] */
-export function packChunkDeltaFrame(key, version, baseVersion, bytes) {
+/** Binary WebSocket frame for a delta: [u8 type=2][i32 x][i32 y][i32 z][u8 vlen][version][u8 blen][baseVersion][payload]
+ *  (type | FRAME_AHEAD when `ahead`) */
+export function packChunkDeltaFrame(key, version, baseVersion, bytes, ahead = false) {
     let [x, y, z] = key.split(',').map(Number);
     let out = new Uint8Array(15 + version.length + baseVersion.length + bytes.length);
     let dv = new DataView(out.buffer);
-    out[0] = FRAME_CHUNK_DELTA;
+    out[0] = FRAME_CHUNK_DELTA | (ahead ? FRAME_AHEAD : 0);
     dv.setInt32(1, x, true); dv.setInt32(5, y, true); dv.setInt32(9, z, true);
     let o = 13;
     out[o++] = version.length; for(let i = 0; i < version.length; i++) out[o++] = version.charCodeAt(i);
@@ -246,12 +250,13 @@ export function packChunkDeltaFrame(key, version, baseVersion, bytes) {
     return out;
 }
 
-/** Binary WebSocket frame: [u8 type=1][i32 x][i32 y][i32 z][u8 versionLength][version ascii][payload] */
-export function packChunkFrame(key, version, bytes) {
+/** Binary WebSocket frame: [u8 type=1][i32 x][i32 y][i32 z][u8 versionLength][version ascii][payload] (type | FRAME_AHEAD
+ *  when `ahead`) */
+export function packChunkFrame(key, version, bytes, ahead = false) {
     let [x, y, z] = key.split(',').map(Number);
     let out = new Uint8Array(14 + version.length + (bytes ? bytes.length : 0));
     let dv = new DataView(out.buffer);
-    out[0] = FRAME_CHUNK;
+    out[0] = FRAME_CHUNK | (ahead ? FRAME_AHEAD : 0);
     dv.setInt32(1, x, true); dv.setInt32(5, y, true); dv.setInt32(9, z, true);
     out[13] = version.length;
     for(let i = 0; i < version.length; i++) out[14 + i] = version.charCodeAt(i);
@@ -259,16 +264,17 @@ export function packChunkFrame(key, version, bytes) {
     return out;
 }
 
-/** Either frame type: {key, version, bytes} for a full chunk, plus {baseVersion, delta: true} for a delta. */
+/** Either frame type: {key, version, bytes} for a full chunk, plus {baseVersion, delta: true} for a delta; `ahead` when
+ *  sent ahead of time (FRAME_AHEAD). */
 export function unpackChunkFrame(buffer) {
-    let u8 = new Uint8Array(buffer);
-    if(u8[0] !== FRAME_CHUNK && u8[0] !== FRAME_CHUNK_DELTA) return null;
+    let u8 = new Uint8Array(buffer), type = u8[0] & ~FRAME_AHEAD, ahead = (u8[0] & FRAME_AHEAD) !== 0;
+    if(type !== FRAME_CHUNK && type !== FRAME_CHUNK_DELTA) return null;
     let dv = new DataView(u8.buffer, u8.byteOffset);
     let key = `${dv.getInt32(1, true)},${dv.getInt32(5, true)},${dv.getInt32(9, true)}`;
     let o = 13, vlen = u8[o++];
     let version = String.fromCharCode(...u8.subarray(o, o + vlen)); o += vlen;
-    if(u8[0] === FRAME_CHUNK) { let bytes = u8.subarray(o); return { key, version, bytes: bytes.length ? bytes : null }; }
+    if(type === FRAME_CHUNK) { let bytes = u8.subarray(o); return { key, version, bytes: bytes.length ? bytes : null, ahead }; }
     let blen = u8[o++];
     let baseVersion = String.fromCharCode(...u8.subarray(o, o + blen)); o += blen;
-    return { key, version, baseVersion, bytes: u8.subarray(o), delta: true };
+    return { key, version, baseVersion, bytes: u8.subarray(o), delta: true, ahead };
 }

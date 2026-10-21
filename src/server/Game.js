@@ -41,6 +41,8 @@ export class Game {
         this.spawnedAt = new Map();
         this.lastActive = new Map(); // player id -> last heartbeat (votes count only players who are there)    // player id -> time of the last spawn (brief protection)
         this.rocks = new GlowRocks(server); // the glow rock field: materialized as digging (or walking up to a tunnel) exposes them
+        this.precarves = new Map();    // rocket id -> its crater, worked out when it was fired (precarve)
+        this.dt = 1 / 30;              // the tick's step (update), which a rocket's flight is integrated with
     }
 
     get config() { return this.server.terrain.world.game || null; }
@@ -55,6 +57,7 @@ export class Game {
         if(!this.active) {
             for(let id of [...w.query('Supply')]) w.destroy(id);
             for(let id of [...w.query('Projectile')]) w.destroy(id);
+            for(let rid of [...this.precarves.keys()]) this.cancelPrecarve(rid);
             if(w.has(MATCH_ID)) w.destroy(MATCH_ID);
             this.rocks.reset();
             for(let [id, p] of w.each('Player')) if(p.team) w.set(id, 'Player', { team: null, health: MAX_HEALTH, dead: false, carrying: null });
@@ -212,10 +215,12 @@ export class Game {
             let pre = this.physics.raycast(origin, dir, 1.3, this.actorPtrOf(id));
             if(pre) { this.explode({ x: pre.position.x - dir.x * 0.15, y: pre.position.y - dir.y * 0.15, z: pre.position.z - dir.z * 0.15 }, 'rocket', id, now); return; }
             let start = { x: origin.x + dir.x * 1.3, y: origin.y + dir.y * 1.3, z: origin.z + dir.z * 1.3 };
-            w.create({
+            let vel = { x: dir.x * def.speed, y: dir.y * def.speed, z: dir.z * def.speed };
+            let rid = w.create({
                 Transform: Transform({ position: start }),
-                Projectile: Projectile({ kind: 'rocket', team: p.team, owner: id, vel: { x: dir.x * def.speed, y: dir.y * def.speed, z: dir.z * def.speed }, bornAt: now }),
+                Projectile: Projectile({ kind: 'rocket', team: p.team, owner: id, vel: { ...vel }, bornAt: now }),
             });
+            this.precarve(rid, start, vel, id).catch(e => console.error('precarve failed: ' + e.message));
             return;
         }
         // grenade / buster: a physics prop with a fuse, thrown
@@ -327,11 +332,52 @@ export class Game {
         this.spawn(id);
     }
 
-    /** A blast: carve the terrain, throw bodies, hurt and knock players. `by` is the player responsible. */
-    explode(center, kind, by, now) {
+    /** Where a rocket will land on the terrain, and its crater, worked out as it is fired: its flight stepped as
+     *  projectileSystem will step it, against the terrain alone, and the blast there carved but not made
+     *  (server.speculateBlast). Its chunks go to everyone at once as `ahead` frames with a `precarve` message: the
+     *  shooter's predicted rocket lands a round trip before the server's, and the crater now comes with its explosion
+     *  instead of a round trip and the carve later; everyone else applies them with the `explosion` (and a chunk that
+     *  was implicit rock needs no fetch). If the rocket lands elsewhere (a player or a body in the way) or its chunks
+     *  changed meanwhile, it is cancelled and carved as before. */
+    async precarve(rid, start, vel, by) {
+        let def = WEAPONS.rocket, dt = this.dt, p = { ...start }, v = { ...vel }, at = null;
+        for(let t = 0; t * dt * 1000 <= def.lifeMs && p.y >= PLAYER_KILL_Y; t++) {
+            v.y -= def.gravity * dt;
+            let sx = v.x * dt, sy = v.y * dt, sz = v.z * dt, len = Math.hypot(sx, sy, sz);
+            if(len < 1e-4) continue;
+            let d = { x: sx / len, y: sy / len, z: sz / len }, hit = this.physics.raycast(p, d, len + 0.25, 0, true);
+            if(hit) { at = { x: hit.position.x - d.x * 0.15, y: hit.position.y - d.y * 0.15, z: hit.position.z - d.z * 0.15 }; break; }
+            p.x += sx; p.y += sy; p.z += sz;
+        }
+        if(!at) return;
+        let spec = await this.server.speculateBlast(at, def.radius);
+        if(!spec) return;
+        if(!this.world.has(rid, 'Projectile')) { this.server.dropSpeculation(spec); return; } // it landed (or went) meanwhile
+        this.precarves.set(rid, spec);
+        let chunks = {};
+        for(let key in spec.results) chunks[key] = spec.results[key].version;
+        for(let f of spec.frames) this.server.broadcast(f); // (first: the shooter may apply them the moment the message comes)
+        spec.frames = null;
+        this.server.broadcast(JSON.stringify({ type: 'precarve', id: rid, by, position: at, chunks }));
+    }
+
+    /** A rocket's crater will not be made as worked out (it hit something else, or went): free it, and tell clients
+     *  what those chunks hold after all (the shooter may be showing it already). */
+    cancelPrecarve(rid) {
+        let spec = this.precarves.get(rid);
+        if(!spec) return;
+        this.precarves.delete(rid);
+        let keys = Object.keys(spec.results);
+        this.server.dropSpeculation(spec);
+        this.server.broadcast(JSON.stringify({ type: 'precarve', id: rid, cancel: true, ...this.server.sentMaps(keys) }));
+    }
+
+    /** A blast: carve the terrain, throw bodies, hurt and knock players. `by` is the player responsible. `pre`: the
+     *  rocket whose precarve this is, already made (the explosion message says so, and clients apply its chunks). */
+    explode(center, kind, by, now, pre = null) {
         let def = WEAPONS[kind];
         let R = def.radius, reach = R * 1.6;
-        this.server.carveBlast(center, R, 1, by).catch(e => console.error('carve failed: ' + e.message));
+        if(!pre) this.server.carveBlast(center, R, 1, by).catch(e => console.error('carve failed: ' + e.message));
         let w = this.world;
         for(let [bid, pb, tf, rb] of w.each('$PxBody', 'Transform', 'RigidBody')) {
             if(rb.frozen) continue;
@@ -354,7 +400,7 @@ export class Game {
             let dmg = def.damage * f * (pid === by ? SELF_DAMAGE_SCALE : 1);
             this.damage(pid, Math.round(dmg), by, kind === 'buster' ? 'busted' : kind === 'grenade' ? 'fragged' : 'rocketed', impulse, now);
         }
-        this.server.broadcast(JSON.stringify({ type: 'explosion', position: center, radius: R, kind, by })); // `by`: the shooter matches it to a predicted rocket
+        this.server.broadcast(JSON.stringify({ type: 'explosion', position: center, radius: R, kind, by, pre })); // `by`: the shooter matches it to a predicted rocket
         let shooter = by && w.get(by, 'Player'); if(shooter) w.set(by, 'Player', { blasts: shooter.blasts + 1 });
     }
 
@@ -511,6 +557,7 @@ export class Game {
     // ---- systems --------------------------------------------------------------------
 
     update(dt, now) {
+        this.dt = dt;
         if(!this.active) return;
         let w = this.world;
         let players = w.query('Player').size;
@@ -602,7 +649,10 @@ export class Game {
                 {
                     let at = { x: hit.position.x - step.x / len * 0.15, y: hit.position.y - step.y / len * 0.15, z: hit.position.z - step.z / len * 0.15 };
                     if(hitId && w.has(hitId, 'Player')) this.damage(hitId, def.direct, pr.owner, 'rocketed', { x: 0, y: 0, z: 0 }, now);
-                    this.explode(at, pr.kind, pr.owner, now);
+                    // landed where its precarve said: make that crater (unless its chunks changed meanwhile)
+                    let spec = this.precarves.get(id), made = !!spec && !hitId && dist(at, spec.center) < 0.25 && this.server.commitBlast(spec, pr.owner);
+                    if(made) this.precarves.delete(id); else this.cancelPrecarve(id);
+                    this.explode(at, pr.kind, pr.owner, now, made ? id : null);
                     w.destroy(id);
                     continue;
                 }
@@ -610,6 +660,7 @@ export class Game {
             tf.position.x += step.x; tf.position.y += step.y; tf.position.z += step.z;
             w.touch(id, 'Transform'); w.touch(id, 'Projectile');
         }
+        for(let rid of [...this.precarves.keys()]) if(!w.has(rid, 'Projectile')) this.cancelPrecarve(rid); // expired, or a new round
     }
 
     fuseSystem(now) {

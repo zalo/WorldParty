@@ -338,6 +338,7 @@ export default class Main {
     updateFromServer(event) {
         if(event.data instanceof ArrayBuffer) {
             let frame = unpackChunkFrame(event.data);
+            if(frame?.ahead) { this.terrain.stash(frame); return; } // a rocket's crater before it lands (GameClient.applyPrecarve)
             if(frame) {
                 let t0 = performance.now();
                 let applied = frame.delta ? this.terrain.applyDelta(frame.key, frame.version, frame.baseVersion, frame.bytes) : (this.terrain.setChunk(frame.key, frame.bytes, frame.version), true);

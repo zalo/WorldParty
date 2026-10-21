@@ -14,6 +14,7 @@ import { RESPAWN_MS, SUPPLY, UNITS, VOTE, WEAPONS } from '../game/rules.js';
 
 const _ray = new THREE.Ray(), _inv = new THREE.Matrix4(), _min = new THREE.Vector3(), _max = new THREE.Vector3();
 const PREDICTED_BOOM_MS = 2000; // how long a predicted explosion waits for the server's to be matched (and not shown again)
+const PRECARVE_MS = 10000;      // a rocket's crater sent ahead (Game.precarve) is forgotten this long after it came
 
 export class GameClient {
     constructor(main, config) {
@@ -47,6 +48,7 @@ export class GameClient {
         // our own rockets fly from the click (predicted); see ProjectileRenderSystem
         this.raycaster = new THREE.Raycaster();
         this.predictedBooms = []; // { position, at }: explosions shown at a predicted impact, for the server's to match
+        this.precarves = new Map(); // rocket id -> { by, position, chunks: {key: version}, at, applied }: craters sent ahead
         this.rockets = new ProjectileRenderSystem(main.world.scene, {
             localId: () => main.conn.id,
             hitTest: (from, dir, length) => this.rocketHit(from, dir, length),
@@ -172,7 +174,9 @@ export class GameClient {
                 this.sfx.crystal(data.rocks.length, new THREE.Vector3(x, y, z));
                 return true;
             }
+            case 'precarve': this.onPrecarve(data); return true;
             case 'explosion': {
+                if(data.pre) this.applyPrecarve(data.pre); // its crater came ahead
                 let p = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
                 if(data.by === main.conn.id && data.kind === 'rocket') {
                     // one of ours: already shown if its predicted rocket hit terrain there
@@ -219,12 +223,44 @@ export class GameClient {
     }
 
     /** Our rocket hit terrain on this side: explode now; the server's explosion for it (a round trip later) is not
-     *  shown again. The crater still comes with the server's chunk update. */
+     *  shown again. The crater too, when the server sent it ahead (precarve) and it is where we landed: the shot's
+     *  precarve came a round trip after the click, and the rocket usually takes longer than that to land. */
     predictedBoom(position, kind) {
-        let now = performance.now();
+        let now = performance.now(), me = this.main.conn.id;
         this.predictedBooms = this.predictedBooms.filter(b => now - b.at < PREDICTED_BOOM_MS);
         this.predictedBooms.push({ position, at: now });
         this.boomFx(position, WEAPONS[kind].radius, kind);
+        for(let [id, pc] of this.precarves) if(!pc.applied && pc.by === me && pc.position.distanceTo(position) < 2) { this.applyPrecarve(id, true); break; }
+    }
+
+    /** A rocket's crater, sent ahead as it was fired (Game.precarve: its chunks came as `ahead` frames, held by the
+     *  terrain), or its cancellation: the rocket landed elsewhere, and if we showed it early the chunks go back to what
+     *  the server says they hold. */
+    onPrecarve(d) {
+        let now = performance.now(), T = this.main.terrain;
+        for(let [id, pc] of this.precarves) if(now - pc.at > PRECARVE_MS) this.precarves.delete(id);
+        if(d.cancel) {
+            let pc = this.precarves.get(d.id);
+            this.precarves.delete(d.id);
+            if(pc?.applied) { for(let key in pc.chunks) T.early.delete(key); T.applyUpdate(d); }
+            return;
+        }
+        let pc = { by: d.by, position: new THREE.Vector3(d.position.x, d.position.y, d.position.z), chunks: d.chunks, at: now, applied: false };
+        this.precarves.set(d.id, pc);
+        // our own rocket may have landed on our side already (a short shot)
+        if(d.by === this.main.conn.id && this.predictedBooms.some(b => now - b.at < PREDICTED_BOOM_MS && b.position.distanceTo(pc.position) < 2)) this.applyPrecarve(d.id, true);
+    }
+
+    /** Show a precarve's crater (when its explosion comes, or our own predicted rocket lands: `early`), if we hold any of
+     *  its chunks: a player far off is not told to hold them, and their held frames wait for an update that names them. */
+    applyPrecarve(id, early = false) {
+        let pc = this.precarves.get(id), T = this.main.terrain;
+        if(!pc || pc.applied) return;
+        let keys = Object.keys(pc.chunks);
+        if(!keys.some(k => T.versions.has(k) || T.rockMask.has(k))) return;
+        let applied = 0;
+        for(let key of keys) if(T.applyAhead(key, pc.chunks[key], early)) applied++;
+        pc.applied = applied > 0;
     }
 
     /** What a rocket flying from `from` along the unit `dir` hits within `length`, as near as this side can tell the

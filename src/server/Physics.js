@@ -33,6 +33,7 @@ export class Physics {
         this.filterData = null;
         /** @type {Record<number, any>} chunk index -> static actor */
         this.chunkActors = {};
+        this.terrainActors = new Set(); // the chunk colliders' actor pointers (raycast's terrainOnly)
         this.tick = 0;
         this.lastTime = Date.now();
         this.wasmMemory = null;
@@ -84,15 +85,18 @@ export class Physics {
 
     // ---- queries and impulses (Fort War) ----------------------------------
 
-    /** Closest blocking hit along a ray against everything in the scene (terrain, bodies, player capsules), or null. */
-    /** Nearest hit along the ray, or null; `ignorePtr` skips one actor (a shooter's own capsule). */
-    raycast(origin, dir, maxDist, ignorePtr = 0) {
+    /** Nearest hit along the ray against everything in the scene (terrain, bodies, player capsules), or null;
+     *  `ignorePtr` skips one actor (a shooter's own capsule), `terrainOnly` everything but the chunk colliders. */
+    raycast(origin, dir, maxDist, ignorePtr = 0, terrainOnly = false) {
         this.rayOrigin.set_x(origin.x); this.rayOrigin.set_y(origin.y); this.rayOrigin.set_z(origin.z);
         this.rayDir.set_x(dir.x); this.rayDir.set_y(dir.y); this.rayDir.set_z(dir.z);
         let r = this.rayResult;
         if(!this.scene.raycast(this.rayOrigin, this.rayDir, maxDist, r, this.rayFlags, this.rayFilter)) return null;
         let best = null, bestD = Infinity, n = r.getNbAnyHits();
-        for(let i = 0; i < n; i++) { let h = r.getAnyHit(i), d = h.get_distance(); if(d < bestD && !(ignorePtr && h.get_actor().ptr === ignorePtr)) { bestD = d; best = h; } }
+        for(let i = 0; i < n; i++) {
+            let h = r.getAnyHit(i), d = h.get_distance(), ptr = h.get_actor().ptr;
+            if(d < bestD && !(ignorePtr && ptr === ignorePtr) && !(terrainOnly && !this.terrainActors.has(ptr))) { bestD = d; best = h; }
+        }
         if(!best) return null;
         let p = best.get_position(), nm = best.get_normal();
         return { distance: bestD, position: { x: p.get_x(), y: p.get_y(), z: p.get_z() }, normal: { x: nm.get_x(), y: nm.get_y(), z: nm.get_z() }, actorPtr: best.get_actor().ptr };
@@ -279,6 +283,7 @@ export class Physics {
         actor.attachShape(this._shape(new this.px.PxBoxGeometry(half, half, half)));
         this.scene.addActor(actor);
         this.chunkActors[index] = actor;
+        this.terrainActors.add(actor.ptr);
     }
 
     /** Static triangle-mesh collider for a CSG-modified chunk (world-space indexed mesh), or none if `mesh` is null.
@@ -303,6 +308,7 @@ export class Physics {
         actor.attachShape(this._shape(new px.PxTriangleMeshGeometry(triMesh)));
         this.scene.addActor(actor);
         this.chunkActors[index] = actor;
+        this.terrainActors.add(actor.ptr);
     }
 
     /** Colliders also go away when a region has nothing awake in it; that must not wake what rests on them
@@ -310,6 +316,7 @@ export class Physics {
     _removeChunkActor(index) {
         if(this.chunkActors[index]) {
             this.scene.removeActor(this.chunkActors[index], false);
+            this.terrainActors.delete(this.chunkActors[index].ptr);
             delete this.chunkActors[index];
         }
     }

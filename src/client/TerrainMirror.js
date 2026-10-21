@@ -34,6 +34,8 @@ const GATHER_MS = 250;                 // a batch waits this long after a chunk 
 const FORCE_MS = 10000;                // a batch that keeps changing is rebuilt anyway this long after it first did
 const REBUILD_TRIS_PER_FRAME = 65536;  // rebuild work per update (at least one batch)
 const DEFER_MS = 250;                  // longest a chunk keeps its previous drawing while its refined mesh is on its way
+const AHEAD_MS = 10000;                // a frame sent ahead of time (stash) is kept this long at most
+const EARLY_MS = 2000;                 // a chunk applied before the server made it (applyAhead's `early`) is kept this long without its word
 const BATCH_ATTRIBUTES = [['position', 3], ['color', 3], ['uv', 2], ['slot', 1], ['tile', 1], ['normal', 3], ['rec', 1]];
 
 function regionOf(key, R = REGION) {
@@ -160,6 +162,8 @@ export class TerrainMirror {
         this.versions = new Map();  // key -> version of each held modified chunk
         this.meshes = new Map();    // key -> decoded {positions, indices, materials}
         this.pending = new Map();   // key -> version being fetched
+        this.ahead = new Map();     // "key@version" -> a chunk frame sent ahead of time (a rocket's crater, Game.precarve), until applied
+        this.early = new Map();     // key -> { version, base, at }: applied before the server made it (our own rocket's crater)
         this.boxes = new Map();     // key -> Box3 (cached)
         this.fetchChunk = null;     // async (key, version) => Uint8Array|null, set by Main
         this.onChunkChanged = null; // (key, box|null) => void, after a chunk's content changed (not mere visibility); box bounds what changed
@@ -243,6 +247,34 @@ export class TerrainMirror {
         return true;
     }
 
+    /** Hold a frame sent ahead of time (FRAME_AHEAD) for applyAhead, or for an update that names its version. */
+    stash(frame) {
+        let now = performance.now();
+        for(let [id, f] of this.ahead) if(now - f.at > AHEAD_MS) this.ahead.delete(id);
+        this.ahead.set(frame.key + '@' + frame.version, { ...frame, at: now });
+    }
+
+    /** Apply a held frame (stash) of this version if it fits what we hold; true if we hold that version now. `early`:
+     *  before the server has made it (our own rocket, landed on our side a round trip before the server's), so
+     *  applyUpdate keeps showing it until the server's update names it, or a cancellation (GameClient) undoes it. */
+    applyAhead(key, version, early = false) {
+        let id = key + '@' + version, f = this.ahead.get(id);
+        if(this.versions.get(key) === version) { this.ahead.delete(id); return true; }
+        if(!f) return false;
+        let base = this.versions.get(key);
+        if(!(f.delta ? this.applyDelta(key, version, f.baseVersion, f.bytes) : (this.setChunk(key, f.bytes, version), true))) return false;
+        this.ahead.delete(id);
+        if(early) this.early.set(key, { version, base, at: performance.now() });
+        return true;
+    }
+
+    /** A chunk applied early that the server has not confirmed yet (within EARLY_MS). */
+    earlyHeld(key) {
+        let e = this.early.get(key);
+        if(e && performance.now() - e.at > EARLY_MS) { this.early.delete(key); return null; }
+        return e || null;
+    }
+
     setChunkMesh(key, mesh, version) {
         this.pending.delete(key);
         let prev = this.meshes.get(key);
@@ -278,7 +310,7 @@ export class TerrainMirror {
         if(data.world) this.configure(data.world);
         let chunks = data.chunks || {}, rock = data.rock || {}, cull = data.cull || {};
         if(full) {
-            for(let key of [...this.versions.keys(), ...this.pending.keys()]) if(chunks[key] === undefined) this.unload(key);
+            for(let key of [...this.versions.keys(), ...this.pending.keys()]) if(chunks[key] === undefined && !this.earlyHeld(key)) this.unload(key);
             for(let key of [...this.rockMask.keys()]) if(rock[key] === undefined) { this.rockMask.delete(key); this.rebuild(key); }
         }
         for(let key in cull) {
@@ -287,15 +319,22 @@ export class TerrainMirror {
             if(this.meshes.has(key)) this.rebuild(key);
         }
         for(let key in rock) {
-            if((this.rockMask.get(key) || 0) === rock[key]) continue;
+            if((this.rockMask.get(key) || 0) === rock[key] || this.earlyHeld(key)) continue; // (an implicit chunk our rocket carved early)
             if(rock[key]) this.rockMask.set(key, rock[key]); else this.rockMask.delete(key);
             this.rebuild(key);
         }
         for(let key in chunks) {
-            let version = chunks[key];
+            let version = chunks[key], e = this.earlyHeld(key);
+            if(e) {
+                // what we show early stays until the server names it (or something else entirely: another carve won)
+                if(version === e.version) this.early.delete(key);
+                else if(version === e.base || version === null) continue;
+                else this.early.delete(key);
+            }
             if(version === null) { if(this.versions.has(key) || this.pending.has(key)) this.unload(key); continue; }
             if(this.versions.get(key) === version || this.pending.get(key) === version) continue;
             if(version === EMPTY_VERSION) { this.setChunk(key, null, version); continue; }
+            if(this.applyAhead(key, version)) continue; // sent ahead (a rocket's crater): no fetch
             this.pending.set(key, version);
             Promise.resolve(this.fetchChunk?.(key, version)).then(async bytes => {
                 if(this.pending.get(key) !== version) return; // superseded or unloaded
