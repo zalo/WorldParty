@@ -81,16 +81,21 @@ export class GrenadeTool extends Weapon {
     onUnequip(main) { this.charging = null; }
 }
 
-/** Drill: hold to carve from where you stand to ahead of you (Game.dig). Point it down to burrow. */
+/** Drill: hold to carve from where you stand to ahead of you (Game.dig). Point it down to burrow. With no cooldown,
+ *  one dig is in flight at a time: the next goes when the server says the last is carved (`dug`, or after a second if
+ *  that got lost), so a held drill digs as fast as the server carves instead of queueing a dig per frame. */
 export class DrillTool extends Weapon {
     constructor() {
         super('drill');
         this.mobileActions = [{ label: 'Dig', icon: '⛏️', action: 'primary' }];
+        this.sentAt = 0;   // performance.now() of the dig in flight, 0 if none
     }
     onPrimaryFire(main) { this.dig(main); }
+    onDug() { this.sentAt = 0; }
     dig(main) {
-        if(!this.canFire(main)) return;
+        if(!this.canFire(main) || (this.sentAt && performance.now() - this.sentAt < 1000)) return;
         this.spend();
+        this.sentAt = performance.now();
         let { origin, dir } = aim(main);
         main.conn.send(JSON.stringify({ type: 'dig', origin, dir }));
         main.game.sfx.drill();

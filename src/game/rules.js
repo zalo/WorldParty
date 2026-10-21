@@ -16,17 +16,19 @@ export const PLAYER_KILL_Y = -70;     // fell out of the world
 
 /** Weapons. Radii and speeds in metres; damage at the centre of a blast falls off linearly to zero at 1.6 radii.
  *  `key` is the tool's number in a match (GameClient's tool list); the grenade, the buster and the grapple's slot
- *  are not handed out (the grapple is the right mouse button). */
+ *  are not handed out (the grapple is the right mouse button). No cooldowns on the fortwar-singleplayer branch (on
+ *  fortwar: rocket 1100 ms, grenade 900, buster 2000, drill 420, mason 300): a rocket per click, and a held drill digs
+ *  again as soon as the server has carved its last bite (DrillTool, the server's `dug`). */
 export const WEAPONS = {
-    rocket:  { name: 'Rocket Launcher', icon: '🚀', key: '1', cooldownMs: 1100, speed: 46, gravity: 10, radius: 2.4, damage: 70, direct: 40, knock: 18, lifeMs: 6000 },
-    grenade: { name: 'Grenade',         icon: '💣', key: null, cooldownMs: 900,  minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
-    buster:  { name: 'Bunker Buster',   icon: '☢️', key: null, cooldownMs: 2000, speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
+    rocket:  { name: 'Rocket Launcher', icon: '🚀', key: '1', cooldownMs: 0,    speed: 46, gravity: 10, radius: 2.4, damage: 70, direct: 40, knock: 18, lifeMs: 6000 },
+    grenade: { name: 'Grenade',         icon: '💣', key: null, cooldownMs: 0,    minSpeed: 9, maxSpeed: 27, chargeMs: 1300, fuseMs: 2600, radius: 3.2, damage: 85, knock: 22 },
+    buster:  { name: 'Bunker Buster',   icon: '☢️', key: null, cooldownMs: 0,    speed: 11, fuseMs: 4200, radius: 5.6, damage: 150, knock: 30, perLife: 1 },
     // the hull of two spheres: one around the player resting at the feet (`drop` below the eye), one `reach` ahead of it
     // along the view; big enough to walk through, and a tunnel dug walking forward has a smooth floor
-    drill:   { name: 'Drill',           icon: '⛏️', key: '2', cooldownMs: 420,  radius: 1.6, reach: 1.3, drop: 0.4 },
+    drill:   { name: 'Drill',           icon: '⛏️', key: '2', cooldownMs: 0,    radius: 1.6, reach: 1.3, drop: 0.4 },
     // the mason draws a box between two corners (masonBox below) and pays its volume in stone, m³: a dig yields
     // `digYield` of what it removed, and a trickle (1 every `regenMs` while below the budget) prevents a dead end
-    mason:   { name: 'Mason',           icon: '🧱', key: '3', cooldownMs: 300,  budget: 40, regenMs: 4000, digYield: 0.25, maxDistance: 9, maxSize: 12 },
+    mason:   { name: 'Mason',           icon: '🧱', key: '3', cooldownMs: 0,    budget: 40, regenMs: 4000, digYield: 0.25, maxDistance: 9, maxSize: 12 },
     grapple: { name: 'Grapple',         icon: '🪝', key: 'right click', range: 48, pull: 190, maxSpeed: 30 }, // pull must beat PLAYER_GRAVITY (8 g) with room to spare
     physgun: { name: 'PhysGun',         icon: '🔫', key: '4', range: 20 },
 };

@@ -158,6 +158,7 @@ export class GameClient {
                 this.sfx.respawn();
                 return true;
             }
+            case 'dug': for(let t of this.tools) t.onDug?.(); return true;
             case 'hit':
                 if(data.impulse) main.player.knock(data.impulse);
                 main.player.shake = Math.max(main.player.shake, Math.min(0.6, data.damage / 60));

@@ -145,7 +145,7 @@ export class Game {
         if(!p) return false;
         switch(data.type) {
             case 'fire':    this.fire(id, p, data, now); return true;
-            case 'dig':     await this.dig(id, p, data, now); return true;
+            case 'dig':     try { await this.dig(id, p, data, now); } finally { this.server.send(id, { type: 'dug' }); } return true; // (a held drill digs again once this bite is carved)
             case 'build':   await this.build(id, p, data, now); return true;
             case 'respawn': if(p.dead && now >= p.respawnAt) this.respawn(id); return true;
             case 'jointeam': this.switchTeam(id, p, String(data.team || ''), now); return true;

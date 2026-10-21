@@ -10,6 +10,7 @@ import { PlayerController } from './PlayerController.js';
 import { Brush } from 'three-bvh-csg';
 import { computeBoundsTree, disposeBoundsTree, computeBatchedBoundsTree, disposeBatchedBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import PartySocket from "partysocket";
+import { LocalSocket } from "./solo/LocalSocket.js";
 import { discordMode, connectDiscord } from './client/Discord.js';
 
 import { World as EcsWorld } from './ecs/World.js';
@@ -52,6 +53,9 @@ export default class Main {
         let proxied = /^https?:$/.test(window.location.protocol);
         this.basePath = proxied ? window.location.pathname.replace(/\/[^/]*$/, '') : '';
         this.serverHost = proxied ? window.location.host : PARTYKIT_HOST;
+        // Singleplayer (this branch's default; ?solo=0 for the room on Cloudflare): the room server runs in a worker on this
+        // machine (src/solo/), starting from the Fort War level or what ?import= names, kept in memory until the page goes
+        this.solo = this.queryParams.get('solo') !== '0';
         // As a Discord Activity (src/client/Discord.js) the room is the activity instance, so everyone who
         // launched it from the same channel plays together, and the room starts as Fort War (importFortWarIfEmpty)
         let discord = discordMode();
@@ -59,6 +63,8 @@ export default class Main {
             this.discord = await connectDiscord(discord, this.basePath);
             this.curRoom = 'discord-' + this.discord.instanceId;
             this.autoImport = './assets/worlds/fortwar.json';
+        } else if(this.solo) {
+            this.curRoom = 'solo';
         } else if(this.queryParams.has("room")){
             this.curRoom = this.queryParams.get('room') || "global";
         }else{
@@ -67,7 +73,9 @@ export default class Main {
             window.history.replaceState({}, "", `${window.location.pathname}?${this.queryParams.toString()}`);
         }
 
-        this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
+        if(this.solo) {
+            this.conn = new LocalSocket({ manifest: new URL(this.queryParams.get('import') || './assets/worlds/fortwar.json', location.href).href });
+        } else this.conn = new PartySocket({ host: this.serverHost, room: this.curRoom, prefix: (this.basePath ? this.basePath.slice(1) + '/' : '') + 'parties' });
         try { this.conn.binaryType = 'arraybuffer'; } catch(e) {}
         this.conn.addEventListener("message", this.updateFromServer.bind(this));
         let opens = 0;
@@ -80,7 +88,7 @@ export default class Main {
             this.conn.addEventListener("open", () => this.conn.send(JSON.stringify({ type: "setgravity", gravity })), { once: true });
         }
         // ?import=<manifest url> uploads a world (tools/import-world.mjs output) into the room once connected
-        if(this.queryParams.has("import")) {
+        if(this.queryParams.has("import") && !this.solo) {
             let url = this.queryParams.get("import");
             this.conn.addEventListener("open", () => this.importWorld(url).catch(e => console.error('importWorld failed: ' + e.message)), { once: true });
         }
@@ -324,6 +332,7 @@ export default class Main {
 
     /** Chunk bytes by content version over HTTP (cacheable, immutable per version). */
     async fetchChunk(key, version) {
+        if(this.solo) return this.conn.fetchChunk(key, version);
         let protocol = location.protocol === 'https:' ? 'https:' : 'http:';
         let res = await fetch(`${protocol}//${this.serverHost}${this.basePath}/parties/main/${encodeURIComponent(this.curRoom)}/chunk/${key}?v=${version}`);
         if(res.status === 204) return null;
@@ -429,6 +438,13 @@ export default class Main {
         // 0ms' this replaced was the tick's own duration, which on Cloudflare always reads 0)
         let ping = this.perf.ping !== null ? `ping ${Math.round(this.perf.ping)} ms` : 'ping …';
         let late = (this.serverGapMs || 0) > 60 ? ` · server lag ${Math.round(this.serverGapMs)} ms` : '';
+        // singleplayer: the server's clock runs during a tick here, so its tick and its last carve (boolean + encode,
+        // grounding, colliders + activity, glow rocks) are real numbers
+        if(this.solo) {
+            let c = this.conn.carve;
+            late = ` · tick ${this.serverTickMs} ms` + (c ? ` · carve ${c.boolean}+${c.settle}+${c.colliders}+${c.glow} ms` : '') + late;
+            ping = 'solo · ' + ping;
+        }
         if(this.serverTickDisplay.textContent !== ping + late) this.serverTickDisplay.textContent = ping + late;
         this.frameNum++;
     }
