@@ -104,7 +104,11 @@ export function buildTerrainGeometry(positions, indices, materials, uvs, table, 
         let layer = layers.has(id) ? layers.get(id) : -1;
         // a textured face carries its colour only as a tint; flat faces carry it as the colour itself
         color.setHex(layer >= 0 && !m.tint ? 0xffffff : m.color);
-        let tiling = layer >= 0 && m.scale ? 1 / m.scale : 0;
+        // triplanar at the material's scale, unless the face carries UVs: rubble baked into the terrain keeps the
+        // projection it was drawn with as a body (Terrain.posedFragment); every other face of such a material has none
+        let a = indices[t * 3] * 2, b = indices[t * 3 + 1] * 2, c = indices[t * 3 + 2] * 2;
+        let ownUv = uvs && (uvs[a] || uvs[a + 1] || uvs[b] || uvs[b + 1] || uvs[c] || uvs[c + 1]);
+        let tiling = layer >= 0 && m.scale && !ownUv ? 1 / m.scale : 0;
         for(let k = 0; k < 3; k++) {
             let v = indices[t * 3 + k], o = t * 9 + k * 3, i = t * 3 + k;
             pos[o] = positions[v * 3]; pos[o + 1] = positions[v * 3 + 1]; pos[o + 2] = positions[v * 3 + 2];
@@ -266,6 +270,13 @@ export class TerrainMirror {
         this.ahead.delete(id);
         if(early) this.early.set(key, { version, base, at: performance.now() });
         return true;
+    }
+
+    /** Is this version of the chunk what is drawn (or what will be drawn from this frame on)? */
+    shows(key, version) {
+        if(this.versions.get(key) !== version) return false;
+        let until = this.waiting.get(key);
+        return until === undefined || until <= performance.now();
     }
 
     /** A chunk applied early that the server has not confirmed yet (within EARLY_MS). */

@@ -17,8 +17,9 @@
  *  Records. A vertex's light lives in a record keyed by its position and normal (on a 0.1 mm / 0.001 grid), shared by
  *  every render vertex at that point with that normal, in every chunk: seams between materials and between chunks are
  *  continuous, and when a carve replaces a chunk, the vertices of the surfaces it did not touch find their records with
- *  every sample they had. A record's sum and count live on the GPU; the CPU mirrors the count it scheduled (for
- *  priorities), and reads the sums back now and then to decide adaptive splits. A new record is initialised on the GPU
+ *  every sample they had. A record's sum and count live on the GPU; the CPU mirrors the rays it scheduled (for
+ *  priorities), and reads the sums back now and then to decide adaptive splits. Records keep being sampled after
+ *  they converge (`schedule`), so the exponential average past `maxSamples` forgets how they started. A new record is initialised on the GPU
  *  (`ops`) with the light of the surface a carve destroyed where it was dug, or light carried along the surface from the
  *  lit records around it (`GICore.seed`), else dark (in a carve) or empty (the shader shows the probe grid's light until
  *  it has samples). */
@@ -30,6 +31,7 @@ export const GI_DEFAULTS = {
     stages: [64, 192],     // samples per record at which a chunk is checked for adaptive splits
     maxSamples: 256,       // the running mean becomes an exponential average past this (the light changes with the terrain)
     nearDistance: 25,      // chunks within this of the camera aim for maxSamples; further ones for fewer
+    refresh: 1,            // share of the frame's rays that keeps sampling chunks at their target (see `schedule`)
     weightAt: 12,          // samples at which a vertex's light fully replaces the probe grid's (the shader)
     capacity: 1 << 18,     // records the GPU buffers hold
     knockTo: 12,           // samples a record near a carve keeps (the light there just changed; no fewer than weightAt, or the
@@ -195,11 +197,13 @@ export class Records {
     }
     sweep() { for(let id of this.fresh) if(this.refs[id] === 0 && this.keyOf[id] !== undefined) this.drop(id); this.fresh = []; }
     /** Set a record's light to the weighted sum of up to four records' means (`src`, `wts` in [0, 4)) at `w` samples'
-     *  worth; `full` for a new record (see OP_INIT). */
+     *  worth; `full` for a new record (see OP_INIT). That weight is for the display (the shader's `weightAt`), not
+     *  samples: the scheduler counts only rays (`cnt` 0), or a chunk far from the camera, whose target can be below
+     *  it, kept its seeds as its light and never traced a ray. */
     set(id, w, src, wts, full) {
         let q = (i) => i < wts.length ? Math.max(0, Math.min(65535, Math.round(wts[i] * WEIGHT_ONE))) : 0, s = (i) => i < src.length ? src[i] : NO_RECORD;
         this.ops.push(((full ? OP_INIT : OP_SEED) | (w << 8)) >>> 0, id, s(0), s(1), s(2), s(3), (q(0) | (q(1) << 16)) >>> 0, (q(2) | (q(3) << 16)) >>> 0);
-        this.cnt[id] = w;
+        this.cnt[id] = 0;
     }
     /** Keep at most `n` samples' worth (the mean stays, its weight drops). */
     knock(id, n) { if(this.cnt[id] <= n) return; this.cnt[id] = n; this.ops.push(OP_KNOCK, id, n, 0, 0, 0, 0, 0); }
@@ -537,7 +541,7 @@ export class GICore {
     setChunk(key, version, coarse, carved = null) {
         let old = this.chunks.get(key);
         let [cx, cy, cz] = key.split(',').map(Number);
-        let ch = { key, version, min: [cx * CHUNK, cy * CHUNK, cz * CHUNK], coarse, stage: 0, cursor: 0, minSamples: 0, ready: false };
+        let ch = { key, version, min: [cx * CHUNK, cy * CHUNK, cz * CHUNK], coarse, stage: 0, cursor: 0, minSamples: 0, ready: false, swept: 0 };
         if(carved && old) this.noteCarve(carved);
         this.refine(ch);
         this.chunks.set(key, ch);
@@ -710,7 +714,15 @@ export class GICore {
     }
 
     /** Fill `jobs` (record ids, one sample each) up to its length from the chunks furthest below their targets, among the
-     *  chunks the GPU BVH already has (`ready`). Returns the number of jobs and the chunks that reached an adaptive stage. */
+     *  chunks the GPU BVH already has (`ready`); then, with up to `refresh` of the jobs, keep sampling the chunks at
+     *  their targets, the one longest since its last pass first (sooner the nearer it is to the camera: its target's
+     *  share of maxSamples). Past maxSamples a record's light is an exponential average, so a record that keeps being
+     *  sampled forgets how it started. Sampling used to stop for good at the target, and a record's light was then the
+     *  plain mean of the samples it took while converging, each of which read the light of the surfaces it hit as it
+     *  was at that moment: a neighbour's seed, a stand-in for one not sampled yet, a chunk not yet in the BVH seen
+     *  through as sky. Whatever it was got kept for good, neighbours that had read it kept it too, and a region came
+     *  out lit or dark by the order it arrived in. Returns the number of jobs and the chunks that reached an adaptive
+     *  stage. */
     schedule(jobs, cam) {
         let R = this.records, cap = this.p.maxSamples, stamp = ++this.frame, n = 0, staged = [];
         if(this.ghosts.length) this.expire(performance.now());
@@ -738,6 +750,27 @@ export class GICore {
                 if(ch.stage < st.length && m >= st[ch.stage]) { ch.stage++; staged.push(ch); }
             }
             if(n >= jobs.length) break;
+        }
+        let limit = Math.min(jobs.length, n + Math.round(jobs.length * this.p.refresh));
+        if(n < limit) {
+            let due = [];
+            for(let ch of this.chunks.values()) {
+                if(!ch.ready || !ch.recs.length) continue;
+                let t = this.target(ch, cam);
+                if(ch.minSamples >= t) due.push([(stamp - ch.swept) * t / cap, ch]);
+            }
+            due.sort((a, b) => b[0] - a[0]);
+            for(let [, ch] of due) {
+                let recs = ch.recs;
+                while(n < limit && ch.cursor < recs.length) {
+                    let r = recs[ch.cursor++];
+                    if(R.stamp[r] === stamp) continue;
+                    R.stamp[r] = stamp; jobs[n++] = r;
+                    if(R.cnt[r] < cap) R.cnt[r]++;
+                }
+                if(ch.cursor >= recs.length) { ch.cursor = 0; ch.swept = stamp; }
+                if(n >= limit) break;
+            }
         }
         return { count: n, staged };
     }

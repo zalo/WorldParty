@@ -1,9 +1,10 @@
 /** The terrain material shared by chunks and fragments: per-face vertex colour, and for textured materials a
  *  layer of the world's texture array sampled either by the mesh UVs (imported worlds) or triplanar from a
  *  position (`tile` attribute > 0: tiles per metre), with the vertex colour as a tint. Chunks sample by world
- *  position; fragments by local position so the texture rides along with the piece. */
+ *  position; fragments by their local position plus where they broke off (the `tpos` attribute: systems.js
+ *  makeFragmentMesh), so the texture rides along with the piece and matched the terrain when it came loose. */
 import * as THREE from 'three/webgpu';
-import { attribute, texture, uv, select, vertexColor, positionWorld, positionLocal, normalWorld, normalLocal, float, vec3 } from 'three/tsl';
+import { attribute, texture, uv, select, vertexColor, positionWorld, normalWorld, normalLocal, float, vec3 } from 'three/tsl';
 
 /** The terrain material: a standard material that adds the vertex GI (TerrainGI) as indirect diffuse light when it has
  *  one (`giNode`: per vertex mean irradiance and a weight, interpolated; `giScale`, the same multiplier the probe grid
@@ -23,7 +24,7 @@ export class TerrainNodeMaterial extends THREE.MeshStandardNodeMaterial {
 }
 
 /** @param {THREE.DataArrayTexture} arrayTexture the world's texture layers (TerrainTextures)
- *  @param {'world'|'local'} space which position (and normal) the triplanar projection uses */
+ *  @param {'world'|'local'} space which position (and normal) the triplanar projection uses: world, or a fragment's own frame */
 export function makeTerrainMaterial(arrayTexture, space = 'world', debug = false) {
     // normals come from the geometry (per face, blended across smooth materials: buildTerrainGeometry), not from derivatives
     let material = debug >= 6 ? new THREE.MeshBasicNodeMaterial() : new TerrainNodeMaterial({ roughness: 0.75, metalness: 0.05 }); // 6: unlit (7, 8: TerrainGI's light and weight)
@@ -37,7 +38,7 @@ export function makeTerrainMaterial(arrayTexture, space = 'world', debug = false
     const slot = attribute('slot', 'float');
     const tile = attribute('tile', 'float');
     const layer = slot.add(0.5).toInt(); // round: the interpolated float lands a hair under the integer on some pixels, which truncation turned into the previous layer
-    const p = (space === 'world' ? positionWorld : positionLocal).mul(tile);
+    const p = (space === 'world' ? positionWorld : attribute('tpos', 'vec3')).mul(tile);
     const n = (space === 'world' ? normalWorld : normalLocal).abs().pow(4.0);
     const w = n.div(n.x.add(n.y).add(n.z).max(1e-5));
     const sx = texture(arrayTexture, p.zy).depth(layer);

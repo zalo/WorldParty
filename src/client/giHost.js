@@ -39,6 +39,7 @@ export class GIHost {
         this.proxies = new Map();    // chunk key -> Mesh of its coarse geometry (with `surface`) for the packed BVH
         this.packer = new BVHComputeData([], { attributes: { position: 'vec4f', surface: 'vec4f' } });
         this.packDirty = false; this.packAt = 0;
+        this.knockAwait = [];        // boxes of changes whose records are knocked once the packed BVH has them (changed)
         this.unpacked = new Set();   // chunks whose current geometry the packed BVH does not have yet
         this.box = new Box3(); this.p = new Vector3(); this.hit = {};
     }
@@ -134,10 +135,12 @@ export class GIHost {
         this.send(msg, [msg.positions.buffer, msg.normals.buffer, msg.uvs.buffer, msg.cls.buffer, msg.recOf.buffer, msg.index.buffer, msg.coarseRec.buffer]);
     }
 
-    /** A carve changed a region: records around it re-converge, crystals whose light reaches it are placed again once
-     *  the packed BVH has the new terrain. */
+    /** A chunk changed or arrived (`box`: what changed): records around it re-converge and crystals whose light reaches
+     *  it are placed again, both once the packed BVH has the new terrain (`ready`). Knocked at once, the records took
+     *  their new samples against the old BVH (it is repacked at most once a second, and a few thousand knocked records
+     *  reach their target sooner): around an arriving chunk they saw sky through the place it was not yet, and kept it. */
     changed(box) {
-        this.core.knockAround(box);
+        this.knockAwait.push(box);
         let cx = (box.min.x + box.max.x) / 2, cy = (box.min.y + box.max.y) / 2, cz = (box.min.z + box.max.z) / 2;
         let half = Math.hypot(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) / 2;
         for(let slot of this.crystalsNear(cx, cy, cz, this.reach + half)) this.glowAwaitBvh.add(slot);
@@ -146,6 +149,8 @@ export class GIHost {
     /** The packed BVH now has these chunks: they may be sampled, and crystals waiting for it are placed and baked again. */
     ready(keys) {
         for(let key of keys) { let ch = this.core.chunks.get(key); if(ch) ch.ready = true; }
+        for(let box of this.knockAwait) this.core.knockAround(box);
+        this.knockAwait = [];
         for(let slot of this.glowAwaitBvh) { let c = this.slots[slot]; if(!c) continue; this.unlinkCrystal(slot); this.placeCrystal(c); this.linkCrystal(slot); }
         this.glowAwaitBvh.clear();
     }

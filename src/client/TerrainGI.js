@@ -22,7 +22,7 @@
  *  ProbeLighting.js). Nothing is uploaded per frame but the jobs (4 bytes each), the new records' positions and the ops.
  *
  *  `?vgi=0` disables it (the probe grid lights the terrain as before); `?girays=<n>` sets the jobs per frame (32768,
- *  4096 on mobile); `?tridebug=7` shows the gathered light unlit, `?tridebug=8` the weight. */
+ *  4096 on mobile); `?girefresh=<0..1>` the share of them that keeps sampling converged chunks (1, 0.5 on mobile); `?tridebug=7` shows the gathered light unlit, `?tridebug=8` the weight. */
 import * as THREE from 'three/webgpu';
 import { Fn, If, instanceIndex, storage, uniform, attribute, varying, vec3, vec4, float, uint, min, max, select } from 'three/tsl';
 import { BVHComputeData, rayStruct, rayIntersectionResultStruct, bvhNodeStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
@@ -34,11 +34,12 @@ import { CHUNK_SIZE, isRockKey } from '../terrain/grid.js';
 export class TerrainGI {
     static supported(renderer) { return !!(renderer.backend && renderer.backend.isWebGPUBackend); }
 
-    constructor(renderer, scene, terrain, materials, { mobile = false, jobs, layersOf = null } = {}) {
+    constructor(renderer, scene, terrain, materials, { mobile = false, jobs, refresh, layersOf = null } = {}) {
         this.renderer = renderer; this.scene = scene; this.terrain = terrain; this.materials = materials;
         this.layersOf = layersOf;                     // () => average linear colour per texture layer, or null
         // a phone gets half the records and a coarser base mesh (Twin Forts: ~97k records at 2 m, of 131k)
-        let params = mobile ? { capacity: 1 << 17, maxEdge: 3 } : { capacity: 1 << 18 }, C = params.capacity;
+        let params = mobile ? { capacity: 1 << 17, maxEdge: 3, refresh: 0.5 } : { capacity: 1 << 18 }, C = params.capacity;
+        if(Number.isFinite(refresh)) params.refresh = Math.max(0, Math.min(1, refresh));
         this.p = { ...GI_DEFAULTS, ...params };
         this.maxJobs = jobs || (mobile ? 4096 : 32768);
         this.maxOps = 16384;

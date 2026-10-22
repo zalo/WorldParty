@@ -8,8 +8,11 @@
  *   RigidBody    { shape:'box'|'sphere'|'capsule'|'hulls'|'trimesh', halfExtent,
  *                  propId, kinematic, frozen, sleeping }
  *   Prop         { propId, url }               visual: GLTF loaded by url
- *   FragmentMesh { data, mats, hulls }         visual: gzip+base64 tri soup (body-local) + material id per triangle;
- *                                             collider: hulls = encodeHulls() convex pieces (null on legacy fragments: SDF trimesh)
+ *   FragmentMesh { data, mats, hulls, rebake, origin } visual: gzip+base64 tri soup (body-local) + material id per triangle;
+ *                                             collider: hulls = encodeHulls() convex pieces (null on legacy fragments: SDF trimesh);
+ *                                             rebake false: in Fort War it fades instead of going back into the terrain asleep;
+ *                                             origin [x, y, z]: where it broke off (its texture is triplanar at local + origin, so it
+ *                                             matched the terrain then; null on older fragments: local position alone)
  *   Joint        { type:'rope'|'weld'|'hinge', bodyA, bodyB, localOffsetA, localOffsetB, axis }
  *   Grabbed      { by }                       physgun hold (target pose is transient: $GrabTarget)
  *   Player       { name, color, team, health, dead, carrying, kills, deaths, score, respawnAt, build, buster }
@@ -25,6 +28,7 @@
  *                                             ground while exposure < 1; free ones carry a sphere RigidBody and roll
  *
  * Transient (server):  $PxBody {actor}  $PxJoint {joint}  $Grab {anchor, joint}  $GrabTarget {pos, quat}  $PxKinematic {actor, prev}
+ *                      $Thrown {v, w, until} (a blast's shard: initial velocity, harmless until)  $Fade {since}  $Baking  $NoBake
  * Transient (client):  $Mesh {object}   $Snapshot {prev, target}  $Label {el}  $Line {line}
  */
 
@@ -36,7 +40,7 @@ export const RigidBody = ({ shape = 'box', halfExtent = 0.5, propId = null, kine
 
 export const Prop = ({ propId, url = null }) => ({ propId, url });
 
-export const FragmentMesh = ({ data, mats = null, hulls = null }) => ({ data, mats, hulls });
+export const FragmentMesh = ({ data, mats = null, hulls = null, rebake = true, origin = null }) => ({ data, mats, hulls, rebake, origin });
 
 export const Joint = ({ type, bodyA, bodyB, localOffsetA = { x: 0, y: 0, z: 0 }, localOffsetB = { x: 0, y: 0, z: 0 }, axis = null }) =>
     ({ type, bodyA, bodyB, localOffsetA, localOffsetB, axis });

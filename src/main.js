@@ -281,9 +281,9 @@ export default class Main {
         this.giDecided = true; // (GameClient waits for this to know where the glow rocks' light goes)
         let r = this.world.renderer;
         if(this.gi || !TerrainGI.supported(r) || this.queryParams.get('vgi') === '0') return;
-        let jobs = parseInt(this.queryParams.get('girays') || '0') || undefined;
+        let jobs = parseInt(this.queryParams.get('girays') || '0') || undefined, refresh = this.queryParams.has('girefresh') ? parseFloat(this.queryParams.get('girefresh')) : undefined;
         try {
-            this.gi = new TerrainGI(r, this.world.scene, this.terrain, [this.defaultMaterial, this.fragmentMaterial], { mobile: this.isMobile(), jobs, layersOf: () => this.textures.averages });
+            this.gi = new TerrainGI(r, this.world.scene, this.terrain, [this.defaultMaterial, this.fragmentMaterial], { mobile: this.isMobile(), jobs, refresh, layersOf: () => this.textures.averages });
             this.chunkListeners.push((key, region) => this.gi.changed(region));
         } catch(e) { console.warn('vertex GI unavailable: ' + e.message); this.gi = null; }
     }

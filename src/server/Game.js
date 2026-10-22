@@ -10,7 +10,7 @@
  *  Player movement stays client-authoritative; the server tells a client about knockback and teleports and trusts it. */
 import { Transform, RigidBody, Prop, Projectile, Fuse, Supply, Match } from '../ecs/components.js';
 import { WEAPONS, SUPPLY, RUBBLE, TEAMS, MAX_HEALTH, RESPAWN_MS, REGEN_DELAY_MS, REGEN_PER_S, MATCH_OVER_MS, PLAYER_KILL_Y, VOTE,
-         SELF_DAMAGE_SCALE, FRAGMENT_FADE_MS, MAX_FRAGMENTS, AWARDS, UNITS, inBox, otherTeam, masonBox } from '../game/rules.js';
+         SELF_DAMAGE_SCALE, REBAKE_MS, REBAKE_NEAR, FRAGMENT_FADE_MS, MAX_FRAGMENTS, AWARDS, UNITS, inBox, otherTeam, masonBox } from '../game/rules.js';
 import { getPropDef } from '../props/PropRegistry.js';
 import { chunksInBox } from '../terrain/grid.js';
 import { GlowRocks } from './GlowRocks.js';
@@ -698,7 +698,7 @@ export class Game {
         let players = [...w.each('Player', 'Transform')].filter(([, p]) => p.team && !p.dead);
         if(!players.length) return;
         for(let [bid, pb, tf, rb] of w.each('$PxBody', 'Transform', 'RigidBody')) {
-            if(rb.sleeping || rb.frozen || w.has(bid, 'Fuse')) continue;
+            if(rb.sleeping || rb.frozen || w.has(bid, 'Fuse') || w.get(bid, '$Thrown')?.until > now) continue; // (a blast's own shards: it hurt everyone already)
             let v = pb.actor.getLinearVelocity();
             let speed = Math.hypot(v.get_x(), v.get_y(), v.get_z());
             if(speed < RUBBLE.minSpeed) continue;
@@ -717,15 +717,22 @@ export class Game {
         if(this.rubbleHits.size > 500) for(let [k, t] of this.rubbleHits) if(now - t > 5000) this.rubbleHits.delete(k);
     }
 
-    /** Sleeping rubble fades after a while, and sooner when there is a lot of it. */
+    /** Sleeping rubble: terrain rubble that has lain still for REBAKE_MS goes back into the terrain (server.rebake), where
+     *  it can be dug like the rest. A pile goes together: a piece waits while rubble within REBAKE_NEAR still moves (a
+     *  bake wakes the bodies in the chunks it changes, so pieces baked one by one kept waking the rest), up to four
+     *  times as long. Rubble that cannot (shed again right after a rebake: it rests on a crate or a player, not on
+     *  terrain) fades after a while, and sooner when there is a lot of it. */
     fadeSystem(now) {
         let w = this.world;
-        let sleeping = [];
-        for(let [id, rb] of w.each('FragmentMesh', 'RigidBody')) {
-            if(!rb.sleeping || w.has(id, 'Grabbed')) { w.remove(id, '$Fade'); continue; }
-            let f = w.get(id, '$Fade') || w.add(id, '$Fade', { since: now });
-            if(now - f.since > FRAGMENT_FADE_MS) w.destroy(id); else sleeping.push([id, f.since]);
+        let sleeping = [], bake = [], moving = [];
+        for(let [id, f, rb, tf] of w.each('FragmentMesh', 'RigidBody', 'Transform')) {
+            if(!rb.sleeping || w.has(id, 'Grabbed')) { w.remove(id, '$Fade'); moving.push(tf.position); continue; }
+            let s = w.get(id, '$Fade') || w.add(id, '$Fade', { since: now });
+            if(f.rebake !== false && !w.has(id, '$NoBake')) { if(now - s.since >= REBAKE_MS && !w.has(id, '$Baking')) bake.push([id, now - s.since, tf.position]); continue; }
+            if(now - s.since > FRAGMENT_FADE_MS) w.destroy(id); else sleeping.push([id, s.since]);
         }
+        bake = bake.filter(([, asleep, p]) => asleep >= REBAKE_MS * 4 || !moving.some(q => dist(p, q) < REBAKE_NEAR)).map(b => b[0]);
+        if(bake.length) this.server.rebake(bake).catch(e => console.error('rebake failed: ' + e.message));
         let excess = w.query('FragmentMesh').size - MAX_FRAGMENTS;
         if(excess > 0) { sleeping.sort((a, b) => a[1] - b[1]); for(let [id] of sleeping.slice(0, excess)) w.destroy(id); }
     }

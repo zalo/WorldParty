@@ -15,6 +15,7 @@ import { RESPAWN_MS, SUPPLY, UNITS, VOTE, WEAPONS } from '../game/rules.js';
 const _ray = new THREE.Ray(), _inv = new THREE.Matrix4(), _min = new THREE.Vector3(), _max = new THREE.Vector3();
 const PREDICTED_BOOM_MS = 2000; // how long a predicted explosion waits for the server's to be matched (and not shown again)
 const PRECARVE_MS = 10000;      // a rocket's crater sent ahead (Game.precarve) is forgotten this long after it came
+const REBAKE_HOLD_MS = 1000;    // longest a rubble body baked into the terrain stays drawn, waiting for its chunks to show it
 
 export class GameClient {
     constructor(main, config) {
@@ -49,6 +50,7 @@ export class GameClient {
         this.raycaster = new THREE.Raycaster();
         this.predictedBooms = []; // { position, at }: explosions shown at a predicted impact, for the server's to match
         this.precarves = new Map(); // rocket id -> { by, position, chunks: {key: version}, at, applied }: craters sent ahead
+        this.baking = [];           // { object, chunks: {key: version}, until }: rubble baked into the terrain, drawn until its chunks show it
         this.rockets = new ProjectileRenderSystem(main.world.scene, {
             localId: () => main.conn.id,
             hitTest: (from, dir, length) => this.rocketHit(from, dir, length),
@@ -175,6 +177,7 @@ export class GameClient {
                 return true;
             }
             case 'precarve': this.onPrecarve(data); return true;
+            case 'rebake': this.onRebake(data); return true;
             case 'explosion': {
                 if(data.pre) this.applyPrecarve(data.pre); // its crater came ahead
                 let p = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
@@ -210,6 +213,20 @@ export class GameClient {
                 return true;
         }
         return false;
+    }
+
+    /** Rubble went back into the terrain (server.rebake): its bodies go with the next update, but the chunks that hold
+     *  it now show it only once their new drawing is in (the GI worker's refined mesh, up to a quarter second later, or a
+     *  fetch), so each body's mesh stays drawn until then; the entity keeps a stand-in for its removal to dispose. */
+    onRebake(d) {
+        if(!Array.isArray(d.ids)) return;
+        let ecs = this.main.ecs, until = performance.now() + REBAKE_HOLD_MS;
+        for(let id of d.ids) {
+            let m = ecs.get(id, '$Mesh');
+            if(!m) continue;
+            this.baking.push({ object: m.object, chunks: d.chunks || {}, until });
+            m.object = new THREE.Object3D();
+        }
     }
 
     /** Flash, debris, sound, shake and the music's lean for an explosion at `p`. */
@@ -324,6 +341,12 @@ export class GameClient {
         let main = this.main, me = this.me;
         this.fx.update(dt);
         this.sparks.update(dt);
+        if(this.baking.length) this.baking = this.baking.filter(b => {
+            if(performance.now() < b.until && !Object.entries(b.chunks).every(([key, v]) => main.terrain.shows(key, v))) return true;
+            b.object.removeFromParent();
+            b.object.traverse(o => { if(o.geometry && !o.userData.sharedGeometry) o.geometry.dispose(); });
+            return false;
+        });
         if(!this.glowBound && main.giDecided) this.bindGlow();
         this.glow?.update(main.world.camera);
         if(me) {

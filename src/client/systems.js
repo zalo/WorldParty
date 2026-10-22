@@ -117,7 +117,9 @@ export class BodyRenderSystem {
         mesh.userData.collisionBVH = sphere ? this.bvhCache.sphere : this.bvhCache.box;
         return mesh;
     }
-    /** A fragment renders with the terrain material (same textures, triplanar in its own local space). */
+    /** A fragment renders with the terrain material (same textures, triplanar in its own frame, so the texture rides
+     *  along), at its local position plus where it broke off (`origin`, attribute `tpos`): at that moment it matches
+     *  the terrain it came out of. */
     makeFragmentMesh(fragment, rb) {
         let positions = decodeSoup(fragment.data);
         let indices = new Uint32Array(positions.length / 3);
@@ -125,6 +127,9 @@ export class BodyRenderSystem {
         let mats = fragment.mats ? Uint8Array.from(fragment.mats) : null;
         let table = this.tableFn ? this.tableFn() : [], layers = this.layersFn ? this.layersFn() : new Map();
         let geometry = buildTerrainGeometry(positions, indices, mats, null, table, layers);
+        let o = Array.isArray(fragment.origin) ? fragment.origin : [0, 0, 0], P = geometry.attributes.position.array, tpos = new Float32Array(P.length);
+        for(let i = 0; i < P.length; i++) tpos[i] = P[i] + (+o[i % 3] || 0);
+        geometry.setAttribute('tpos', new THREE.BufferAttribute(tpos, 3));
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
         geometry.computeBoundsTree();

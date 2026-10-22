@@ -339,7 +339,7 @@ export class Physics {
     /** Create PhysX actors for RigidBody entities that don't have one yet. */
     bodySystem(world) {
         for(let [id, rb, tf] of world.each('RigidBody', 'Transform')) {
-            if(world.has(id, '$PxBody')) continue;
+            if(world.has(id, '$PxBody') || world.get(id, '$Thrown')?.hold) continue; // (a shard waits for its crater's colliders: server.releaseThrown)
             let body = this.physics.createRigidDynamic(this._pose(tf.position, tf.quaternion));
             let fragment = world.get(id, 'FragmentMesh');
             if(!this._attachShapes(body, rb, fragment)) {
@@ -354,6 +354,8 @@ export class Physics {
             if(fragment) body.setSleepThreshold(fragmentSleepThreshold(-this.scene.getGravity().get_y()));
             if(rb.frozen || rb.kinematic) body.setRigidBodyFlag(this.px.PxRigidBodyFlagEnum.eKINEMATIC, true);
             this.scene.addActor(body);
+            let thrown = world.get(id, '$Thrown'); // rock a blast broke loose (server.throwShards) leaves at speed
+            if(thrown?.v && !rb.frozen && !rb.kinematic) { this.setVelocity(body, thrown.v, thrown.w); thrown.v = null; }
             world.add(id, '$PxBody', { actor: body });
         }
     }

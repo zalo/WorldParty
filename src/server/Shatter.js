@@ -101,7 +101,8 @@ function clip(faces, n, d, gen) {
  *  lies against an outside seed (or the cube). Faces two inside cells share are left out, which is the union without
  *  a boolean (a Manifold union of the cells' hulls took 7 ms). A vertex of the diagram is named by the four seeds (or
  *  cube planes) it is equidistant to, the same from every cell around it, so neighbouring faces share vertices
- *  exactly. Returns { positions, indices } or null. */
+ *  exactly. Returns { positions, indices, cells } or null; `cells` are the inside cells as their corner points
+ *  ([x, y, z] each, convex), the pieces the blast breaks the rock into (Terrain.blastShards). */
 export function shatterMesh(center, reachAt, rng = Math.random) {
     let c = [center.x, center.y, center.z];
     let seeds = [], inside = 0, maxReach = 0;
@@ -112,7 +113,7 @@ export function shatterMesh(center, reachAt, rng = Math.random) {
     for(let d of directions(N_IN, rng)) { seeds.push(at(jitter(d, 0.25, rng), 0.35 + rng() * 0.3)); inside++; }
     for(let d of directions(N_OUT, rng)) seeds.push(at(jitter(d, 0.2, rng), 1.22 + rng() * 0.45));
     let half = maxReach * 1.3;
-    let positions = [], indices = [], ids = new Map();
+    let positions = [], indices = [], ids = new Map(), cells = [];
     let vertex = (i, v) => {
         let k = [i, ...v.planes].sort((a, b) => a - b).join(',');
         let id = ids.get(k);
@@ -132,6 +133,7 @@ export function shatterMesh(center, reachAt, rng = Math.random) {
             if(!faces) break;
         }
         if(!faces) continue;
+        cells.push([...new Set(faces.flatMap(f => f.p))].map(v => v.x));
         for(let f of faces) {
             if(f.gen >= 0 && f.gen < inside) continue; // shared with another inside cell: not on the surface
             let loop = f.p.map(v => vertex(i, v));
@@ -139,5 +141,5 @@ export function shatterMesh(center, reachAt, rng = Math.random) {
         }
     }
     if(!indices.length) return null;
-    return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
+    return { positions: new Float32Array(positions), indices: new Uint32Array(indices), cells };
 }

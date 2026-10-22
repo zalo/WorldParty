@@ -26,6 +26,11 @@ const STORAGE_PART = 100 * 1024;    // chunk bytes above this are split across c
 const COOKS_NOW = 3;                // mesh colliders cooked immediately when activity changes (nearest first) ...
 const COOKS_PER_TICK = 2;           // ... and per tick for the rest
 const SPECULATION_TRIS = 60_000;    // triangles of speculated craters (speculateBlast) held at once, outside the resident budget
+/** How a blast throws the rock it breaks (throwShards): m/s for a 2.4 m blast (a rocket's; more for bigger ones; under
+ *  the bodies' 30 m/s² it takes 9.5 m/s to climb out of a 1.5 m crater, and 6-12 left most of them in it), how much
+ *  of the way out it adds to the line from the centre, spin in rad/s, and how long a shard hurts no one. */
+const SHARD_THROW = { speed: [10, 17], lift: 1.2, spin: 8, safeMs: 1500 };
+const REBAKE_GROW = 0.025;          // m a body grows by when it is baked back into the terrain (rebake)
 
 // Brushes the server carves with itself (the drill, the mason; explosions build their own, carveBlast): unit shapes, scaled per use
 /** The drill's brush: the convex hull of two unit spheres (320-face icospheres, so its tunnels read as round) whose
@@ -48,6 +53,7 @@ const PERF_KEEP = 300;              // client perf reports kept for GET .../perf
 const PERF_FIELDS = { fps: 'n', frameMax: 'n', hitches: 'n', ping: 'n', pingMax: 'n', reconnects: 'n', spikes: 'n', spikeMax: 'n', holds: 'n', holdMs: 'n', deltaMiss: 'n', teleports: 'n', locks: 'n', raw: 'b', backend: 's', gpu: 's', client: 's', size: 's', dpr: 'n', mobile: 'b', discord: 'b' };
 const PLAYER_COLORS = ["#FF0000", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FF8000", "#FF0080", "#8000FF", "#0080FF", "#80FF00", "#00FF80", "#FF8080", "#8080FF", "#FF80FF", "#80FFFF", "#FFFF80"];
 
+const overlaps = (box, p, r) => p.x + r > box.min.x && p.x - r < box.max.x && p.y + r > box.min.y && p.y - r < box.max.y && p.z + r > box.min.z && p.z - r < box.max.z;
 const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v)) ? v : d;
 const vec3 = (v, d = { x: 0, y: 0, z: 0 }) => v ? { x: num(v.x, d.x), y: num(v.y, d.y), z: num(v.z, d.z) } : { ...d };
 const quat = (q) => q ? { x: num(q.x), y: num(q.y), z: num(q.z), w: num(q.w, 1) } : { x: 0, y: 0, z: 0, w: 1 };
@@ -75,7 +81,8 @@ export class WorldParty extends Server {
     this.connectivity.onSummary = key => this.persistSummaries.add(key);
     this.settleTimer = null;        // pending settleNow() after carves
     this.carveBoxes = [];           // bounds of the brushes run since the last settleNow (the glow rocks they can uncover)
-    this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
+    this.rebakeBoxes = [];          // bounds of the bodies baked into the terrain since the last settleNow (rebake)
+    this.csgStats = { ops: 0, booleanMs: 0, shardMs: 0, deltaBytes: 0, fullBytes: 0 };
     this.speculatedTris = 0;        // held by speculations not yet made or dropped (SPECULATION_TRIS)
     this.persistChunkDeletes = new Set();
     this.chunkParts = new Map();    // key -> number of chunkpart values currently stored
@@ -252,7 +259,12 @@ export class WorldParty extends Server {
           for(let t of temps) t.delete();
           let comps = this.terrain.fragmentComponents(merged);
           merged.delete();
-          if(comps) { this.world.create(comps); made++; }
+          if(comps) {
+            // rubble baked back into the terrain that came loose again at once rested on a body, not on terrain: it
+            // would be baked and shed over and over, so it stays a body (and fades)
+            if(this.rebakeBoxes.some(b => overlaps(b, comps.Transform.position, comps.RigidBody.halfExtent))) comps.FragmentMesh.rebake = false;
+            this.world.create(comps); made++;
+          }
         }
         for(let key of keys) { let n = usesLeft.get(key) - 1; usesLeft.set(key, n); if(n === 0) release(key); }
       }
@@ -433,6 +445,7 @@ export class WorldParty extends Server {
     }
 
     this.pumpCooks(COOKS_PER_TICK);
+    this.releaseThrown();
     this.anyAwake = this.physics.update(this.world, TICK_MS / 1000);
     this.game.update(TICK_MS / 1000, start);
     this.tickCount++;
@@ -514,14 +527,60 @@ export class WorldParty extends Server {
   /** Server-side carves: `by` is the player responsible (Fort War credits them with the crystals it frees).
    *  A blast of radius `radius`: a crater of flat broken facets (Shatter.js) rather than a sphere, reaching less far
    *  into hard material, its faces taking the material of what they cut (`fallback` where nothing says). The crater
-   *  stays within 1.3 radii of the centre (the cells' bounding cube). */
+   *  stays within 1.3 radii of the centre (the cells' bounding cube). What it breaks out is thrown as rubble
+   *  (Terrain.blastShards, throwShards). */
   carveBlast(center, radius, fallback = 1, by = null) {
     let R = radius * 1.3, min = { x: center.x - R, y: center.y - R, z: center.z - R }, max = { x: center.x + R, y: center.y + R, z: center.z + R };
-    let keys = chunksInBox(this.terrain.world, min, max);
+    let keys = chunksInBox(this.terrain.world, min, max), shards = null;
     return this.carveWith(keys, () => {
-      let probe = this.terrain.solidProbe(keys, min, max);
-      return this.terrain.blastBrush(center, radius, probe, fallback);
-    }, { min, max }, by);
+      let T = this.terrain, probe = T.solidProbe(keys, min, max), cells = [];
+      let brush = T.blastBrush(center, radius, probe, fallback, cells);
+      if(brush) shards = this.blastShards(keys, cells, center, R, probe, fallback);
+      return brush;
+    }, { min, max }, by).then(() => this.throwShards(shards, center, radius));
+  }
+  /** Terrain.blastShards, and a blast that cannot work out its shards still carves. */
+  blastShards(keys, cells, center, reach, probe, fallback) {
+    let t0 = Date.now();
+    try { return this.terrain.blastShards(keys, cells, center, reach, probe, fallback); }
+    catch(e) { console.warn('shards failed: ' + e.message); return null; }
+    finally { this.csgStats.shardMs += Date.now() - t0; }
+  }
+  /** Throw the pieces a blast broke loose out of its crater: along the line from the blast's centre plus `lift` times
+   *  the side it vents to (a crater in the ground throws up and out; a piece under the centre goes straight up rather
+   *  than into the floor; a buried blast throws them inward, into the hollow it made), spinning, faster for a bigger
+   *  blast. The blast has hurt everyone near already, so a shard hurts no one on its way out ($Thrown.until;
+   *  Game.rubbleSystem). Physics.bodySystem gives the new bodies `v` and `w`. */
+  throwShards(shards, center, radius) {
+    if(!shards || !shards.pieces.length) return;
+    let now = Date.now(), k = Math.min(1.6, Math.sqrt(radius / 2.4)), o = shards.open;
+    let unit = (v) => { let l = Math.hypot(v.x, v.y, v.z) || 1; return { x: v.x / l, y: v.y / l, z: v.z / l }; };
+    for(let comps of shards.pieces) {
+      let p = comps.Transform.position;
+      let d = unit({ x: p.x - center.x, y: p.y - center.y, z: p.z - center.z });
+      let dir = o ? unit({ x: d.x + o.x * SHARD_THROW.lift, y: d.y + o.y * SHARD_THROW.lift, z: d.z + o.z * SHARD_THROW.lift })
+        : unit({ x: -d.x + Math.random() - 0.5, y: -d.y + Math.random() - 0.5, z: -d.z + Math.random() - 0.5 });
+      let speed = (SHARD_THROW.speed[0] + Math.random() * (SHARD_THROW.speed[1] - SHARD_THROW.speed[0])) * k;
+      let spin = unit({ x: Math.random() - 0.5, y: Math.random() - 0.5, z: Math.random() - 0.5 }), w = Math.random() * SHARD_THROW.spin;
+      this.world.create({ ...comps, $Thrown: { v: { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed }, w: { x: spin.x * w, y: spin.y * w, z: spin.z * w }, until: now + SHARD_THROW.safeMs, hold: true } });
+    }
+  }
+  /** A blast's shards get their bodies (Physics.bodySystem skips them while `hold`) once the carve has settled and the
+   *  colliders of the chunks they reach are the crater's: the cook queue does a few chunks a tick, and a shard created
+   *  against the old ground starts inside it and never leaves. */
+  releaseThrown() {
+    if(this.settleTimer) return; // the crater is not settled yet
+    for(let [, t, tf, rb] of this.world.each('$Thrown', 'Transform', 'RigidBody')) {
+      if(!t.hold) continue;
+      t.hold = false;
+      let p = tf.position, r = rb.halfExtent + 0.5;
+      for(let key of chunksInBox(this.terrain.world, { x: p.x - r, y: p.y - r, z: p.z - r }, { x: p.x + r, y: p.y + r, z: p.z + r })) {
+        if(!this.cookQueue.has(key)) continue;
+        let v = this.cookQueue.get(key);
+        this.cookQueue.delete(key);
+        if(this.colliderState.get(key) === 'mesh:' + v) this.physics.setChunkCollider(key, this.terrain.chunkMesh(key));
+      }
+    }
   }
   /** The blast carveBlast would make, worked out now but not made (a rocket's crater, when it is fired: Game.precarve).
    *  Resolves to { results, frames, box, center } or null: `frames` are its chunks as `ahead` frames (a delta against the
@@ -532,11 +591,12 @@ export class WorldParty extends Server {
     let R = radius * 1.3, min = { x: center.x - R, y: center.y - R, z: center.z - R }, max = { x: center.x + R, y: center.y + R, z: center.z + R };
     let keys = chunksInBox(this.terrain.world, min, max), T = this.terrain;
     await T.prepare(keys);
-    let t0 = Date.now(), brush = null, results;
-    try { brush = T.blastBrush(center, radius, T.solidProbe(keys, min, max), fallback); } catch(e) { console.warn('brush failed: ' + e.message); }
+    let t0 = Date.now(), brush = null, results, probe = null, cells = [];
+    try { probe = T.solidProbe(keys, min, max); brush = T.blastBrush(center, radius, probe, fallback, cells); } catch(e) { console.warn('brush failed: ' + e.message); }
     if(!brush) return null;
+    let shards = this.blastShards(keys, cells, center, R, probe, fallback); // (plain data: nothing to free if it is dropped)
     try { results = T.speculate(keys, brush); } finally { brush.delete(); }
-    let frames = [], spec = { results, frames, box: { min, max }, center, tris: 0 };
+    let frames = [], spec = { results, frames, box: { min, max }, center, radius, shards, tris: 0 };
     for(let key in results) {
       let r = results[key], frame = null;
       spec.tris += r.tris;
@@ -559,6 +619,8 @@ export class WorldParty extends Server {
     this.speculatedTris -= spec.tris;
     spec.results = {}; spec.tris = 0; // the terrain owns the manifolds now
     this.afterCsg(spec.box, by);
+    this.throwShards(spec.shards, spec.center, spec.radius);
+    spec.shards = null;
     return true;
   }
   dropSpeculation(spec) {
@@ -602,6 +664,47 @@ export class WorldParty extends Server {
     try { this.terrain.applyBrush(keys, brush, SUBTRACTION); } finally { brush.delete(); }
     this.csgStats.booleanMs += Date.now() - t0;
     this.afterCsg(box, by);
+  }
+  /** Sleeping terrain rubble back into the terrain (Fort War's Game.fadeSystem asks): each body's mesh where it lies,
+   *  grown by REBAKE_GROW so it overlaps what it rests on (Terrain.posedFragment), all of them in one union added to
+   *  the chunks they reach; the bodies go, and it can be dug like the rest. Clients are told the chunk versions that
+   *  replace them (`rebake`), so they keep drawing a body until its chunks show it. Rubble the next settle sheds again
+   *  rested on something that is not terrain (a crate, a player) and stays a body (rebakeBoxes). */
+  async rebake(ids) {
+    let w = this.world, T = this.terrain, M = T.manifold.Manifold;
+    if(this.importing) return;
+    let keys = new Set();
+    for(let id of ids) {
+      let p = w.get(id, 'Transform').position, r = (w.get(id, 'RigidBody').halfExtent || 0.5) * 1.8 + REBAKE_GROW * 2;
+      for(let k of chunksInBox(T.world, { x: p.x - r, y: p.y - r, z: p.z - r }, { x: p.x + r, y: p.y + r, z: p.z + r })) keys.add(k);
+      w.add(id, '$Baking', {});
+    }
+    try { await T.prepare([...keys]); }
+    finally { for(let id of ids) if(w.has(id)) w.remove(id, '$Baking'); }
+    let t0 = Date.now(), pieces = [], done = [], min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
+    for(let id of ids) {
+      if(!w.has(id, 'FragmentMesh')) continue; // gone meanwhile
+      let rb = w.get(id, 'RigidBody');
+      if(!rb.sleeping || rb.frozen || w.has(id, 'Grabbed')) continue; // woken meanwhile: it comes round again
+      let m = T.posedFragment(w.get(id, 'FragmentMesh'), w.get(id, 'Transform'), REBAKE_GROW);
+      if(!m) { w.add(id, '$NoBake', {}); continue; } // not a closed solid: it fades instead
+      let b = m.boundingBox();
+      min = { x: Math.min(min.x, b.min[0]), y: Math.min(min.y, b.min[1]), z: Math.min(min.z, b.min[2]) };
+      max = { x: Math.max(max.x, b.max[0]), y: Math.max(max.y, b.max[1]), z: Math.max(max.z, b.max[2]) };
+      pieces.push(m); done.push(id);
+    }
+    if(!pieces.length || this.importing) { for(let m of pieces) m.delete(); return; }
+    let brush = pieces.length === 1 ? pieces[0] : M.union(pieces);
+    if(pieces.length > 1) for(let m of pieces) m.delete();
+    let changed = chunksInBox(T.world, min, max);
+    try { T.applyBrush(changed, brush, ADDITION); } finally { brush.delete(); }
+    this.csgStats.booleanMs += Date.now() - t0;
+    for(let id of done) w.destroy(id);
+    let box = { min, max }, chunks = {};
+    for(let key of changed) if(T.dirty.has(key)) chunks[key] = T.chunks[key]?.version ?? null;
+    this.rebakeBoxes.push(box);
+    this.afterCsg(box, null);
+    this.broadcast(JSON.stringify({ type: 'rebake', ids: done, chunks }));
   }
   carveBox(center, quaternion, size, material = 1) { return this.boxCsg(center, quaternion, size, material, SUBTRACTION); }
   addBox(center, quaternion, size, material = 0) { return this.boxCsg(center, quaternion, size, material, ADDITION); }
@@ -706,6 +809,7 @@ export class WorldParty extends Server {
     let carved = new Set(this.terrain.dirty);
     let t0 = Date.now();
     let fragments = this.settleTerrain();
+    this.rebakeBoxes = [];
     let settleMs = Date.now() - t0;
     t0 = Date.now();
     this.refreshActivity(true);
@@ -716,8 +820,8 @@ export class WorldParty extends Server {
     let rocks = this.game.onTerrainChanged(boxes, carved, Object.keys(changed)); // before dropPrev: it compares against the replaced content
     this.terrain.dropPrev(Object.keys(changed));
     this.terrain.compress(Object.keys(changed)).catch(e => console.error('compress failed: ' + e.message)); // native gzip, after the frames are out
-    let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, deltaBytes: 0, fullBytes: 0 };
-    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms, settle ${settleMs}ms, colliders+activity ${activityMs}ms${rocks ? `; glow rocks: ${rocks.made} new, ${rocks.freed} freed, ${rocks.updated} updated, ${rocks.sky} under the sky (${rocks.measured} measured, ${rocks.rays} rays, ${rocks.bvhBuilds} BVHs) ${rocks.ms}ms` : ''}`);
+    let st = this.csgStats; this.csgStats = { ops: 0, booleanMs: 0, shardMs: 0, deltaBytes: 0, fullBytes: 0 };
+    console.log(`csg: ${st.ops} op(s), ${Object.keys(changed).length} chunk(s) changed, ${fragments} fragment(s), ${Object.keys(this.physics.chunkActors).length} chunk colliders; pushed ${(st.deltaBytes / 1024).toFixed(0)} KB as deltas + ${(st.fullBytes / 1024).toFixed(0)} KB full; boolean+encode ${st.booleanMs}ms${st.shardMs ? ` (shards ${st.shardMs}ms)` : ''}, settle ${settleMs}ms, colliders+activity ${activityMs}ms${rocks ? `; glow rocks: ${rocks.made} new, ${rocks.freed} freed, ${rocks.updated} updated, ${rocks.sky} under the sky (${rocks.measured} measured, ${rocks.rays} rays, ${rocks.bvhBuilds} BVHs) ${rocks.ms}ms` : ''}`);
   }
 
   /** A client's perf report (src/client/PerfReport.js, every 20 s): logged, and the last PERF_KEEP kept in storage for

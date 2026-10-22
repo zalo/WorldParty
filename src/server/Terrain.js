@@ -28,6 +28,7 @@ import { encodeSoup, encodeHulls } from '../net/codec.js';
 import { DEFAULT_MATERIAL, MAX_MATERIALS, MAX_HARDNESS, clampMaterial, materialTable } from '../terrain/materials.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import { shatterMesh } from './Shatter.js';
+import { decomposeParts } from './Connectivity.js';
 
 import { CHUNK_SIZE, DEFAULT_WORLD, chunkCenter, chunkMin, chunkAt, isRockKey, isValidKey, inBounds, coords, rockChunks, sanitizeWorld } from '../terrain/grid.js';
 export { CHUNK_SIZE, chunkCenter };
@@ -66,6 +67,13 @@ export const COLD_RESIDENT_TRIS = 50_000;
 const HULL_CELL = 1.5;             // fragments are split into cells about this big, one convex hull each ...
 const MAX_FRAGMENT_HULLS = 24;     // ... up to this many (cells grow for bigger fragments)
 const HULL_MIN_VOLUME = 1e-3;      // slivers of a cell too small to matter get no hull
+/** Tiles added to the UVs of rubble baked into the terrain (posedFragment), so they are never zero: zero UVs on a
+ *  triplanar material mean "none" (buildTerrainGeometry). A whole number of tiles shows the same texture. */
+export const UV_BASE = 256;
+const SHARD_SCALE = 0.65;          // a blast's shards are the cores of its cells, this much of their size (blastShards) ...
+const SHARD_MIN_VOLUME = 0.02;     // ... pieces smaller than this (a 27 cm cube) are dust ...
+const SHARD_MAX = 12;              // ... and only the largest this many are thrown ...
+const SHARD_SIMPLIFY = 0.02;       // ... their surfaces simplified to this (m): ground dug and baked over and over is dense
 
 export class Terrain {
     constructor() {
@@ -425,15 +433,73 @@ export class Terrain {
 
     /** A blast's brush (world space, tagged): the crater of Shatter.js, its reach along each direction shortened by
      *  the hardness of what it hits (a blast that meets solid at t after reaching R gets t + (R - t) / hardness
-     *  along that line). Null if the diagram came out empty or not closed (never seen in 2000 tries). */
-    blastBrush(center, R, probe, fallback) {
+     *  along that line). Null if the diagram came out empty or not closed (never seen in 2000 tries). The diagram's
+     *  inside cells are pushed onto `cells` if given (blastShards). */
+    blastBrush(center, R, probe, fallback, cells = null) {
         let o = [center.x, center.y, center.z];
         let reachAt = (d) => { let hit = probe.ray(o, d, R); return hit ? hit.t + (R - hit.t) / hit.hardness : R; };
         let mesh = shatterMesh(center, reachAt);
         if(!mesh) return null;
+        if(cells) cells.push(...mesh.cells);
         let brush = new this.manifold.Manifold(new this.manifold.Mesh({ numProp: 3, vertProperties: mesh.positions, triVerts: mesh.indices }));
         if(brush.isEmpty()) { brush.delete(); return null; }
         return this.tagBrush(brush, center, probe, fallback);
+    }
+
+    /** The rock a blast breaks loose, as fragments to throw: the cores of its crater's inside cells (Shatter.js), each
+     *  cell scaled about its middle to SHARD_SCALE (the rest is dust: thrown whole, the crater's volume came back down
+     *  as a ring of boulders as big as a player, and the shards start apart from each other and from the crater's
+     *  wall), cut against the solid as it is before the carve (one boolean per chunk against all the cells at once;
+     *  pieces of one cell in neighbouring chunks are joined) and split into connected pieces. The faces cut through the
+     *  rock take the material the crater's do (tagBrush), so a piece of a wall is the wall's broken stone inside and
+     *  its blocks outside. Returns { pieces, open }: fragment components (fragmentComponents, one convex hull each) of
+     *  the largest pieces, at most SHARD_MAX, none under SHARD_MIN_VOLUME; `open` the side the blast vents to, the way
+     *  the pieces should fly: from the middle of the rock it broke to its centre (unit; null when that is under a
+     *  tenth of `reach`, a blast buried in rock or in a tunnel). Rays from the centre could not tell: a blast centred on
+     *  the ground's surface met it at distance 0 along every direction. Call it before the carve. */
+    blastShards(keys, cells, center, reach, probe, fallback) {
+        let M = this.manifold.Manifold, hulls = [], open = null;
+        for(let pts of cells) {
+            if(pts.length < 4) continue;
+            let c = [0, 0, 0], s = SHARD_SCALE;
+            for(let p of pts) for(let a = 0; a < 3; a++) c[a] += p[a] / pts.length;
+            let h = M.hull(pts.map(p => [c[0] + (p[0] - c[0]) * s, c[1] + (p[1] - c[1]) * s, c[2] + (p[2] - c[2]) * s]));
+            if(h.isEmpty()) h.delete(); else hulls.push(h);
+        }
+        if(!hulls.length) return { pieces: [], open };
+        let all = M.compose(hulls);
+        for(let h of hulls) h.delete();
+        let cut = this.tagBrush(all, center, probe, fallback), parts = [];
+        try {
+            for(let key of new Set(keys.filter(k => isValidKey(k) && inBounds(this.world, ...coords(k))))) {
+                let current = this.currentManifold(key);
+                if(!current) continue;
+                let part = current.intersect(cut);
+                if(!this.chunks[key]) current.delete(); // implicit rock, materialized for this
+                if(part.isEmpty()) part.delete(); else parts.push(part);
+            }
+        } finally { cut.delete(); }
+        if(!parts.length) return { pieces: [], open };
+        let solid = parts.length === 1 ? parts[0] : M.union(parts); // (parts of one cell meet on the chunk planes)
+        if(parts.length > 1) for(let p of parts) p.delete();
+        let split = decomposeParts(solid, M).map(m => [m, m.volume()]).sort((a, b) => b[1] - a[1]);
+        solid.delete();
+        let mid = [0, 0, 0], total = 0;
+        for(let [m, v] of split) { let b = m.boundingBox(); for(let a = 0; a < 3; a++) mid[a] += (b.min[a] + b.max[a]) / 2 * v; total += v; }
+        if(total > 0) {
+            let d = { x: center.x - mid[0] / total, y: center.y - mid[1] / total, z: center.z - mid[2] / total }, l = Math.hypot(d.x, d.y, d.z);
+            if(l > reach * 0.1) open = { x: d.x / l, y: d.y / l, z: d.z / l };
+        }
+        let pieces = [];
+        for(let [m, v] of split) {
+            if(v >= SHARD_MIN_VOLUME && pieces.length < SHARD_MAX) {
+                let simple = m.simplify(SHARD_SIMPLIFY), comps = this.fragmentComponents(simple.isEmpty() ? m : simple, 1);
+                simple.delete();
+                if(comps) pieces.push(comps);
+            }
+            m.delete();
+        }
+        return { pieces, open };
     }
 
     applyToChunk(key, brush, op) {
@@ -507,8 +573,9 @@ export class Terrain {
         if(r.manifold) this._touch(key);
     }
 
-    /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. */
-    fragmentComponents(manifold) {
+    /** Components for a dynamic fragment body: Transform at the centroid, body-local mesh soup. `maxHulls` caps its
+     *  collider's convex pieces (fragmentHulls; 1: the hull of the whole, for a blast's shards, which are nearly convex). */
+    fragmentComponents(manifold, maxHulls = MAX_FRAGMENT_HULLS) {
         let mesh = manifold.getMesh();
         let v = splitProps(mesh).positions, tri = mesh.triVerts;
         let numVerts = v.length / 3, numTris = tri.length / 3;
@@ -530,11 +597,12 @@ export class Terrain {
             }
         }
         let hulls = null;
-        try { hulls = this.fragmentHulls(manifold, cx, cy, cz); } catch(e) { console.warn('fragment hulls failed: ' + e.message); }
+        try { hulls = this.fragmentHulls(manifold, cx, cy, cz, maxHulls); } catch(e) { console.warn('fragment hulls failed: ' + e.message); }
+        let origin = [cx, cy, cz].map(v => Math.round(v * 1000) / 1000); // (the soup is relative to it to the float: see FragmentMesh)
         return {
             Transform: Transform({ position: { x: cx, y: cy, z: cz } }),
             RigidBody: RigidBody({ shape: 'trimesh', halfExtent }),
-            FragmentMesh: FragmentMesh({ data: encodeSoup(soup), mats: Array.from(mats), hulls: hulls && hulls.length ? encodeHulls(hulls) : null }),
+            FragmentMesh: FragmentMesh({ data: encodeSoup(soup), mats: Array.from(mats), hulls: hulls && hulls.length ? encodeHulls(hulls) : null, origin }),
         };
     }
 
@@ -542,14 +610,14 @@ export class Terrain {
      *  (at most MAX_FRAGMENT_HULLS, so big slabs get coarser cells) and each non-empty cell contributes the hull of
      *  its part. A compound of convex shapes simulates ~20x cheaper than a dynamic SDF triangle mesh and sleeps sooner,
      *  while keeping holes and overhangs at cell resolution. Points are body-local (relative to the centroid). */
-    fragmentHulls(manifold, cx = 0, cy = 0, cz = 0) {
+    fragmentHulls(manifold, cx = 0, cy = 0, cz = 0, maxHulls = MAX_FRAGMENT_HULLS) {
         let M = this.manifold.Manifold;
         let box = manifold.boundingBox(), min = box.min, max = box.max;
         let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
         let cell = HULL_CELL, n;
         for(;;) {
             n = size.map(sz => Math.max(1, Math.ceil(sz / cell - 1e-6)));
-            if(n[0] * n[1] * n[2] <= MAX_FRAGMENT_HULLS) break;
+            if(n[0] * n[1] * n[2] <= maxHulls) break;
             cell *= 1.25;
         }
         let pointsOf = m => { // hull vertices, body-local
@@ -570,6 +638,54 @@ export class Terrain {
             piece.delete();
         }
         return hulls;
+    }
+
+    /** A fragment body's mesh where the body lies, as a world-space manifold with its materials, grown by `grow`
+     *  metres (scaled about its middle so its widest extent gains that much, and moved down as much) so it overlaps
+     *  what it rests on: a body at rest touches face to face or at a few corners, which a union would leave a
+     *  separate piece. Its faces keep the texture the body was drawn with: a body is textured triplanar in its own
+     *  frame, at its local position plus `origin` (where it broke off, so it matched the terrain then), and the chunks
+     *  triplanar in world space, so the baked rubble showed a new texture on every face. Each face of a textured
+     *  material gets UVs instead, the projection the body's triplanar weights favour on it (the axis its normal is
+     *  nearest, in the body's frame), offset by UV_BASE tiles so they are never zero: a face of a triplanar material
+     *  that carries UVs is drawn by them (buildTerrainGeometry), and carves keep them (Manifold interpolates them on
+     *  the faces it cuts; the faces a brush adds carry none). Null if its soup is not a closed solid. The caller owns
+     *  the result. */
+    posedFragment(fragment, tf, grow = 0) {
+        let soup = decodeSoup(fragment.data), n = soup.length / 3;
+        if(n < 12) return null;
+        let q = new THREE.Quaternion(tf.quaternion.x, tf.quaternion.y, tf.quaternion.z, tf.quaternion.w), v = new THREE.Vector3();
+        let p = tf.position, pos = new Float64Array(soup.length), lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for(let i = 0; i < n; i++) {
+            v.set(soup[i * 3], soup[i * 3 + 1], soup[i * 3 + 2]).applyQuaternion(q);
+            pos[i * 3] = v.x + p.x; pos[i * 3 + 1] = v.y + p.y; pos[i * 3 + 2] = v.z + p.z;
+            for(let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], pos[i * 3 + a]); hi[a] = Math.max(hi[a], pos[i * 3 + a]); }
+        }
+        let c = [0, 1, 2].map(a => (lo[a] + hi[a]) / 2), half = Math.max(...[0, 1, 2].map(a => (hi[a] - lo[a]) / 2));
+        let s = 1 + grow / Math.max(half, 0.05), out = new Float32Array(soup.length);
+        for(let i = 0; i < n; i++) for(let a = 0; a < 3; a++) out[i * 3 + a] = c[a] + (pos[i * 3 + a] - c[a]) * s - (a === 1 ? grow : 0);
+        let indices = new Uint32Array(n);
+        for(let i = 0; i < n; i++) indices[i] = i;
+        let mats = fragment.mats && fragment.mats.length === n / 3 ? Uint8Array.from(fragment.mats) : null;
+        let table = materialTable(this.world), o = fragment.origin || [0, 0, 0], uvs = new Float32Array(n * 2);
+        for(let t = 0; t < n / 3; t++) {
+            let mat = table[mats ? mats[t] : DEFAULT_MATERIAL];
+            if(!mat || !mat.texture || !mat.scale) continue; // (drawn by its own UVs, or untextured: a body has no UVs to keep)
+            let a = t * 9, ux = soup[a + 3] - soup[a], uy = soup[a + 4] - soup[a + 1], uz = soup[a + 5] - soup[a + 2];
+            let vx = soup[a + 6] - soup[a], vy = soup[a + 7] - soup[a + 1], vz = soup[a + 8] - soup[a + 2];
+            let nx = Math.abs(uy * vz - uz * vy), ny = Math.abs(uz * vx - ux * vz), nz = Math.abs(ux * vy - uy * vx);
+            // the triplanar's projections (terrainMaterial.js): along x it samples (z, y), along y (x, z), along z (x, y)
+            let [i, j] = nx >= ny && nx >= nz ? [2, 1] : ny >= nz ? [0, 2] : [0, 1];
+            for(let k = 0; k < 3; k++) {
+                let v = t * 3 + k;
+                uvs[v * 2] = (soup[v * 3 + i] + o[i]) / mat.scale + UV_BASE;
+                uvs[v * 2 + 1] = (soup[v * 3 + j] + o[j]) / mat.scale + UV_BASE;
+            }
+        }
+        let m;
+        try { m = this.meshToManifold(out, indices, mats, uvs); } catch { return null; }
+        if(m.status() !== 'NoError' || m.isEmpty()) { m.delete(); return null; }
+        return m;
     }
 
     /** Hulls for a fragment stored before hulls existed: rebuild a manifold from its body-local soup. Returns null when
